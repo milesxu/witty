@@ -59,3 +59,13 @@ Thumbs.db
 logs/
 *.log
 CLAUDE.md
+
+# Qt installation
+6.7.3/
+
+# C++ build artifacts
+build_cpp/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
