@@ -1,0 +1,18 @@
+[package]
+name = "witty-transport"
+description = "Terminal transport boundaries for PTY, SSH, and browser gateways."
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+witty-core.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+portable-pty.workspace = true

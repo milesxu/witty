@@ -1,0 +1,21 @@
+[package]
+name = "witty-core"
+description = "Terminal state, render snapshots, and core data types."
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+base64.workspace = true
+regex.workspace = true
+serde.workspace = true
+unicode-normalization.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+vte.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

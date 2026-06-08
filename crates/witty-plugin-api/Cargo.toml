@@ -1,0 +1,17 @@
+[package]
+name = "witty-plugin-api"
+description = "Plugin manifests, permissions, events, and command contracts."
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+witty-core.workspace = true
+
+[dev-dependencies]
+wit-parser.workspace = true

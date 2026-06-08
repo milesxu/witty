@@ -1,0 +1,18 @@
+[package]
+name = "witty-launcher"
+description = "Native launcher for browser Witty sessions."
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+getrandom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+witty-gateway.workspace = true
+witty-core.workspace = true
+witty-transport.workspace = true

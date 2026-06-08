@@ -1,0 +1,27 @@
+[package]
+name = "witty-web"
+description = "Browser-facing Witty entry points and mock replay smoke."
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+witty-core.workspace = true
+witty-plugin-api.workspace = true
+witty-render-wgpu.workspace = true
+witty-transport.workspace = true
+witty-ui.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+web-sys = { workspace = true, features = ["Document", "Element", "HtmlCanvasElement", "Performance", "Window"] }

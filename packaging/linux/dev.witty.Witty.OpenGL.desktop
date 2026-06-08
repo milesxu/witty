@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Witty OpenGL
+Comment=Witty terminal using the wgpu OpenGL backend
+Exec=env WGPU_BACKEND=gl witty --window
+Terminal=false
+Categories=System;TerminalEmulator;
+StartupNotify=true

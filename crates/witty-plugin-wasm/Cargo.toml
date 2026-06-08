@@ -1,0 +1,18 @@
+[package]
+name = "witty-plugin-wasm"
+description = "Wasmtime Component Model runtime adapter for Witty plugins."
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+witty-core.workspace = true
+witty-plugin-api.workspace = true
+wasmtime.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

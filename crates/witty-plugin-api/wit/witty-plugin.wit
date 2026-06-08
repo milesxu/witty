@@ -1,0 +1,154 @@
+package witty:plugin@0.1.0;
+
+interface types {
+  enum terminal-read-permission {
+    none,
+    selection-only,
+    current-screen,
+    full-scrollback,
+  }
+
+  enum terminal-write-permission {
+    deny,
+    confirm,
+    allow-session,
+  }
+
+  enum vault-permission {
+    deny,
+    request-only,
+  }
+
+  record network-allow-list {
+    hosts: list<string>,
+  }
+
+  variant network-permission {
+    deny,
+    allow-list(network-allow-list),
+  }
+
+  record plugin-permissions {
+    terminal-read: terminal-read-permission,
+    terminal-write: terminal-write-permission,
+    profile-read: bool,
+    profile-write: bool,
+    vault: vault-permission,
+    network: network-permission,
+  }
+
+  record plugin-manifest {
+    id: string,
+    name: string,
+    version: string,
+    permissions: plugin-permissions,
+  }
+
+  record command-registration {
+    id: string,
+    title: string,
+  }
+
+  record host-info {
+    app-name: string,
+    app-version: string,
+    plugin-abi-version: string,
+  }
+
+  record profile-store-summary {
+    profile-count: u32,
+    default-profile-configured: bool,
+    launchable-profiles: u32,
+    credential-resolver-required-profiles: u32,
+  }
+
+  record command-invocation {
+    command-id: string,
+    args-json: string,
+    context: command-invocation-context,
+  }
+
+  record command-invocation-context {
+    current-directory: option<current-directory>,
+    selected-command-block: option<command-block>,
+  }
+
+  record current-directory {
+    uri: string,
+    host: option<string>,
+    path: string,
+  }
+
+  record command-block {
+    id: u64,
+    command-range: command-block-text-range,
+    output-range: option<command-block-text-range>,
+    exit-code: option<s32>,
+    started-at-ms: option<u64>,
+    finished-at-ms: option<u64>,
+    duration-ms: option<u64>,
+    current-directory: option<current-directory>,
+  }
+
+  record command-block-text-range {
+    start: cell-point,
+    end-exclusive: cell-point,
+  }
+
+  record cell-point {
+    row: u16,
+    col: u16,
+  }
+
+  record cell-range {
+    start: cell-point,
+    end: cell-point,
+  }
+
+  record render-overlay {
+    range: cell-range,
+    label: string,
+  }
+
+  record profile-picker-request {
+    reason: option<string>,
+  }
+
+  record profile-launch-request {
+    profile-id: string,
+    reason: option<string>,
+  }
+
+  variant plugin-event {
+    app-started,
+    command-invoked(command-invocation),
+    terminal-output(list<u8>),
+    selection-changed(option<cell-range>),
+  }
+
+  variant plugin-action {
+    register-command(command-registration),
+    write-terminal(list<u8>),
+    show-message(string),
+    render-overlay(render-overlay),
+    request-profile-picker(profile-picker-request),
+    request-profile-launch(profile-launch-request),
+  }
+}
+
+interface host {
+  use types.{host-info, profile-store-summary};
+
+  get-host-info: func() -> host-info;
+  get-profile-store-summary: func() -> option<profile-store-summary>;
+}
+
+world terminal-plugin {
+  use types.{command-registration, plugin-action, plugin-event, plugin-manifest};
+
+  import host;
+
+  export manifest: func() -> plugin-manifest;
+  export commands: func() -> list<command-registration>;
+  export handle-event: func(event: plugin-event) -> list<plugin-action>;
+}
