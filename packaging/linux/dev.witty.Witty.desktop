@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Witty OpenGL
+Name=Witty
 GenericName=Terminal Emulator
 Comment=Witty terminal using the wgpu OpenGL backend
 Exec=env WGPU_BACKEND=gl witty --window

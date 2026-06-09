@@ -62,6 +62,49 @@ scripts/run-witty-native-opengl.sh --window-startup-report --window-exit-after-m
 That probe reports the selected backend policy before renderer initialization
 and emits first-frame font/frame metadata if the redraw succeeds.
 
+## User-Local Linux Install
+
+Install Witty for daily GNOME use under the user-local prefix `~/.local`:
+
+```text
+scripts/install-witty-local.sh --dry-run
+scripts/install-witty-local.sh
+```
+
+The installer builds `witty-app` by default, installs the binary to
+`~/.local/bin/witty`, installs hicolor icons as `dev.witty.Witty`, and writes
+`~/.local/share/applications/dev.witty.Witty.desktop`. The installed launcher
+uses `Exec=/usr/bin/env WGPU_BACKEND=gl ~/.local/bin/witty --window`,
+`Icon=dev.witty.Witty`, `Terminal=false`, and
+`StartupWMClass=dev.witty.Witty`. It also writes an install marker at
+`$XDG_STATE_HOME/witty/install-state.v1.json`, or
+`~/.local/state/witty/install-state.v1.json` when `XDG_STATE_HOME` is unset.
+Already running installed windows poll that marker and show an update notice
+with a `Restart to update` button when a newer local install is detected.
+
+The restart button writes a restart snapshot under the same Witty state
+directory and starts the newly installed binary as
+`witty --window --restore-state <snapshot>`. The snapshot stores window grid
+size, tab metadata, launch program/args/cwd, safe environment metadata, and
+profile-launched session metadata. It deliberately does not store terminal
+text or claim ordinary local PTY child process continuity; shells and programs
+are relaunched from the saved metadata. Use a terminal multiplexer or a future
+persistent Witty daemon for lossless process continuity.
+
+To validate without touching the real home directory:
+
+```text
+fake_home="$(mktemp -d)"
+HOME="$fake_home" scripts/install-witty-local.sh --dry-run
+HOME="$fake_home" scripts/install-witty-local.sh --no-build
+desktop-file-validate "$fake_home/.local/share/applications/dev.witty.Witty.desktop"
+```
+
+After a real install, launch Witty once from the desktop entry, then pin the
+running Witty window to the GNOME Shell dock. The desktop file id and native
+Linux app id/window class both use `dev.witty.Witty` so GNOME can group the
+pinned launcher with Witty windows.
+
 ## Local Shell And PTY
 
 Native `--window` starts a local shell through the PTY transport. Use
@@ -76,6 +119,8 @@ scripts/run-witty-native-opengl.sh --cwd ~/src/witty --env WITTY_SESSION=dev
 
 `Ctrl+Shift+T` opens a new local tab using the same launch defaults. Terminal
 OSC title updates replace the fallback title while the child process runs.
+Restart restore reuses these launch defaults and tab/profile metadata, but it
+does not preserve the live PTY process tree for ordinary local shells.
 
 The browser launcher can also create a token-protected local gateway:
 

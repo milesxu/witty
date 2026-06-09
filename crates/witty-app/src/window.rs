@@ -15,7 +15,7 @@ use winit::event::{
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, KeyCode, KeyLocation, ModifiersState, NamedKey, PhysicalKey};
-use winit::window::{ImePurpose, Window, WindowId};
+use winit::window::{ImePurpose, Window, WindowAttributes, WindowId};
 use witty_core::{
     encode_terminal_focus_event, encode_terminal_mouse_event, paste_payload, terminal_char_width,
     BasicTerminal, CellFlags, CellPoint, CellRange, CursorShape, CursorState, FocusEventKind,
@@ -52,7 +52,16 @@ use witty_ui::{
 };
 
 use crate::{
-    install_wasm_plugins, BuiltInCommandsPlugin, MAX_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE,
+    install_wasm_plugins,
+    update_state::{
+        default_install_state_path, default_restart_state_path, installed_update_status,
+        now_unix_ms, plan_restart_execution, read_installed_build_marker, running_build_identity,
+        spawn_restart_plan, write_restart_snapshot_atomic, InstalledBuildMarkerV1,
+        RestartExecutionPlan, RestartLaunchConfigV1, RestartProfileMetadataV1, RestartSnapshotV1,
+        RestartTabKindV1, RestartTabModeV1, RestartTabV1, RestartWindowStateV1,
+        RunningBuildIdentity,
+    },
+    BuiltInCommandsPlugin, MAX_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE,
 };
 use witty_transport::{
     default_profile_store_path, read_profile_store, LocalPtyConfig, LocalPtyTransport,
@@ -62,11 +71,15 @@ use witty_transport::{
 const DOUBLE_CLICK_MAX_INTERVAL: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK_MAX_CELL_DISTANCE: u16 = 1;
 pub(crate) const DEFAULT_WINDOW_TITLE: &str = "Witty Rust/wgpu Prototype";
+#[cfg(target_os = "linux")]
+const WITTY_LINUX_APP_ID: &str = "dev.witty.Witty";
 const SEARCH_SCROLL_BUFFER_ROWS: u16 = 1;
 const SYNCHRONIZED_OUTPUT_TIMEOUT: Duration = Duration::from_millis(150);
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const TEXT_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const NATIVE_LOCAL_SESSION_SOURCE_PLUGIN: &str = "witty-local";
+const INSTALLED_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+const RESTART_BUTTON_LABEL: &str = "Restart to update";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WindowSmokeOptions {
@@ -529,10 +542,27 @@ pub(crate) struct NativeProfileActionCurrentSession {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct NativeSessionId(u64);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NativeSessionLaunchKind {
+    Local,
+    ProfilePicker,
+    ProfileLaunch,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeSessionLaunchMetadata {
+    pub kind: NativeSessionLaunchKind,
+    pub config: LocalPtyConfig,
+    pub source_plugin: String,
+    pub profile_id: String,
+    pub reason: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NativeSessionRecord {
     pub id: NativeSessionId,
     pub profile_action: NativeProfileActionCurrentSession,
+    pub launch: Option<NativeSessionLaunchMetadata>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -572,6 +602,7 @@ impl NativeSessionRegistry {
         self.sessions.push(NativeSessionRecord {
             id,
             profile_action: session,
+            launch: None,
         });
         self.active_session_id = Some(id);
         id
@@ -585,7 +616,25 @@ impl NativeSessionRegistry {
         self.sessions.push(NativeSessionRecord {
             id,
             profile_action: session,
+            launch: None,
         });
+        id
+    }
+
+    fn insert_with_active_state(
+        &mut self,
+        session: NativeProfileActionCurrentSession,
+        active: bool,
+    ) -> NativeSessionId {
+        let id = self.allocate_session_id();
+        self.sessions.push(NativeSessionRecord {
+            id,
+            profile_action: session,
+            launch: None,
+        });
+        if active {
+            self.active_session_id = Some(id);
+        }
         id
     }
 
@@ -605,6 +654,22 @@ impl NativeSessionRegistry {
         }
 
         self.active_session_id = Some(session_id);
+        true
+    }
+
+    fn set_launch_metadata(
+        &mut self,
+        session_id: NativeSessionId,
+        launch: NativeSessionLaunchMetadata,
+    ) -> bool {
+        let Some(record) = self
+            .sessions
+            .iter_mut()
+            .find(|record| record.id == session_id)
+        else {
+            return false;
+        };
+        record.launch = Some(launch);
         true
     }
 
@@ -808,6 +873,7 @@ fn apply_native_profile_action_start_plan_with_transport<T>(
 where
     T: TerminalTransport,
 {
+    let launch = native_session_launch_metadata_for_profile_plan(&plan);
     match plan.mode {
         NativeProfileActionStartMode::ReplaceCurrentSession => {
             let max_scrollback_lines = terminal.max_scrollback_lines();
@@ -820,6 +886,7 @@ where
             let execution = NativeProfileActionStartExecution { plan };
             let session_id =
                 sessions.insert_inactive(native_profile_action_current_session(&execution));
+            sessions.set_launch_metadata(session_id, launch);
             parked_sessions.park_or_replace(
                 session_id,
                 NativeSessionRuntime {
@@ -836,7 +903,8 @@ where
         }
     }
     let execution = NativeProfileActionStartExecution { plan };
-    sessions.replace_current(native_profile_action_current_session(&execution));
+    let session_id = sessions.replace_current(native_profile_action_current_session(&execution));
+    sessions.set_launch_metadata(session_id, launch);
     execution
 }
 
@@ -1031,13 +1099,27 @@ where
     T: TerminalTransport,
     F: FnOnce(LocalPtyConfig) -> Result<T>,
 {
+    let config_for_metadata = config.clone();
+    let had_active_session = sessions.active().is_some();
     let transport = spawn_transport(config)?;
     let active_session_id = ensure_active_native_local_session(sessions);
+    if !had_active_session {
+        if let Some(active) = sessions.active().cloned() {
+            let launch = native_session_launch_metadata_for_local(
+                &config_for_metadata,
+                &active.profile_action,
+            );
+            sessions.set_launch_metadata(active.id, launch);
+        }
+    }
     let new_session = native_local_session_metadata(
         sessions.next_session_id,
         NativeProfileActionStartMode::NewTab,
     );
+    let new_session_launch =
+        native_session_launch_metadata_for_local(&config_for_metadata, &new_session);
     let new_session_id = sessions.insert_inactive(new_session);
+    sessions.set_launch_metadata(new_session_id, new_session_launch);
     parked_sessions.park_or_replace(
         new_session_id,
         NativeSessionRuntime {
@@ -1246,6 +1328,38 @@ fn native_profile_action_current_session(
     }
 }
 
+fn native_session_launch_metadata_for_profile_plan(
+    plan: &NativeProfileActionStartPlan,
+) -> NativeSessionLaunchMetadata {
+    NativeSessionLaunchMetadata {
+        kind: match plan.kind {
+            NativeResolvedProfileActionKind::ProfilePicker => {
+                NativeSessionLaunchKind::ProfilePicker
+            }
+            NativeResolvedProfileActionKind::ProfileLaunch => {
+                NativeSessionLaunchKind::ProfileLaunch
+            }
+        },
+        config: plan.config.clone(),
+        source_plugin: plan.source_plugin.clone(),
+        profile_id: plan.profile_id.clone(),
+        reason: plan.reason.clone(),
+    }
+}
+
+fn native_session_launch_metadata_for_local(
+    config: &LocalPtyConfig,
+    session: &NativeProfileActionCurrentSession,
+) -> NativeSessionLaunchMetadata {
+    NativeSessionLaunchMetadata {
+        kind: NativeSessionLaunchKind::Local,
+        config: config.clone(),
+        source_plugin: session.source_plugin.clone(),
+        profile_id: session.profile_id.clone(),
+        reason: session.reason.clone(),
+    }
+}
+
 fn native_session_tab_row(
     record: &NativeSessionRecord,
     active_session_id: Option<NativeSessionId>,
@@ -1259,6 +1373,175 @@ fn native_session_tab_row(
         profile_id: session.profile_id.clone(),
         mode: session.mode,
         active: Some(record.id) == active_session_id,
+    }
+}
+
+fn restart_snapshot_v1_for_native_state(
+    sessions: &NativeSessionRegistry,
+    local_tab_config: &LocalPtyConfig,
+    grid_size: GridSize,
+    inner_size: Option<PhysicalSize<u32>>,
+    running_build_id: &str,
+    installed_build_id: Option<&str>,
+) -> RestartSnapshotV1 {
+    restart_snapshot_v1_for_native_state_at(
+        sessions,
+        local_tab_config,
+        grid_size,
+        inner_size,
+        running_build_id,
+        installed_build_id,
+        now_unix_ms(),
+    )
+}
+
+fn restart_snapshot_v1_for_native_state_at(
+    sessions: &NativeSessionRegistry,
+    local_tab_config: &LocalPtyConfig,
+    grid_size: GridSize,
+    inner_size: Option<PhysicalSize<u32>>,
+    running_build_id: &str,
+    installed_build_id: Option<&str>,
+    created_at_unix_ms: u128,
+) -> RestartSnapshotV1 {
+    let tabs = restart_snapshot_tabs_for_native_state(sessions, local_tab_config);
+    let active_tab_index = tabs.iter().position(|tab| tab.active).unwrap_or(0);
+    RestartSnapshotV1 {
+        schema_version: 1,
+        created_at_unix_ms,
+        running_build_id: running_build_id.to_owned(),
+        installed_build_id: installed_build_id.map(str::to_owned),
+        window: RestartWindowStateV1 {
+            grid_rows: grid_size.rows,
+            grid_cols: grid_size.cols,
+            inner_width_px: inner_size.map(|size| size.width),
+            inner_height_px: inner_size.map(|size| size.height),
+        },
+        active_tab_index,
+        tabs,
+    }
+}
+
+fn restart_snapshot_tabs_for_native_state(
+    sessions: &NativeSessionRegistry,
+    local_tab_config: &LocalPtyConfig,
+) -> Vec<RestartTabV1> {
+    if sessions.sessions.is_empty() {
+        let session =
+            native_local_session_metadata(1, NativeProfileActionStartMode::ReplaceCurrentSession);
+        let launch = native_session_launch_metadata_for_local(local_tab_config, &session);
+        return vec![restart_tab_v1_from_session_parts(
+            NativeSessionId(1),
+            true,
+            &session,
+            &launch,
+        )];
+    }
+
+    let active_session_id = sessions
+        .active_session_id
+        .or_else(|| sessions.sessions.first().map(|record| record.id));
+    sessions
+        .sessions
+        .iter()
+        .map(|record| {
+            let launch = record.launch.clone().unwrap_or_else(|| {
+                native_session_launch_metadata_for_local(local_tab_config, &record.profile_action)
+            });
+            restart_tab_v1_from_session_parts(
+                record.id,
+                Some(record.id) == active_session_id,
+                &record.profile_action,
+                &launch,
+            )
+        })
+        .collect()
+}
+
+fn restart_tab_v1_from_session_parts(
+    session_id: NativeSessionId,
+    active: bool,
+    session: &NativeProfileActionCurrentSession,
+    launch: &NativeSessionLaunchMetadata,
+) -> RestartTabV1 {
+    RestartTabV1 {
+        tab_id: session_id.0,
+        active,
+        source_plugin: session.source_plugin.clone(),
+        profile_id: session.profile_id.clone(),
+        kind: restart_tab_kind_v1(launch.kind),
+        mode: restart_tab_mode_v1(session.mode),
+        launch: RestartLaunchConfigV1::from_local_pty_config(&launch.config),
+        profile: (launch.kind != NativeSessionLaunchKind::Local).then(|| {
+            RestartProfileMetadataV1 {
+                source_plugin: launch.source_plugin.clone(),
+                profile_id: launch.profile_id.clone(),
+                reason: launch.reason.clone(),
+            }
+        }),
+    }
+}
+
+fn restart_tab_kind_v1(kind: NativeSessionLaunchKind) -> RestartTabKindV1 {
+    match kind {
+        NativeSessionLaunchKind::Local => RestartTabKindV1::Local,
+        NativeSessionLaunchKind::ProfilePicker => RestartTabKindV1::ProfilePicker,
+        NativeSessionLaunchKind::ProfileLaunch => RestartTabKindV1::ProfileLaunch,
+    }
+}
+
+fn restart_tab_mode_v1(mode: NativeProfileActionStartMode) -> RestartTabModeV1 {
+    match mode {
+        NativeProfileActionStartMode::ReplaceCurrentSession => {
+            RestartTabModeV1::ReplaceCurrentSession
+        }
+        NativeProfileActionStartMode::NewTab => RestartTabModeV1::NewTab,
+    }
+}
+
+fn native_session_from_restart_tab(tab: &RestartTabV1) -> NativeProfileActionCurrentSession {
+    NativeProfileActionCurrentSession {
+        key: PendingProfileActionKey::profile_launch(
+            usize::try_from(tab.tab_id.saturating_sub(1)).unwrap_or(usize::MAX),
+        ),
+        kind: match tab.kind {
+            RestartTabKindV1::Local | RestartTabKindV1::ProfileLaunch => {
+                NativeResolvedProfileActionKind::ProfileLaunch
+            }
+            RestartTabKindV1::ProfilePicker => NativeResolvedProfileActionKind::ProfilePicker,
+        },
+        source_plugin: tab.source_plugin.clone(),
+        profile_id: tab.profile_id.clone(),
+        reason: tab
+            .profile
+            .as_ref()
+            .and_then(|profile| profile.reason.clone()),
+        mode: match tab.mode {
+            RestartTabModeV1::ReplaceCurrentSession => {
+                NativeProfileActionStartMode::ReplaceCurrentSession
+            }
+            RestartTabModeV1::NewTab => NativeProfileActionStartMode::NewTab,
+        },
+    }
+}
+
+fn native_session_launch_metadata_from_restart_tab(
+    tab: &RestartTabV1,
+    size: GridSize,
+) -> NativeSessionLaunchMetadata {
+    NativeSessionLaunchMetadata {
+        kind: match tab.kind {
+            RestartTabKindV1::Local => NativeSessionLaunchKind::Local,
+            RestartTabKindV1::ProfilePicker => NativeSessionLaunchKind::ProfilePicker,
+            RestartTabKindV1::ProfileLaunch => NativeSessionLaunchKind::ProfileLaunch,
+        },
+        config: tab.launch.to_local_pty_config(size),
+        source_plugin: tab.source_plugin.clone(),
+        profile_id: tab.profile_id.clone(),
+        reason: tab
+            .profile
+            .as_ref()
+            .and_then(|profile| profile.reason.clone()),
     }
 }
 
@@ -1676,6 +1959,7 @@ pub fn run(
     font_family: Option<String>,
     font_size: Option<u16>,
     font_paths: Vec<PathBuf>,
+    restore_state: Option<RestartSnapshotV1>,
 ) -> anyhow::Result<()> {
     start_smoke_exit_timer(smoke.exit_after)?;
     let event_loop = EventLoop::new()?;
@@ -1693,6 +1977,7 @@ pub fn run(
         font_family,
         font_size,
         font_paths,
+        restore_state,
     )?;
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -2235,6 +2520,167 @@ pub(crate) fn native_command_block_smoke() -> Result<NativeCommandBlockSmoke> {
     })
 }
 
+struct NativeWindowSessionStartup {
+    size: GridSize,
+    terminal: BasicTerminal,
+    transport: LocalPtyTransport,
+    local_tab_config: LocalPtyConfig,
+    profile_action_sessions: NativeSessionRegistry,
+    profile_action_session_runtimes: NativeSessionRuntimeRegistry<LocalPtyTransport>,
+}
+
+fn native_window_session_startup_for_launch(
+    size: GridSize,
+    max_scrollback_lines: usize,
+    local_tab_config: LocalPtyConfig,
+) -> Result<NativeWindowSessionStartup> {
+    let terminal = BasicTerminal::with_scrollback_limit(size, max_scrollback_lines);
+    let transport = LocalPtyTransport::spawn(local_tab_config.clone())?;
+    Ok(NativeWindowSessionStartup {
+        size,
+        terminal,
+        transport,
+        local_tab_config,
+        profile_action_sessions: NativeSessionRegistry::default(),
+        profile_action_session_runtimes: NativeSessionRuntimeRegistry::default(),
+    })
+}
+
+fn native_window_session_startup_for_restore(
+    snapshot: RestartSnapshotV1,
+    fallback_local_tab_config: LocalPtyConfig,
+    max_scrollback_lines: usize,
+) -> Result<NativeWindowSessionStartup> {
+    let size = snapshot.window.grid_size();
+    let active_tab = snapshot
+        .tabs
+        .get(snapshot.active_tab_index)
+        .context("restart snapshot active tab missing")?;
+    let active_config = active_tab.launch.to_local_pty_config(size);
+    let transport =
+        LocalPtyTransport::spawn(active_config).context("spawn active restored local pty")?;
+    let terminal = BasicTerminal::with_scrollback_limit(size, max_scrollback_lines);
+    let mut sessions = NativeSessionRegistry::default();
+    let mut parked_sessions = NativeSessionRuntimeRegistry::default();
+
+    for (index, tab) in snapshot.tabs.iter().enumerate() {
+        let active = index == snapshot.active_tab_index;
+        let session = native_session_from_restart_tab(tab);
+        let launch = native_session_launch_metadata_from_restart_tab(tab, size);
+        let session_id = sessions.insert_with_active_state(session, active);
+        sessions.set_launch_metadata(session_id, launch.clone());
+        if active {
+            continue;
+        }
+
+        let transport = LocalPtyTransport::spawn(launch.config)
+            .with_context(|| format!("spawn restored tab {}", tab.profile_id))?;
+        parked_sessions.park_or_replace(
+            session_id,
+            NativeSessionRuntime {
+                transport,
+                terminal: BasicTerminal::with_scrollback_limit(size, max_scrollback_lines),
+                terminal_search: TerminalSearch::default(),
+                shell_integration: ShellIntegrationState::default(),
+            },
+        );
+    }
+
+    let local_tab_config = snapshot
+        .tabs
+        .iter()
+        .find(|tab| tab.kind == RestartTabKindV1::Local)
+        .map(|tab| tab.launch.to_local_pty_config(size))
+        .unwrap_or(fallback_local_tab_config);
+
+    Ok(NativeWindowSessionStartup {
+        size,
+        terminal,
+        transport,
+        local_tab_config,
+        profile_action_sessions: sessions,
+        profile_action_session_runtimes: parked_sessions,
+    })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NativeUpdateNotice {
+    running_build_id: String,
+    installed_marker: InstalledBuildMarkerV1,
+}
+
+impl NativeUpdateNotice {
+    fn installed_build_id(&self) -> &str {
+        &self.installed_marker.build_id
+    }
+}
+
+#[derive(Clone, Debug)]
+struct NativeUpdateMonitor {
+    marker_path: Option<PathBuf>,
+    running: RunningBuildIdentity,
+    next_check: Instant,
+    interval: Duration,
+}
+
+impl NativeUpdateMonitor {
+    fn new(now: Instant) -> Self {
+        let marker_path = default_install_state_path().ok();
+        let startup_marker = marker_path
+            .as_ref()
+            .and_then(|path| read_installed_build_marker(path).ok().flatten());
+        let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("witty"));
+        let running = running_build_identity(
+            current_exe,
+            startup_marker.as_ref(),
+            env!("CARGO_PKG_VERSION"),
+        );
+        Self {
+            marker_path,
+            running,
+            next_check: now,
+            interval: INSTALLED_UPDATE_CHECK_INTERVAL,
+        }
+    }
+
+    fn check(&self) -> Result<Option<NativeUpdateNotice>> {
+        let Some(marker_path) = &self.marker_path else {
+            return Ok(None);
+        };
+        let marker = read_installed_build_marker(marker_path)?;
+        let status = installed_update_status(&self.running, marker);
+        if !status.update_needed {
+            return Ok(None);
+        }
+        let installed_marker = status
+            .installed_marker
+            .context("update-needed status did not include installed marker")?;
+        Ok(Some(NativeUpdateNotice {
+            running_build_id: status.running_build_id,
+            installed_marker,
+        }))
+    }
+
+    fn schedule_next(&mut self, now: Instant) {
+        self.next_check = now.checked_add(self.interval).unwrap_or(now);
+    }
+
+    fn due(&self, now: Instant) -> bool {
+        now >= self.next_check
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeUpdateNoticeTarget {
+    Row,
+    Restart,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeUpdateNoticeHit {
+    target: NativeUpdateNoticeTarget,
+}
+
 struct TerminalWindowApp {
     window: Option<Arc<Window>>,
     renderer: Option<WgpuRectRenderer>,
@@ -2261,6 +2707,7 @@ struct TerminalWindowApp {
     pointer_position: Option<PhysicalPosition<f64>>,
     hovered_session_tab: Option<NativeSessionTabStripHit>,
     hovered_profile_action: Option<NativeProfileActionOverlayHit>,
+    hovered_update_notice: Option<NativeUpdateNoticeHit>,
     hovered_hyperlink: Option<HyperlinkId>,
     hovered_command_block_id: Option<u64>,
     selection_anchor: Option<CellPoint>,
@@ -2272,6 +2719,7 @@ struct TerminalWindowApp {
     report_startup: bool,
     window_close_requested: bool,
     fallback_local_session_requested: bool,
+    restart_exit_requested: bool,
     started: Instant,
     exited: bool,
     clipboard: Box<dyn ClipboardSink>,
@@ -2284,6 +2732,8 @@ struct TerminalWindowApp {
     font_data: Vec<Vec<u8>>,
     initial_window_size: Option<GridSize>,
     first_frame_reported: bool,
+    update_monitor: NativeUpdateMonitor,
+    update_notice: Option<NativeUpdateNotice>,
 }
 
 impl TerminalWindowApp {
@@ -2301,14 +2751,35 @@ impl TerminalWindowApp {
         font_family: Option<String>,
         font_size: Option<u16>,
         font_paths: Vec<PathBuf>,
+        restore_state: Option<RestartSnapshotV1>,
     ) -> Result<Self> {
+        let restoring = restore_state.is_some();
         let size = GridSize::new(24, 80);
-        let size = smoke.initial_size.unwrap_or(size);
-        let terminal = BasicTerminal::with_scrollback_limit(size, max_scrollback_lines);
+        let size = restore_state
+            .as_ref()
+            .map(|snapshot| snapshot.window.grid_size())
+            .or(smoke.initial_size)
+            .unwrap_or(size);
+        let initial_window_size = if restoring {
+            Some(size)
+        } else {
+            smoke.initial_size
+        };
         let local_tab_config =
             local_pty_config_for_launch(size, launch_program, launch_args, launch_cwd, launch_env)?;
-        let transport = LocalPtyTransport::spawn(local_tab_config.clone())?;
-        let mut app = TerminalApp::new(transport, size);
+        let startup = match restore_state {
+            Some(snapshot) => native_window_session_startup_for_restore(
+                snapshot,
+                local_tab_config.clone(),
+                max_scrollback_lines,
+            )?,
+            None => native_window_session_startup_for_launch(
+                size,
+                max_scrollback_lines,
+                local_tab_config,
+            )?,
+        };
+        let mut app = TerminalApp::new(startup.transport, startup.size);
         app.install_builtin_plugin(BuiltInCommandsPlugin)?;
         for command in search_command_registrations() {
             app.register_command(command)?;
@@ -2331,33 +2802,44 @@ impl TerminalWindowApp {
         }
         let default_window_title =
             default_window_title.unwrap_or_else(|| DEFAULT_WINDOW_TITLE.to_owned());
+        let started = Instant::now();
+        let mut update_monitor = NativeUpdateMonitor::new(started);
+        let update_notice = match update_monitor.check() {
+            Ok(notice) => notice,
+            Err(err) => {
+                eprintln!("failed to check installed Witty update marker: {err:#}");
+                None
+            }
+        };
+        update_monitor.schedule_next(started);
 
         let mut window_app = Self {
             window: None,
             renderer: None,
             app,
-            terminal,
+            terminal: startup.terminal,
             frame: FramePlan::default(),
             command_palette,
             command_block_action_menu: CommandBlockActionMenu::default(),
             terminal_search: TerminalSearch::default(),
-            local_tab_config,
+            local_tab_config: startup.local_tab_config,
             profile_actions: NativeProfileActionBridge::default(),
             resolved_profile_action_handoffs: NativeResolvedProfileActionHandoffQueue::default(),
             deferred_profile_action_starts: NativeResolvedProfileActionHandoffQueue::default(),
             profile_action_start_plans: NativeProfileActionStartPlanQueue::default(),
-            profile_action_sessions: NativeSessionRegistry::default(),
-            profile_action_session_runtimes: NativeSessionRuntimeRegistry::default(),
+            profile_action_sessions: startup.profile_action_sessions,
+            profile_action_session_runtimes: startup.profile_action_session_runtimes,
             active_session_close_fallback_policy: smoke.last_active_close_policy.into(),
             session_tab_notice: None,
             shell_integration: ShellIntegrationState::default(),
             ime_composition: ImeComposition::default(),
             metrics,
-            size,
+            size: startup.size,
             modifiers: Modifiers::default(),
             pointer_position: None,
             hovered_session_tab: None,
             hovered_profile_action: None,
+            hovered_update_notice: None,
             hovered_hyperlink: None,
             hovered_command_block_id: None,
             selection_anchor: None,
@@ -2369,7 +2851,8 @@ impl TerminalWindowApp {
             report_startup: smoke.report_startup,
             window_close_requested: false,
             fallback_local_session_requested: false,
-            started: Instant::now(),
+            restart_exit_requested: false,
+            started,
             exited: false,
             clipboard: Box::new(SystemClipboardSink::new()),
             window_title: default_window_title.clone(),
@@ -2379,8 +2862,10 @@ impl TerminalWindowApp {
             text_blink: TextBlinkState::default(),
             font_config,
             font_data,
-            initial_window_size: smoke.initial_size,
+            initial_window_size,
             first_frame_reported: false,
+            update_monitor,
+            update_notice,
         };
         let _ = window_app.refresh_pending_profile_actions();
         window_app.rebuild_frame();
@@ -2509,6 +2994,13 @@ impl TerminalWindowApp {
             self.metrics,
             self.size,
         );
+        apply_native_update_notice_overlay(
+            &mut frame,
+            self.update_notice.as_ref(),
+            self.hovered_update_notice,
+            self.metrics,
+            self.size,
+        );
         apply_profile_action_overlay(
             &mut frame,
             self.profile_actions.snapshot(),
@@ -2625,6 +3117,17 @@ impl TerminalWindowApp {
         }
     }
 
+    fn refresh_update_notice_hover_for_current_pointer(&mut self) -> bool {
+        match self.pointer_position {
+            Some(position) => self.set_hovered_update_notice_for_position(position),
+            None => {
+                let changed = self.hovered_update_notice.is_some();
+                self.hovered_update_notice = None;
+                changed
+            }
+        }
+    }
+
     fn refresh_session_tab_hover_for_current_pointer(&mut self) -> bool {
         match self.pointer_position {
             Some(position) => self.set_hovered_session_tab_for_position(position),
@@ -2642,6 +3145,10 @@ impl TerminalWindowApp {
 
     fn take_fallback_local_session_request(&mut self) -> bool {
         take_native_event_request_flag(&mut self.fallback_local_session_requested)
+    }
+
+    fn take_restart_exit_request(&mut self) -> bool {
+        take_native_event_request_flag(&mut self.restart_exit_requested)
     }
 
     fn start_fallback_local_session(&mut self) -> Result<()> {
@@ -2662,6 +3169,7 @@ impl TerminalWindowApp {
         self.hovered_session_tab = None;
         self.session_tab_notice = None;
         self.hovered_profile_action = None;
+        self.hovered_update_notice = None;
         self.hovered_hyperlink = None;
         self.hovered_command_block_id = None;
         self.exited = false;
@@ -2695,6 +3203,7 @@ impl TerminalWindowApp {
                 self.hovered_session_tab = None;
                 self.session_tab_notice = None;
                 self.hovered_profile_action = None;
+                self.hovered_update_notice = None;
                 self.hovered_hyperlink = None;
                 self.hovered_command_block_id = None;
                 self.exited = false;
@@ -2808,6 +3317,44 @@ impl TerminalWindowApp {
             event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         }
         false
+    }
+
+    fn apply_installed_update_check_timeout(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        if self.update_notice.is_some() || self.update_monitor.marker_path.is_none() {
+            return false;
+        }
+
+        let now = Instant::now();
+        if self.update_monitor.due(now) {
+            let changed = self.refresh_installed_update_notice();
+            self.update_monitor.schedule_next(now);
+            if changed {
+                self.rebuild_frame();
+                self.request_redraw();
+                return true;
+            }
+        }
+
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.update_monitor.next_check));
+        false
+    }
+
+    fn refresh_installed_update_notice(&mut self) -> bool {
+        let previous = self.update_notice.clone();
+        match self.update_monitor.check() {
+            Ok(notice) => {
+                self.update_notice = notice;
+            }
+            Err(err) => {
+                eprintln!("failed to check installed Witty update marker: {err:#}");
+            }
+        }
+        if self.update_notice.is_none() {
+            self.hovered_update_notice = None;
+        } else {
+            let _ = self.refresh_update_notice_hover_for_current_pointer();
+        }
+        previous != self.update_notice
     }
 
     fn apply_terminal_host_actions(&mut self) {
@@ -3479,6 +4026,21 @@ impl TerminalWindowApp {
         true
     }
 
+    fn set_hovered_update_notice_for_position(&mut self, position: PhysicalPosition<f64>) -> bool {
+        let hovered = native_update_notice_hit_for_position(
+            self.update_notice.as_ref(),
+            position,
+            self.metrics,
+            self.size,
+        );
+        if self.hovered_update_notice == hovered {
+            return false;
+        }
+
+        self.hovered_update_notice = hovered;
+        true
+    }
+
     fn set_hovered_session_tab_for_position(&mut self, position: PhysicalPosition<f64>) -> bool {
         let rows = self.profile_action_sessions.tab_rows();
         let hovered = native_session_tab_strip_hit_for_position(
@@ -3614,6 +4176,7 @@ impl TerminalWindowApp {
         );
         if switched || closed || requests.fallback_local_session {
             self.command_block_action_menu.close();
+            self.hovered_update_notice = None;
             self.hovered_profile_action = None;
             self.synchronized_output_deadline = None;
             self.cursor_blink = CursorBlinkState::default();
@@ -3775,6 +4338,79 @@ impl TerminalWindowApp {
         true
     }
 
+    fn handle_update_notice_click(&mut self, state: ElementState, button: MouseButton) -> bool {
+        if state != ElementState::Pressed || button != MouseButton::Left {
+            return false;
+        }
+
+        let Some(position) = self.pointer_position else {
+            return false;
+        };
+        let Some(hit) = native_update_notice_hit_for_position(
+            self.update_notice.as_ref(),
+            position,
+            self.metrics,
+            self.size,
+        ) else {
+            return false;
+        };
+
+        if hit.target == NativeUpdateNoticeTarget::Restart {
+            self.restart_to_installed_update();
+        }
+        true
+    }
+
+    fn restart_to_installed_update(&mut self) {
+        let Some(notice) = self.update_notice.clone() else {
+            return;
+        };
+        match self.prepare_restart_to_update_plan(&notice) {
+            Ok(plan) => match spawn_restart_plan(&plan) {
+                Ok(()) => {
+                    self.restart_exit_requested = true;
+                }
+                Err(err) => {
+                    self.feed_restart_failure(format!("failed to spawn restart: {err:#}"));
+                }
+            },
+            Err(err) => {
+                self.feed_restart_failure(format!("failed to prepare restart: {err:#}"));
+            }
+        }
+    }
+
+    fn prepare_restart_to_update_plan(
+        &mut self,
+        notice: &NativeUpdateNotice,
+    ) -> Result<RestartExecutionPlan> {
+        let snapshot_path = default_restart_state_path()?;
+        let snapshot = self.restart_snapshot_v1(Some(notice.installed_build_id()));
+        write_restart_snapshot_atomic(&snapshot_path, &snapshot)?;
+        Ok(plan_restart_execution(
+            &notice.installed_marker,
+            snapshot_path,
+        ))
+    }
+
+    fn restart_snapshot_v1(&self, installed_build_id: Option<&str>) -> RestartSnapshotV1 {
+        let inner_size = self.window.as_ref().map(|window| window.inner_size());
+        restart_snapshot_v1_for_native_state(
+            &self.profile_action_sessions,
+            &self.local_tab_config,
+            self.size,
+            inner_size,
+            &self.update_monitor.running.build_id,
+            installed_build_id,
+        )
+    }
+
+    fn feed_restart_failure(&mut self, message: String) {
+        let message = format!("\r\n[{message}]\r\n");
+        self.terminal.feed(message.as_bytes());
+        self.rebuild_frame();
+    }
+
     fn confirm_pending_profile_action_from_overlay(
         &mut self,
         confirmation: PendingProfileActionConfirmation,
@@ -3816,6 +4452,7 @@ impl TerminalWindowApp {
         }
         self.hovered_session_tab = None;
         self.hovered_profile_action = None;
+        self.hovered_update_notice = None;
         self.rebuild_frame();
     }
 
@@ -3832,6 +4469,7 @@ impl TerminalWindowApp {
         }
         self.hovered_session_tab = None;
         self.hovered_profile_action = None;
+        self.hovered_update_notice = None;
         self.rebuild_frame();
     }
 
@@ -3842,6 +4480,7 @@ impl TerminalWindowApp {
         self.profile_actions.set_start_failure(None);
         self.hovered_session_tab = None;
         self.hovered_profile_action = None;
+        self.hovered_update_notice = None;
         self.rebuild_frame();
     }
 
@@ -3849,6 +4488,7 @@ impl TerminalWindowApp {
         self.profile_actions.set_start_success(None);
         self.hovered_session_tab = None;
         self.hovered_profile_action = None;
+        self.hovered_update_notice = None;
         self.rebuild_frame();
     }
 
@@ -3998,10 +4638,14 @@ impl TerminalWindowApp {
         }
         self.hovered_session_tab = None;
         self.hovered_profile_action = None;
+        self.hovered_update_notice = None;
         self.rebuild_frame();
     }
 
     fn handle_mouse_input(&mut self, state: ElementState, button: MouseButton) -> bool {
+        if self.handle_update_notice_click(state, button) {
+            return true;
+        }
         if self.handle_profile_action_overlay_click(state, button) {
             return true;
         }
@@ -4059,6 +4703,23 @@ impl TerminalWindowApp {
 
     fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) -> bool {
         self.pointer_position = Some(position);
+        let update_hover_changed = self.set_hovered_update_notice_for_position(position);
+        if self.hovered_update_notice.is_some() {
+            let profile_hover_changed = self.hovered_profile_action.take().is_some();
+            let session_hover_changed = self.hovered_session_tab.take().is_some();
+            let hyperlink_hover_changed = self.hovered_hyperlink.take().is_some();
+            let command_block_hover_changed = self.hovered_command_block_id.take().is_some();
+            let hover_changed = update_hover_changed
+                || profile_hover_changed
+                || session_hover_changed
+                || hyperlink_hover_changed
+                || command_block_hover_changed;
+            if hover_changed {
+                self.rebuild_frame();
+            }
+            return hover_changed;
+        }
+
         let profile_hover_changed = self.set_hovered_profile_action_for_position(position);
         if self.hovered_profile_action.is_some() {
             let session_hover_changed = self.hovered_session_tab.take().is_some();
@@ -4088,7 +4749,8 @@ impl TerminalWindowApp {
 
         let hyperlink_hover_changed = self.set_hovered_hyperlink_for_position(position);
         let command_block_hover_changed = self.set_hovered_command_block_for_position(position);
-        let hover_changed = profile_hover_changed
+        let hover_changed = update_hover_changed
+            || profile_hover_changed
             || session_hover_changed
             || hyperlink_hover_changed
             || command_block_hover_changed;
@@ -4239,12 +4901,14 @@ impl ApplicationHandler for TerminalWindowApp {
             return;
         }
 
-        let attrs = Window::default_attributes()
-            .with_title(self.window_title.clone())
-            .with_inner_size(terminal_window_initial_inner_size(
-                self.initial_window_size,
-                self.metrics,
-            ));
+        let attrs = witty_window_identity_attributes(
+            Window::default_attributes()
+                .with_title(self.window_title.clone())
+                .with_inner_size(terminal_window_initial_inner_size(
+                    self.initial_window_size,
+                    self.metrics,
+                )),
+        );
         let window = match event_loop.create_window(attrs) {
             Ok(window) => Arc::new(window),
             Err(err) => {
@@ -4325,6 +4989,10 @@ impl ApplicationHandler for TerminalWindowApp {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let changed = self.handle_mouse_input(state, button);
+                if self.take_restart_exit_request() {
+                    event_loop.exit();
+                    return;
+                }
                 if self.take_window_close_request() {
                     event_loop.exit();
                     return;
@@ -4398,8 +5066,30 @@ impl ApplicationHandler for TerminalWindowApp {
         if self.synchronized_output_deadline.is_some() {
             return;
         }
+        if self.apply_installed_update_check_timeout(event_loop) {
+            return;
+        }
         self.apply_blink_timeouts(event_loop);
     }
+}
+
+#[cfg(target_os = "linux")]
+fn witty_window_identity_attributes(attrs: WindowAttributes) -> WindowAttributes {
+    let attrs = winit::platform::wayland::WindowAttributesExtWayland::with_name(
+        attrs,
+        WITTY_LINUX_APP_ID,
+        WITTY_LINUX_APP_ID,
+    );
+    winit::platform::x11::WindowAttributesExtX11::with_name(
+        attrs,
+        WITTY_LINUX_APP_ID,
+        WITTY_LINUX_APP_ID,
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn witty_window_identity_attributes(attrs: WindowAttributes) -> WindowAttributes {
+    attrs
 }
 
 fn terminal_window_title(title: Option<&str>, default_title: &str) -> String {
@@ -6309,6 +6999,139 @@ fn native_session_tab_hover_color(target: NativeSessionTabStripTarget) -> Rgba {
     }
 }
 
+fn apply_native_update_notice_overlay(
+    frame: &mut FramePlan,
+    notice: Option<&NativeUpdateNotice>,
+    hovered: Option<NativeUpdateNoticeHit>,
+    metrics: CellMetrics,
+    grid_size: GridSize,
+) {
+    let Some(notice) = notice else {
+        return;
+    };
+    let Some(row) = native_update_notice_row(grid_size) else {
+        return;
+    };
+
+    let origin = cell_origin(CellPoint::new(row, 0), metrics);
+    let size = PixelSize {
+        width: f32::from(grid_size.cols) * metrics.cell.width,
+        height: metrics.cell.height,
+    };
+    frame
+        .glyphs
+        .retain(|glyph| !glyph_origin_inside(glyph, origin, size));
+    frame
+        .search_highlights
+        .retain(|rect| !rect_origin_inside(rect, origin, size));
+    frame
+        .selection
+        .retain(|rect| !rect_origin_inside(rect, origin, size));
+    if frame
+        .cursor
+        .as_ref()
+        .is_some_and(|cursor| rect_origin_inside(cursor, origin, size))
+    {
+        frame.cursor = None;
+    }
+
+    frame.backgrounds.push(RectBatchItem {
+        origin,
+        size,
+        color: Rgba::rgb(54, 43, 18),
+    });
+    if hovered.is_some_and(|hit| hit.target == NativeUpdateNoticeTarget::Restart) {
+        let width = grid_size.cols.saturating_sub(2);
+        let button_width = text_cell_width(&native_update_notice_button_text());
+        if width > button_width {
+            frame.backgrounds.push(RectBatchItem {
+                origin: cell_origin(
+                    CellPoint::new(row, 1 + width.saturating_sub(button_width)),
+                    metrics,
+                ),
+                size: PixelSize {
+                    width: f32::from(button_width) * metrics.cell.width,
+                    height: metrics.cell.height,
+                },
+                color: Rgba::rgb(96, 70, 24),
+            });
+        }
+    }
+    frame.glyphs.push(GlyphBatchItem {
+        origin: cell_origin(CellPoint::new(row, 1), metrics),
+        text: native_update_notice_text(notice, grid_size.cols.saturating_sub(2)),
+        color: Rgba::rgb(246, 232, 184),
+        style_flags: CellFlags::default(),
+    });
+}
+
+fn native_update_notice_hit_for_position(
+    notice: Option<&NativeUpdateNotice>,
+    position: PhysicalPosition<f64>,
+    metrics: CellMetrics,
+    grid_size: GridSize,
+) -> Option<NativeUpdateNoticeHit> {
+    notice?;
+    let row = native_update_notice_row(grid_size)?;
+    let point = pixel_point_for_position(position)?;
+    let cell = cell_point_for_pixel_point(point, metrics, grid_size);
+    if cell.row != row || cell.col == 0 {
+        return None;
+    }
+
+    let width = grid_size.cols.saturating_sub(2);
+    let text_col = cell.col.saturating_sub(1);
+    Some(NativeUpdateNoticeHit {
+        target: native_update_notice_target_for_text_col(text_col, width),
+    })
+}
+
+fn native_update_notice_target_for_text_col(text_col: u16, width: u16) -> NativeUpdateNoticeTarget {
+    let button_width = text_cell_width(&native_update_notice_button_text());
+    if width > button_width && text_col >= width.saturating_sub(button_width) {
+        NativeUpdateNoticeTarget::Restart
+    } else {
+        NativeUpdateNoticeTarget::Row
+    }
+}
+
+fn native_update_notice_row(grid_size: GridSize) -> Option<u16> {
+    (grid_size.rows > 0 && grid_size.cols >= 20).then(|| grid_size.rows.saturating_sub(1))
+}
+
+fn native_update_notice_text(notice: &NativeUpdateNotice, width: u16) -> String {
+    let button = native_update_notice_button_text();
+    let button_width = text_cell_width(&button);
+    let summary = format!(
+        "[update] Witty build installed | running={} installed={}",
+        short_build_label(&notice.running_build_id),
+        short_build_label(notice.installed_build_id()),
+    );
+    if width <= button_width.saturating_add(1) {
+        return truncate_cells(&summary, width);
+    }
+
+    let left_width = width.saturating_sub(button_width).saturating_sub(1);
+    let left = truncate_cells(&summary, left_width);
+    let spacer = width
+        .saturating_sub(text_cell_width(&left))
+        .saturating_sub(button_width);
+    format!("{left}{}{button}", " ".repeat(usize::from(spacer)))
+}
+
+fn native_update_notice_button_text() -> String {
+    format!("[{RESTART_BUTTON_LABEL}]")
+}
+
+fn short_build_label(build_id: &str) -> String {
+    let trimmed = build_id.trim();
+    if trimmed.chars().count() <= 12 {
+        trimmed.to_owned()
+    } else {
+        trimmed.chars().take(12).collect()
+    }
+}
+
 fn profile_action_overlay_body_row_count(snapshot: &NativeProfileActionSnapshot) -> usize {
     snapshot
         .display_rows
@@ -7823,6 +8646,173 @@ mod tests {
     fn physical_position_for_cell(point: CellPoint, metrics: CellMetrics) -> PhysicalPosition<f64> {
         let origin = cell_origin(point, metrics);
         PhysicalPosition::new(f64::from(origin.x) + 1.0, f64::from(origin.y) + 1.0)
+    }
+
+    fn test_install_marker(build_id: &str) -> InstalledBuildMarkerV1 {
+        InstalledBuildMarkerV1::new(
+            build_id,
+            "0.1.0",
+            "2026-06-08T10:00:00Z",
+            "/home/test/.local/bin/witty",
+            "/home/test/.local",
+            Some("debug".to_owned()),
+        )
+    }
+
+    #[test]
+    fn restart_snapshot_v1_captures_tab_launch_metadata_without_terminal_text() {
+        let size = GridSize::new(36, 120);
+        let mut sessions = NativeSessionRegistry::default();
+        let mut local_config = LocalPtyConfig::new(size);
+        local_config.cwd("/work/project");
+        local_config.env("WITTY_SESSION", "daily");
+        local_config.env("SECRET_TOKEN", "not-stored");
+        let local_session =
+            native_local_session_metadata(1, NativeProfileActionStartMode::ReplaceCurrentSession);
+        let active_id = sessions.replace_current(local_session.clone());
+        sessions.set_launch_metadata(
+            active_id,
+            native_session_launch_metadata_for_local(&local_config, &local_session),
+        );
+
+        let mut ssh_config = LocalPtyConfig::command(size, "ssh");
+        ssh_config.args(["-tt", "prod.example.com"]);
+        let profile_session = NativeProfileActionCurrentSession {
+            key: PendingProfileActionKey::profile_launch(1),
+            kind: NativeResolvedProfileActionKind::ProfileLaunch,
+            source_plugin: "profile-bridge".to_owned(),
+            profile_id: "prod".to_owned(),
+            reason: Some("open production".to_owned()),
+            mode: NativeProfileActionStartMode::NewTab,
+        };
+        let inactive_id = sessions.insert_inactive(profile_session.clone());
+        sessions.set_launch_metadata(
+            inactive_id,
+            NativeSessionLaunchMetadata {
+                kind: NativeSessionLaunchKind::ProfileLaunch,
+                config: ssh_config,
+                source_plugin: profile_session.source_plugin.clone(),
+                profile_id: profile_session.profile_id.clone(),
+                reason: profile_session.reason.clone(),
+            },
+        );
+
+        let snapshot = restart_snapshot_v1_for_native_state_at(
+            &sessions,
+            &local_config,
+            size,
+            Some(PhysicalSize::new(1280, 720)),
+            "old-build",
+            Some("new-build"),
+            42,
+        );
+
+        assert_eq!(snapshot.window.grid_rows, 36);
+        assert_eq!(snapshot.window.grid_cols, 120);
+        assert_eq!(snapshot.window.inner_width_px, Some(1280));
+        assert_eq!(snapshot.window.inner_height_px, Some(720));
+        assert_eq!(snapshot.active_tab_index, 0);
+        assert_eq!(snapshot.tabs.len(), 2);
+        assert!(snapshot.tabs[0].active);
+        assert_eq!(snapshot.tabs[0].kind, RestartTabKindV1::Local);
+        assert_eq!(
+            snapshot.tabs[0].launch.cwd,
+            Some(PathBuf::from("/work/project"))
+        );
+        assert!(snapshot.tabs[0]
+            .launch
+            .env
+            .iter()
+            .any(|entry| entry.key == "WITTY_SESSION" && entry.value.as_deref() == Some("daily")));
+        assert!(snapshot.tabs[0]
+            .launch
+            .env
+            .iter()
+            .any(|entry| entry.key == "SECRET_TOKEN"
+                && entry.value.is_none()
+                && entry.redacted
+                && !entry.restored));
+        assert_eq!(
+            snapshot.tabs[1].profile.as_ref().unwrap().profile_id,
+            "prod"
+        );
+
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(!json.contains("not-stored"));
+        assert!(!json.contains("old-visible-terminal-text"));
+    }
+
+    #[test]
+    fn restart_snapshot_v1_synthesizes_single_local_tab_when_registry_is_empty() {
+        let size = GridSize::new(24, 80);
+        let mut local_config = LocalPtyConfig::new(size);
+        local_config.program = Some("/bin/zsh".to_owned());
+        local_config.args(["-l"]);
+
+        let snapshot = restart_snapshot_v1_for_native_state_at(
+            &NativeSessionRegistry::default(),
+            &local_config,
+            size,
+            None,
+            "running",
+            None,
+            7,
+        );
+
+        assert_eq!(snapshot.active_tab_index, 0);
+        assert_eq!(snapshot.tabs.len(), 1);
+        assert!(snapshot.tabs[0].active);
+        assert_eq!(
+            snapshot.tabs[0].source_plugin,
+            NATIVE_LOCAL_SESSION_SOURCE_PLUGIN
+        );
+        assert_eq!(snapshot.tabs[0].launch.program.as_deref(), Some("/bin/zsh"));
+        assert_eq!(snapshot.tabs[0].launch.args, vec!["-l"]);
+    }
+
+    #[test]
+    fn native_update_notice_overlay_renders_restart_button_and_hit_target() {
+        let metrics = CellMetrics::default();
+        let size = GridSize::new(6, 96);
+        let notice = NativeUpdateNotice {
+            running_build_id: "old-build-id-123456".to_owned(),
+            installed_marker: test_install_marker("new-build-id-abcdef"),
+        };
+        let mut frame = FramePlan {
+            glyphs: vec![GlyphBatchItem {
+                origin: cell_origin(CellPoint::new(5, 1), metrics),
+                text: "covered terminal text".to_owned(),
+                color: Rgba::rgb(255, 255, 255),
+                style_flags: CellFlags::default(),
+            }],
+            ..FramePlan::default()
+        };
+
+        apply_native_update_notice_overlay(&mut frame, Some(&notice), None, metrics, size);
+
+        assert!(frame
+            .glyphs
+            .iter()
+            .any(|glyph| glyph.text.contains(RESTART_BUTTON_LABEL)));
+        assert!(!frame
+            .glyphs
+            .iter()
+            .any(|glyph| glyph.text.contains("covered terminal text")));
+
+        let width = size.cols.saturating_sub(2);
+        let button_width = text_cell_width(&native_update_notice_button_text());
+        let restart_cell = CellPoint::new(
+            size.rows.saturating_sub(1),
+            1 + width.saturating_sub(button_width),
+        );
+        let hit = native_update_notice_hit_for_position(
+            Some(&notice),
+            physical_position_for_cell(restart_cell, metrics),
+            metrics,
+            size,
+        )
+        .unwrap();
+        assert_eq!(hit.target, NativeUpdateNoticeTarget::Restart);
     }
 
     struct ProfileBridgePlugin;
@@ -9457,6 +10447,7 @@ mod tests {
         let record = NativeSessionRecord {
             id: NativeSessionId(7),
             profile_action: session,
+            launch: None,
         };
 
         let row = native_session_tab_row(&record, Some(NativeSessionId(7)));
@@ -9565,6 +10556,7 @@ mod tests {
                         reason: Some("open production".to_owned()),
                         mode: NativeProfileActionStartMode::ReplaceCurrentSession,
                     },
+                    launch: None,
                 },
                 NativeSessionRecord {
                     id: NativeSessionId(2),
@@ -9576,6 +10568,7 @@ mod tests {
                         reason: Some("choose staging".to_owned()),
                         mode: NativeProfileActionStartMode::ReplaceCurrentSession,
                     },
+                    launch: None,
                 },
             ],
         };

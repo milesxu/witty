@@ -1,4 +1,5 @@
 mod real_tui_smoke;
+mod update_state;
 mod window;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,6 +14,7 @@ use std::{
 
 use anyhow::{bail, Context as _, Result};
 use serde::Deserialize;
+use update_state::read_restart_snapshot;
 use window::{
     MouseSelectionOverridePolicy, WindowLastActiveClosePolicy, WindowSmokeOptions,
     DEFAULT_WINDOW_TITLE,
@@ -158,6 +160,14 @@ fn main() -> anyhow::Result<()> {
         return witty_launcher::run_cli(options.launcher_args);
     }
     if options.mode == AppMode::Window {
+        let restore_state = match options.restore_state_path.as_ref() {
+            Some(path) => Some(
+                read_restart_snapshot(path)
+                    .with_context(|| format!("read restart state {}", path.display()))?
+                    .with_context(|| format!("restart state does not exist: {}", path.display()))?,
+            ),
+            None => None,
+        };
         return window::run(
             options.wasm_plugins,
             options.window_smoke,
@@ -172,6 +182,7 @@ fn main() -> anyhow::Result<()> {
             options.font_family,
             options.font_size,
             options.font_paths,
+            restore_state,
         );
     }
     if options.mode == AppMode::PtySmoke {
@@ -251,6 +262,7 @@ struct AppOptions {
     font_family: Option<String>,
     font_size: Option<u16>,
     font_paths: Vec<PathBuf>,
+    restore_state_path: Option<PathBuf>,
     wittyrc_path: Option<PathBuf>,
     no_wittyrc: bool,
     window_config_path: Option<PathBuf>,
@@ -306,6 +318,7 @@ impl AppOptions {
         let mut font_family = None;
         let mut font_size = None;
         let mut font_paths = Vec::new();
+        let mut restore_state_path = None;
         let mut wittyrc_path = None;
         let mut no_wittyrc = false;
         let mut window_config_path = None;
@@ -329,6 +342,7 @@ impl AppOptions {
         let mut openssh_import_profile_ids = Vec::new();
         let mut non_profile_mode_seen = false;
         let mut window_only_args_seen = false;
+        let mut restore_state_args_seen = false;
         let mut args = args.into_iter();
 
         while let Some(arg) = args.next() {
@@ -514,6 +528,17 @@ impl AppOptions {
                         .unwrap_or(GridSize::new(DEFAULT_WINDOW_ROWS, DEFAULT_WINDOW_COLS));
                     window_smoke.initial_size = Some(GridSize::new(rows, current_size.cols));
                     explicit.window_rows = true;
+                    window_only_args_seen = true;
+                }
+                "--restore-state" => {
+                    let Some(value) = args.next() else {
+                        bail!("--restore-state requires a path");
+                    };
+                    if restore_state_path.is_some() {
+                        bail!("only one --restore-state value is allowed");
+                    }
+                    restore_state_path = Some(parse_restore_state_path(&value)?);
+                    restore_state_args_seen = true;
                     window_only_args_seen = true;
                 }
                 "--mouse-selection-override" => {
@@ -926,6 +951,9 @@ impl AppOptions {
         {
             bail!("window options require --window, --window-config-effective, or --wittyrc-effective");
         }
+        if restore_state_args_seen && mode != AppMode::Window {
+            bail!("--restore-state requires --window");
+        }
         if window_config_args_seen
             && !matches!(
                 mode,
@@ -1009,6 +1037,7 @@ impl AppOptions {
             font_family,
             font_size,
             font_paths,
+            restore_state_path,
             wittyrc_path,
             no_wittyrc,
             window_config_path,
@@ -2101,6 +2130,10 @@ fn parse_font_path(value: &str) -> Result<PathBuf> {
 
 fn parse_window_config_path(value: &str) -> Result<PathBuf> {
     parse_window_config_os_path(OsString::from(value), "--window-config")
+}
+
+fn parse_restore_state_path(value: &str) -> Result<PathBuf> {
+    parse_window_config_os_path(OsString::from(value), "--restore-state")
 }
 
 fn parse_wittyrc_path(value: &str) -> Result<PathBuf> {
@@ -3227,6 +3260,41 @@ mod tests {
             options.window_smoke.last_active_close_policy,
             WindowLastActiveClosePolicy::Block
         );
+    }
+
+    #[test]
+    fn app_options_parse_window_restore_state_path() {
+        let options = AppOptions::parse([
+            "--window".to_owned(),
+            "--restore-state".to_owned(),
+            "/tmp/restart-state.v1.42.json".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.mode, AppMode::Window);
+        assert_eq!(
+            options.restore_state_path,
+            Some(PathBuf::from("/tmp/restart-state.v1.42.json"))
+        );
+        assert!(AppOptions::parse([
+            "--restore-state".to_owned(),
+            "/tmp/restart-state.v1.42.json".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--window".to_owned(),
+            "--restore-state".to_owned(),
+            " ".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--window".to_owned(),
+            "--restore-state".to_owned(),
+            "/tmp/a.json".to_owned(),
+            "--restore-state".to_owned(),
+            "/tmp/b.json".to_owned(),
+        ])
+        .is_err());
     }
 
     #[test]
