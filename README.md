@@ -162,7 +162,9 @@ settings.
 By default, exiting the last local shell, for example with Ctrl-D, closes the
 Witty window/program. Set `window-last-active-close = "block"` in `.wittyrc`
 or `window_last_active_close = "block"` in `window.v1.json` to keep Witty open
-after the last shell exits.
+after the last shell exits. In that non-closing mode, Witty replaces the
+exited terminal buffer with a compact empty-session screen that can start a
+new local shell or open the command palette for profile/plugin launch actions.
 
 You can still set fonts through CLI flags, environment defaults, or
 `window.v1.json`:

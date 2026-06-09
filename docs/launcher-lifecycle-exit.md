@@ -41,6 +41,7 @@ in the last local shell exits Witty.
 
 Set `window-last-active-close = "block"` in `.wittyrc`, or
 `window_last_active_close = "block"` in the legacy `window.v1.json`, to keep
-the window open after the last shell exits. That non-closing state leaves the
-runtime marked exited so a follow-up welcome-screen flow can detect that no
-active shell remains.
+the window open after the last shell exits. That non-closing state shows a
+compact empty-session screen instead of the exited terminal buffer. The screen
+can start a new local shell from the existing launch defaults or open the
+command palette for plugin/profile launch actions.

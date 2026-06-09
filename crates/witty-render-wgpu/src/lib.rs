@@ -827,7 +827,9 @@ impl FramePlanner {
     }
 
     fn text_decoration_thickness(&self) -> f32 {
-        (self.metrics.cell.height * 0.08).clamp(1.0, self.metrics.cell.height)
+        (self.metrics.cell.height * 0.08)
+            .round()
+            .clamp(1.0, self.metrics.cell.height)
     }
 
     fn selection_rects(&self, range: CellRange, cols: u16) -> Vec<RectBatchItem> {
@@ -2427,15 +2429,15 @@ mod tests {
 
         assert_eq!(frame.text_decorations.len(), 4);
         assert_eq!(frame.text_decorations[0].origin.x, 0.0);
-        assert!((frame.text_decorations[0].origin.y - 18.4).abs() < 0.001);
+        assert_eq!(frame.text_decorations[0].origin.y, 18.0);
         assert_eq!(frame.text_decorations[0].size.width, 20.0);
-        assert!((frame.text_decorations[0].size.height - 1.6).abs() < 0.001);
+        assert_eq!(frame.text_decorations[0].size.height, 2.0);
         assert_eq!(frame.text_decorations[0].color, Rgba::WHITE);
         assert_eq!(frame.text_decorations[1].origin.x, 20.0);
-        assert!((frame.text_decorations[1].origin.y - 15.2).abs() < 0.001);
+        assert_eq!(frame.text_decorations[1].origin.y, 14.0);
         assert_eq!(frame.text_decorations[1].color, Rgba::rgb(240, 80, 40));
         assert_eq!(frame.text_decorations[2].origin.x, 20.0);
-        assert!((frame.text_decorations[2].origin.y - 18.4).abs() < 0.001);
+        assert_eq!(frame.text_decorations[2].origin.y, 18.0);
         assert_eq!(frame.text_decorations[2].color, Rgba::rgb(240, 80, 40));
         assert_eq!(
             frame.text_decorations[3].origin,
@@ -2443,6 +2445,32 @@ mod tests {
         );
         assert_eq!(frame.text_decorations[3].size.width, 20.0);
         assert_eq!(frame.stats.text_decoration_rects, 4);
+    }
+
+    #[test]
+    fn planner_snaps_default_fish_prompt_underline_to_single_pixel() {
+        let mut snapshot = RenderSnapshot::from_plain_lines(&["mingxu@host >"]);
+        for cell in snapshot.rows[0].cells.iter_mut().take(6) {
+            cell.style.flags.underline = true;
+        }
+        let planner = FramePlanner::new(CellMetrics::default());
+
+        let frame = planner.plan(&snapshot);
+
+        assert_eq!(frame.text_decorations.len(), 1);
+        assert_eq!(
+            frame.text_decorations[0].origin,
+            PixelPoint { x: 8.0, y: 25.0 }
+        );
+        assert_eq!(
+            frame.text_decorations[0].size,
+            PixelSize {
+                width: 54.0,
+                height: 1.0,
+            }
+        );
+        assert_eq!(frame.text_decorations[0].color, Rgba::WHITE);
+        assert_eq!(frame.stats.text_decoration_rects, 1);
     }
 
     #[test]
@@ -2470,12 +2498,12 @@ mod tests {
 
         assert_eq!(frame.text_decorations.len(), 2);
         assert_eq!(frame.text_decorations[0].origin.x, 0.0);
-        assert!((frame.text_decorations[0].origin.y - 9.2).abs() < 0.001);
+        assert_eq!(frame.text_decorations[0].origin.y, 9.0);
         assert_eq!(frame.text_decorations[0].size.width, 10.0);
-        assert!((frame.text_decorations[0].size.height - 1.6).abs() < 0.001);
+        assert_eq!(frame.text_decorations[0].size.height, 2.0);
         assert_eq!(frame.text_decorations[0].color, Rgba::WHITE);
         assert_eq!(frame.text_decorations[1].origin.x, 10.0);
-        assert!((frame.text_decorations[1].origin.y - 9.2).abs() < 0.001);
+        assert_eq!(frame.text_decorations[1].origin.y, 9.0);
         assert_eq!(frame.text_decorations[1].size.width, 20.0);
         assert_eq!(frame.text_decorations[1].color, Rgba::rgb(100, 50, 25));
         assert_eq!(frame.stats.text_decoration_rects, 2);
@@ -2507,10 +2535,10 @@ mod tests {
             PixelPoint { x: 0.0, y: 0.0 }
         );
         assert_eq!(frame.text_decorations[0].size.width, 20.0);
-        assert!((frame.text_decorations[0].size.height - 1.6).abs() < 0.001);
-        assert!((frame.text_decorations[1].origin.y - 18.4).abs() < 0.001);
+        assert_eq!(frame.text_decorations[0].size.height, 2.0);
+        assert_eq!(frame.text_decorations[1].origin.y, 18.0);
         assert_eq!(frame.text_decorations[2].size.height, 20.0);
-        assert!((frame.text_decorations[3].origin.x - 18.4).abs() < 0.001);
+        assert_eq!(frame.text_decorations[3].origin.x, 18.0);
         assert_eq!(
             frame.text_decorations[4].origin,
             PixelPoint { x: 20.0, y: 0.0 }
@@ -2544,11 +2572,11 @@ mod tests {
         assert!((frame.text_decorations[0].origin.x - 3.5).abs() < 0.001);
         assert_eq!(frame.text_decorations[0].origin.y, 0.0);
         assert_eq!(frame.text_decorations[0].size.width, 13.0);
-        assert!((frame.text_decorations[1].origin.y - 18.4).abs() < 0.001);
+        assert_eq!(frame.text_decorations[1].origin.y, 18.0);
         assert_eq!(frame.text_decorations[2].origin.x, 0.0);
         assert_eq!(frame.text_decorations[2].origin.y, 5.0);
         assert_eq!(frame.text_decorations[2].size.height, 10.0);
-        assert!((frame.text_decorations[3].origin.x - 18.4).abs() < 0.001);
+        assert_eq!(frame.text_decorations[3].origin.x, 18.0);
         assert!((frame.text_decorations[4].origin.x - 23.5).abs() < 0.001);
         assert_eq!(frame.text_decorations[4].color, Rgba::rgb(100, 50, 25));
         assert_eq!(frame.text_decorations[4].size.width, 3.0);
@@ -2605,21 +2633,21 @@ mod tests {
         let frame = planner.plan(&snapshot);
 
         assert_eq!(frame.text_decorations.len(), 7);
-        assert!((frame.text_decorations[0].origin.x - 4.2).abs() < 0.001);
-        assert!((frame.text_decorations[0].origin.y - 18.4).abs() < 0.001);
-        assert!((frame.text_decorations[0].size.width - 1.6).abs() < 0.001);
-        assert!((frame.text_decorations[1].origin.x - 14.2).abs() < 0.001);
+        assert_eq!(frame.text_decorations[0].origin.x, 4.0);
+        assert_eq!(frame.text_decorations[0].origin.y, 18.0);
+        assert_eq!(frame.text_decorations[0].size.width, 2.0);
+        assert_eq!(frame.text_decorations[1].origin.x, 14.0);
         assert!((frame.text_decorations[2].origin.x - 21.9).abs() < 0.001);
         assert!((frame.text_decorations[2].size.width - 6.2).abs() < 0.001);
         assert!((frame.text_decorations[3].origin.x - 31.9).abs() < 0.001);
         assert_eq!(frame.text_decorations[4].origin.x, 40.0);
-        assert!((frame.text_decorations[4].origin.y - 15.2).abs() < 0.001);
+        assert_eq!(frame.text_decorations[4].origin.y, 14.0);
         assert_eq!(frame.text_decorations[4].size.width, 5.0);
         assert_eq!(
             frame.text_decorations[5].origin,
-            PixelPoint { x: 45.0, y: 18.4 }
+            PixelPoint { x: 45.0, y: 18.0 }
         );
-        assert!((frame.text_decorations[6].origin.x - 44.2).abs() < 0.001);
+        assert_eq!(frame.text_decorations[6].origin.x, 44.0);
         assert_eq!(frame.stats.text_decoration_rects, 7);
     }
 

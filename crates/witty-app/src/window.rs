@@ -80,6 +80,7 @@ const TEXT_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const NATIVE_LOCAL_SESSION_SOURCE_PLUGIN: &str = "witty-local";
 const INSTALLED_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const RESTART_BUTTON_LABEL: &str = "Restart to update";
+const WITTY_NEW_LOCAL_SHELL_COMMAND_ID: &str = "witty.new-local-shell";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WindowSmokeOptions {
@@ -866,13 +867,16 @@ fn apply_native_profile_action_start_plan_with_transport<T>(
     shell_integration: &mut ShellIntegrationState,
     sessions: &mut NativeSessionRegistry,
     parked_sessions: &mut NativeSessionRuntimeRegistry<T>,
-    plan: NativeProfileActionStartPlan,
+    mut plan: NativeProfileActionStartPlan,
     transport: T,
     size: GridSize,
 ) -> NativeProfileActionStartExecution
 where
     T: TerminalTransport,
 {
+    if plan.mode == NativeProfileActionStartMode::NewTab && sessions.active().is_none() {
+        plan.mode = NativeProfileActionStartMode::ReplaceCurrentSession;
+    }
     let launch = native_session_launch_metadata_for_profile_plan(&plan);
     match plan.mode {
         NativeProfileActionStartMode::ReplaceCurrentSession => {
@@ -1083,6 +1087,44 @@ where
         size,
     );
     Ok(())
+}
+
+fn replace_with_tracked_local_session_with_spawner<T, F>(
+    app: &mut TerminalApp<T>,
+    terminal: &mut BasicTerminal,
+    terminal_search: &mut TerminalSearch,
+    shell_integration: &mut ShellIntegrationState,
+    sessions: &mut NativeSessionRegistry,
+    parked_sessions: &mut NativeSessionRuntimeRegistry<T>,
+    config: LocalPtyConfig,
+    spawn_transport: F,
+    size: GridSize,
+) -> Result<NativeSessionId>
+where
+    T: TerminalTransport,
+    F: FnOnce(LocalPtyConfig) -> Result<T>,
+{
+    let config_for_metadata = config.clone();
+    let transport = spawn_transport(config)?;
+    replace_with_untracked_local_session(
+        app,
+        terminal,
+        terminal_search,
+        shell_integration,
+        sessions,
+        parked_sessions,
+        transport,
+        size,
+    );
+
+    let session = native_local_session_metadata(
+        sessions.next_session_id,
+        NativeProfileActionStartMode::ReplaceCurrentSession,
+    );
+    let launch = native_session_launch_metadata_for_local(&config_for_metadata, &session);
+    let session_id = sessions.replace_current(session);
+    sessions.set_launch_metadata(session_id, launch);
+    Ok(session_id)
 }
 
 fn native_local_session_metadata(
@@ -2733,6 +2775,24 @@ struct NativeUpdateNoticeHit {
     target: NativeUpdateNoticeTarget,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeEmptySessionWelcomeTarget {
+    NewLocalShell,
+    CommandPalette,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeEmptySessionWelcomeHit {
+    target: NativeEmptySessionWelcomeTarget,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeEmptySessionWelcomeButtonSpan {
+    target: NativeEmptySessionWelcomeTarget,
+    start_col: u16,
+    end_col: u16,
+}
+
 struct TerminalWindowApp {
     window: Option<Arc<Window>>,
     renderer: Option<WgpuRectRenderer>,
@@ -2760,6 +2820,7 @@ struct TerminalWindowApp {
     hovered_session_tab: Option<NativeSessionTabStripHit>,
     hovered_profile_action: Option<NativeProfileActionOverlayHit>,
     hovered_update_notice: Option<NativeUpdateNoticeHit>,
+    hovered_empty_session_welcome: Option<NativeEmptySessionWelcomeHit>,
     hovered_hyperlink: Option<HyperlinkId>,
     hovered_command_block_id: Option<u64>,
     selection_anchor: Option<CellPoint>,
@@ -2772,6 +2833,8 @@ struct TerminalWindowApp {
     window_close_requested: bool,
     fallback_local_session_requested: bool,
     restart_exit_requested: bool,
+    empty_session_welcome: bool,
+    empty_session_notice: Option<String>,
     started: Instant,
     exited: bool,
     clipboard: Box<dyn ClipboardSink>,
@@ -2833,6 +2896,9 @@ impl TerminalWindowApp {
         };
         let mut app = TerminalApp::new(startup.transport, startup.size);
         app.install_builtin_plugin(BuiltInCommandsPlugin)?;
+        for command in native_window_command_registrations() {
+            app.register_command(command)?;
+        }
         for command in search_command_registrations() {
             app.register_command(command)?;
         }
@@ -2892,6 +2958,7 @@ impl TerminalWindowApp {
             hovered_session_tab: None,
             hovered_profile_action: None,
             hovered_update_notice: None,
+            hovered_empty_session_welcome: None,
             hovered_hyperlink: None,
             hovered_command_block_id: None,
             selection_anchor: None,
@@ -2904,6 +2971,8 @@ impl TerminalWindowApp {
             window_close_requested: false,
             fallback_local_session_requested: false,
             restart_exit_requested: false,
+            empty_session_welcome: false,
+            empty_session_notice: None,
             started,
             exited: false,
             clipboard: Box::new(SystemClipboardSink::new()),
@@ -2938,6 +3007,7 @@ impl TerminalWindowApp {
         self.refresh_search_after_terminal_change();
         let _ = self.refresh_session_tab_hover_for_current_pointer();
         let _ = self.refresh_profile_action_hover_for_current_pointer();
+        let _ = self.refresh_empty_session_welcome_hover_for_current_pointer();
         self.rebuild_frame();
     }
 
@@ -2960,6 +3030,7 @@ impl TerminalWindowApp {
         self.refresh_search_after_terminal_change();
         let _ = self.refresh_session_tab_hover_for_current_pointer();
         let _ = self.refresh_profile_action_hover_for_current_pointer();
+        let _ = self.refresh_empty_session_welcome_hover_for_current_pointer();
         self.rebuild_frame();
     }
 
@@ -3043,6 +3114,14 @@ impl TerminalWindowApp {
             &session_tabs,
             self.hovered_session_tab,
             self.session_tab_notice,
+            self.metrics,
+            self.size,
+        );
+        apply_empty_session_welcome_overlay(
+            &mut frame,
+            self.empty_session_welcome_visible(),
+            self.empty_session_notice.as_deref(),
+            self.hovered_empty_session_welcome,
             self.metrics,
             self.size,
         );
@@ -3180,6 +3259,17 @@ impl TerminalWindowApp {
         }
     }
 
+    fn refresh_empty_session_welcome_hover_for_current_pointer(&mut self) -> bool {
+        match self.pointer_position {
+            Some(position) => self.set_hovered_empty_session_welcome_for_position(position),
+            None => {
+                let changed = self.hovered_empty_session_welcome.is_some();
+                self.hovered_empty_session_welcome = None;
+                changed
+            }
+        }
+    }
+
     fn refresh_session_tab_hover_for_current_pointer(&mut self) -> bool {
         match self.pointer_position {
             Some(position) => self.set_hovered_session_tab_for_position(position),
@@ -3189,6 +3279,41 @@ impl TerminalWindowApp {
                 changed
             }
         }
+    }
+
+    fn empty_session_welcome_visible(&self) -> bool {
+        self.empty_session_welcome
+    }
+
+    fn enter_empty_session_welcome(&mut self) {
+        self.empty_session_welcome = true;
+        self.empty_session_notice = None;
+        self.command_block_action_menu.close();
+        self.ime_composition.clear_preedit();
+        self.terminal_search.close();
+        self.selection_anchor = None;
+        self.last_left_click = None;
+        self.hovered_session_tab = None;
+        self.session_tab_notice = None;
+        self.hovered_profile_action = None;
+        self.hovered_update_notice = None;
+        self.hovered_hyperlink = None;
+        self.hovered_command_block_id = None;
+        self.profile_actions.set_start_success(None);
+        self.profile_actions.set_start_failure(None);
+        self.profile_action_sessions.clear();
+        self.profile_action_session_runtimes.clear();
+        self.shell_integration = ShellIntegrationState::default();
+        self.synchronized_output_deadline = None;
+        self.cursor_blink = CursorBlinkState::default();
+        self.text_blink = TextBlinkState::default();
+        let _ = self.refresh_empty_session_welcome_hover_for_current_pointer();
+    }
+
+    fn clear_empty_session_welcome(&mut self) {
+        self.empty_session_welcome = false;
+        self.empty_session_notice = None;
+        self.hovered_empty_session_welcome = None;
     }
 
     fn take_window_close_request(&mut self) -> bool {
@@ -3228,8 +3353,61 @@ impl TerminalWindowApp {
         self.synchronized_output_deadline = None;
         self.cursor_blink = CursorBlinkState::default();
         self.text_blink = TextBlinkState::default();
+        self.clear_empty_session_welcome();
         self.rebuild_frame();
         Ok(())
+    }
+
+    fn start_empty_session_local_shell(&mut self) {
+        let config = local_new_tab_config(&self.local_tab_config, self.size);
+        let result = replace_with_tracked_local_session_with_spawner(
+            &mut self.app,
+            &mut self.terminal,
+            &mut self.terminal_search,
+            &mut self.shell_integration,
+            &mut self.profile_action_sessions,
+            &mut self.profile_action_session_runtimes,
+            config,
+            |config| {
+                LocalPtyTransport::spawn(config)
+                    .context("spawn local pty for empty-session welcome")
+            },
+            self.size,
+        );
+
+        match result {
+            Ok(_) => {
+                self.command_block_action_menu.close();
+                self.ime_composition.clear_preedit();
+                self.selection_anchor = None;
+                self.last_left_click = None;
+                self.hovered_session_tab = None;
+                self.session_tab_notice = None;
+                self.hovered_profile_action = None;
+                self.hovered_update_notice = None;
+                self.hovered_hyperlink = None;
+                self.hovered_command_block_id = None;
+                self.exited = false;
+                self.synchronized_output_deadline = None;
+                self.cursor_blink = CursorBlinkState::default();
+                self.text_blink = TextBlinkState::default();
+                self.clear_empty_session_welcome();
+                self.rebuild_frame();
+            }
+            Err(err) => {
+                eprintln!("failed to start local shell from empty-session welcome: {err:#}");
+                self.empty_session_notice = Some(format!("New local shell failed: {err:#}"));
+                self.rebuild_frame();
+            }
+        }
+    }
+
+    fn start_new_local_shell_command(&mut self) {
+        if self.empty_session_welcome_visible() {
+            self.start_empty_session_local_shell();
+        } else {
+            self.open_local_new_tab();
+        }
     }
 
     fn open_local_new_tab(&mut self) {
@@ -3262,6 +3440,7 @@ impl TerminalWindowApp {
                 self.synchronized_output_deadline = None;
                 self.cursor_blink = CursorBlinkState::default();
                 self.text_blink = TextBlinkState::default();
+                self.clear_empty_session_welcome();
                 self.rebuild_frame();
             }
             Err(err) => {
@@ -3309,6 +3488,8 @@ impl TerminalWindowApp {
             self.synchronized_output_deadline = None;
             self.cursor_blink = CursorBlinkState::default();
             self.text_blink = TextBlinkState::default();
+        } else if close_result == NativeSessionCloseResult::BlockedLastActive {
+            self.enter_empty_session_welcome();
         } else if requests.any() {
             self.synchronized_output_deadline = None;
         }
@@ -3535,6 +3716,11 @@ impl TerminalWindowApp {
     }
 
     fn handle_ime_event(&mut self, event: Ime) -> bool {
+        if self.empty_session_welcome_visible() && !self.command_palette.is_open() {
+            self.ime_composition.clear_preedit();
+            return false;
+        }
+
         let target = self.text_input_target();
         let result = apply_native_ime_event(&mut self.ime_composition, event);
 
@@ -3578,6 +3764,9 @@ impl TerminalWindowApp {
         }
 
         if is_search_shortcut(&event.logical_key, self.modifiers) {
+            if self.empty_session_welcome_visible() {
+                return;
+            }
             self.open_search();
             return;
         }
@@ -3598,12 +3787,17 @@ impl TerminalWindowApp {
         }
 
         if is_new_local_tab_shortcut(&event.logical_key, self.modifiers) {
-            self.open_local_new_tab();
+            self.start_new_local_shell_command();
             return;
         }
 
         if self.command_palette.is_open() {
             self.handle_command_palette_key(event);
+            return;
+        }
+
+        if self.empty_session_welcome_visible() {
+            self.handle_empty_session_welcome_key(event);
             return;
         }
 
@@ -3875,6 +4069,10 @@ impl TerminalWindowApp {
     }
 
     fn invoke_window_command(&mut self, command_id: &str) {
+        if command_id == WITTY_NEW_LOCAL_SHELL_COMMAND_ID {
+            self.start_new_local_shell_command();
+            return;
+        }
         if apply_search_command(&mut self.terminal, &mut self.terminal_search, command_id) {
             self.close_command_palette();
             self.command_block_action_menu.close();
@@ -3955,6 +4153,18 @@ impl TerminalWindowApp {
         };
         self.terminal.feed(message.as_bytes());
         true
+    }
+
+    fn handle_empty_session_welcome_key(&mut self, event: &KeyEvent) {
+        match &event.logical_key {
+            Key::Named(NamedKey::Enter) => self.start_empty_session_local_shell(),
+            Key::Character(value)
+                if value == " " && !self.modifiers.state().intersects(ModifiersState::all()) =>
+            {
+                self.start_empty_session_local_shell();
+            }
+            _ => {}
+        }
     }
 
     fn scroll_viewport(&mut self, delta: MouseScrollDelta) -> bool {
@@ -4132,6 +4342,23 @@ impl TerminalWindowApp {
         true
     }
 
+    fn set_hovered_empty_session_welcome_for_position(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> bool {
+        let hovered = if self.empty_session_welcome_visible() {
+            empty_session_welcome_hit_for_position(position, self.metrics, self.size)
+        } else {
+            None
+        };
+        if self.hovered_empty_session_welcome == hovered {
+            return false;
+        }
+
+        self.hovered_empty_session_welcome = hovered;
+        true
+    }
+
     fn set_hovered_session_tab_for_position(&mut self, position: PhysicalPosition<f64>) -> bool {
         let rows = self.profile_action_sessions.tab_rows();
         let hovered = native_session_tab_strip_hit_for_position(
@@ -4261,15 +4488,19 @@ impl TerminalWindowApp {
             &mut self.window_close_requested,
             &mut self.fallback_local_session_requested,
         );
+        if blocked {
+            self.enter_empty_session_welcome();
+        }
         if switched || closed || requests.fallback_local_session {
             self.command_block_action_menu.close();
             self.hovered_update_notice = None;
+            self.hovered_empty_session_welcome = None;
             self.hovered_profile_action = None;
             self.synchronized_output_deadline = None;
             self.cursor_blink = CursorBlinkState::default();
             self.text_blink = TextBlinkState::default();
         }
-        if switched || closed || requests.fallback_local_session {
+        if switched || closed || blocked || requests.fallback_local_session {
             self.session_tab_notice = None;
         } else {
             self.session_tab_notice =
@@ -4444,6 +4675,37 @@ impl TerminalWindowApp {
 
         if hit.target == NativeUpdateNoticeTarget::Restart {
             self.restart_to_installed_update();
+        }
+        true
+    }
+
+    fn handle_empty_session_welcome_click(
+        &mut self,
+        state: ElementState,
+        button: MouseButton,
+    ) -> bool {
+        if !self.empty_session_welcome_visible()
+            || state != ElementState::Pressed
+            || button != MouseButton::Left
+        {
+            return false;
+        }
+
+        let Some(position) = self.pointer_position else {
+            return false;
+        };
+        let Some(hit) = empty_session_welcome_hit_for_position(position, self.metrics, self.size)
+        else {
+            return false;
+        };
+
+        match hit.target {
+            NativeEmptySessionWelcomeTarget::NewLocalShell => {
+                self.start_empty_session_local_shell();
+            }
+            NativeEmptySessionWelcomeTarget::CommandPalette => {
+                self.open_command_palette();
+            }
         }
         true
     }
@@ -4656,6 +4918,7 @@ impl TerminalWindowApp {
         self.synchronized_output_deadline = None;
         self.cursor_blink = CursorBlinkState::default();
         self.text_blink = TextBlinkState::default();
+        self.clear_empty_session_welcome();
         self.profile_actions
             .set_start_success(Some(native_profile_action_start_success_row(
                 &execution.plan,
@@ -4698,6 +4961,7 @@ impl TerminalWindowApp {
             self.synchronized_output_deadline = None;
             self.cursor_blink = CursorBlinkState::default();
             self.text_blink = TextBlinkState::default();
+            self.clear_empty_session_welcome();
             self.rebuild_frame();
         }
         Ok(execution)
@@ -4735,6 +4999,12 @@ impl TerminalWindowApp {
         }
         if self.handle_profile_action_overlay_click(state, button) {
             return true;
+        }
+        if self.handle_empty_session_welcome_click(state, button) {
+            return true;
+        }
+        if self.empty_session_welcome_visible() {
+            return false;
         }
         if self.handle_session_tab_strip_click(state, button) {
             return true;
@@ -4793,11 +5063,13 @@ impl TerminalWindowApp {
         let update_hover_changed = self.set_hovered_update_notice_for_position(position);
         if self.hovered_update_notice.is_some() {
             let profile_hover_changed = self.hovered_profile_action.take().is_some();
+            let empty_hover_changed = self.hovered_empty_session_welcome.take().is_some();
             let session_hover_changed = self.hovered_session_tab.take().is_some();
             let hyperlink_hover_changed = self.hovered_hyperlink.take().is_some();
             let command_block_hover_changed = self.hovered_command_block_id.take().is_some();
             let hover_changed = update_hover_changed
                 || profile_hover_changed
+                || empty_hover_changed
                 || session_hover_changed
                 || hyperlink_hover_changed
                 || command_block_hover_changed;
@@ -4809,10 +5081,27 @@ impl TerminalWindowApp {
 
         let profile_hover_changed = self.set_hovered_profile_action_for_position(position);
         if self.hovered_profile_action.is_some() {
+            let empty_hover_changed = self.hovered_empty_session_welcome.take().is_some();
             let session_hover_changed = self.hovered_session_tab.take().is_some();
             let hyperlink_hover_changed = self.hovered_hyperlink.take().is_some();
             let command_block_hover_changed = self.hovered_command_block_id.take().is_some();
             let hover_changed = profile_hover_changed
+                || empty_hover_changed
+                || session_hover_changed
+                || hyperlink_hover_changed
+                || command_block_hover_changed;
+            if hover_changed {
+                self.rebuild_frame();
+            }
+            return hover_changed;
+        }
+
+        let empty_hover_changed = self.set_hovered_empty_session_welcome_for_position(position);
+        if self.hovered_empty_session_welcome.is_some() {
+            let session_hover_changed = self.hovered_session_tab.take().is_some();
+            let hyperlink_hover_changed = self.hovered_hyperlink.take().is_some();
+            let command_block_hover_changed = self.hovered_command_block_id.take().is_some();
+            let hover_changed = empty_hover_changed
                 || session_hover_changed
                 || hyperlink_hover_changed
                 || command_block_hover_changed;
@@ -4838,9 +5127,17 @@ impl TerminalWindowApp {
         let command_block_hover_changed = self.set_hovered_command_block_for_position(position);
         let hover_changed = update_hover_changed
             || profile_hover_changed
+            || empty_hover_changed
             || session_hover_changed
             || hyperlink_hover_changed
             || command_block_hover_changed;
+
+        if self.empty_session_welcome_visible() {
+            if hover_changed {
+                self.rebuild_frame();
+            }
+            return hover_changed;
+        }
 
         if mouse_local_override_action(
             self.mouse_reporting_active(),
@@ -4869,6 +5166,10 @@ impl TerminalWindowApp {
     }
 
     fn handle_mouse_wheel(&mut self, delta: MouseScrollDelta) -> bool {
+        if self.empty_session_welcome_visible() {
+            return false;
+        }
+
         if mouse_local_override_action(
             self.mouse_reporting_active(),
             self.mouse_override_policy,
@@ -4888,6 +5189,10 @@ impl TerminalWindowApp {
     }
 
     fn handle_focus_event(&mut self, focused: bool) -> bool {
+        if self.empty_session_welcome_visible() {
+            return false;
+        }
+
         let kind = if focused {
             FocusEventKind::In
         } else {
@@ -6433,6 +6738,240 @@ fn apply_native_ime_event(composition: &mut ImeComposition, event: Ime) -> Nativ
 
 fn has_command(commands: &[CommandRegistration], command_id: &str) -> bool {
     commands.iter().any(|command| command.id == command_id)
+}
+
+fn native_window_command_registrations() -> Vec<CommandRegistration> {
+    vec![CommandRegistration {
+        id: WITTY_NEW_LOCAL_SHELL_COMMAND_ID.to_owned(),
+        title: "New Local Shell".to_owned(),
+        source_plugin: "builtin".to_owned(),
+    }]
+}
+
+fn apply_empty_session_welcome_overlay(
+    frame: &mut FramePlan,
+    visible: bool,
+    notice: Option<&str>,
+    hovered: Option<NativeEmptySessionWelcomeHit>,
+    metrics: CellMetrics,
+    grid_size: GridSize,
+) {
+    if !visible {
+        return;
+    }
+
+    frame.backgrounds.clear();
+    frame.glyphs.clear();
+    frame.cursor = None;
+    frame.selection.clear();
+    frame.search_highlights.clear();
+    frame.hyperlink_hover.clear();
+    frame.hyperlink_underlines.clear();
+    frame.text_decorations.clear();
+    frame.ime_preedit.clear();
+
+    if grid_size.rows == 0 || grid_size.cols == 0 {
+        return;
+    }
+
+    frame.backgrounds.push(RectBatchItem {
+        origin: cell_origin(CellPoint::new(0, 0), metrics),
+        size: PixelSize {
+            width: f32::from(grid_size.cols) * metrics.cell.width,
+            height: f32::from(grid_size.rows) * metrics.cell.height,
+        },
+        color: Rgba::rgb(10, 14, 18),
+    });
+
+    let Some(panel) = empty_session_welcome_panel(grid_size) else {
+        return;
+    };
+
+    push_centered_palette_text(
+        frame,
+        panel,
+        metrics,
+        0,
+        "No active shell",
+        Rgba::rgb(232, 238, 236),
+    );
+    push_centered_palette_text(
+        frame,
+        panel,
+        metrics,
+        1,
+        "Last shell exited.",
+        Rgba::rgb(154, 168, 172),
+    );
+    if let Some(notice) = empty_session_notice_text(notice) {
+        push_centered_palette_text(frame, panel, metrics, 2, &notice, Rgba::rgb(238, 190, 148));
+    }
+
+    let button_row = empty_session_welcome_button_row(panel);
+    let content_width = panel.cols.saturating_sub(2);
+    if content_width == 0 {
+        return;
+    }
+    for span in empty_session_welcome_button_spans(content_width) {
+        if hovered.is_some_and(|hit| hit.target == span.target) {
+            frame.backgrounds.push(RectBatchItem {
+                origin: cell_origin(
+                    CellPoint::new(
+                        panel.start.row + button_row,
+                        panel.start.col + 1 + span.start_col,
+                    ),
+                    metrics,
+                ),
+                size: PixelSize {
+                    width: f32::from(span.end_col.saturating_sub(span.start_col))
+                        * metrics.cell.width,
+                    height: metrics.cell.height,
+                },
+                color: empty_session_welcome_hover_color(span.target),
+            });
+        }
+    }
+    push_palette_text(
+        frame,
+        panel,
+        metrics,
+        button_row,
+        1,
+        &empty_session_welcome_buttons_text(content_width),
+        Rgba::rgb(214, 228, 226),
+    );
+}
+
+fn empty_session_welcome_panel(grid_size: GridSize) -> Option<PalettePanel> {
+    if grid_size.rows < 3 || grid_size.cols < 12 {
+        return None;
+    }
+
+    let panel_cols = if grid_size.cols > 72 {
+        64
+    } else {
+        grid_size.cols.saturating_sub(4).max(1)
+    };
+    let panel_rows = 4.min(grid_size.rows);
+    Some(PalettePanel {
+        start: CellPoint::new(
+            grid_size.rows.saturating_sub(panel_rows) / 2,
+            grid_size.cols.saturating_sub(panel_cols) / 2,
+        ),
+        cols: panel_cols,
+        rows: panel_rows,
+        item_rows: 0,
+    })
+}
+
+fn empty_session_notice_text(notice: Option<&str>) -> Option<String> {
+    let notice = notice?;
+    let text = notice.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!text.is_empty()).then_some(text)
+}
+
+fn empty_session_welcome_button_row(panel: PalettePanel) -> u16 {
+    panel.rows.saturating_sub(1)
+}
+
+fn empty_session_welcome_buttons_text(width: u16) -> String {
+    let spans = empty_session_welcome_button_spans(width);
+    if spans.is_empty() {
+        return String::new();
+    }
+
+    let mut text = String::new();
+    let mut col = 0u16;
+    for span in spans {
+        if span.start_col > col {
+            text.push_str(&" ".repeat(usize::from(span.start_col - col)));
+        }
+        text.push_str(empty_session_welcome_button_text(span.target).as_str());
+        col = span.end_col;
+    }
+    truncate_cells(&text, width)
+}
+
+fn empty_session_welcome_button_spans(width: u16) -> Vec<NativeEmptySessionWelcomeButtonSpan> {
+    let targets = [
+        NativeEmptySessionWelcomeTarget::NewLocalShell,
+        NativeEmptySessionWelcomeTarget::CommandPalette,
+    ];
+    let mut count = targets.len();
+    while count > 0 {
+        let button_width = targets
+            .iter()
+            .take(count)
+            .map(|target| text_cell_width(&empty_session_welcome_button_text(*target)))
+            .fold(0u16, |total, width| total.saturating_add(width));
+        let total_width = button_width.saturating_add(count.saturating_sub(1) as u16);
+        if total_width <= width {
+            let mut spans = Vec::with_capacity(count);
+            let mut col = width.saturating_sub(total_width) / 2;
+            for target in targets.iter().take(count) {
+                let button_width = text_cell_width(&empty_session_welcome_button_text(*target));
+                spans.push(NativeEmptySessionWelcomeButtonSpan {
+                    target: *target,
+                    start_col: col,
+                    end_col: col.saturating_add(button_width),
+                });
+                col = col.saturating_add(button_width).saturating_add(1);
+            }
+            return spans;
+        }
+        count -= 1;
+    }
+    Vec::new()
+}
+
+fn empty_session_welcome_button_text(target: NativeEmptySessionWelcomeTarget) -> String {
+    match target {
+        NativeEmptySessionWelcomeTarget::NewLocalShell => "[New Local Shell]".to_owned(),
+        NativeEmptySessionWelcomeTarget::CommandPalette => "[Command Palette]".to_owned(),
+    }
+}
+
+fn empty_session_welcome_hit_for_position(
+    position: PhysicalPosition<f64>,
+    metrics: CellMetrics,
+    grid_size: GridSize,
+) -> Option<NativeEmptySessionWelcomeHit> {
+    let point = pixel_point_for_position(position)?;
+    empty_session_welcome_hit_for_pixel_point(point, metrics, grid_size)
+}
+
+fn empty_session_welcome_hit_for_pixel_point(
+    point: PixelPoint,
+    metrics: CellMetrics,
+    grid_size: GridSize,
+) -> Option<NativeEmptySessionWelcomeHit> {
+    let panel = empty_session_welcome_panel(grid_size)?;
+    let cell = cell_point_for_pixel_point(point, metrics, grid_size);
+    if cell.row
+        != panel
+            .start
+            .row
+            .saturating_add(empty_session_welcome_button_row(panel))
+        || cell.col <= panel.start.col
+        || cell.col >= panel.start.col.saturating_add(panel.cols).saturating_sub(1)
+    {
+        return None;
+    }
+
+    let text_col = cell.col.saturating_sub(panel.start.col).saturating_sub(1);
+    empty_session_welcome_button_spans(panel.cols.saturating_sub(2))
+        .into_iter()
+        .find(|span| text_col >= span.start_col && text_col < span.end_col)
+        .map(|span| NativeEmptySessionWelcomeHit {
+            target: span.target,
+        })
+}
+
+fn empty_session_welcome_hover_color(target: NativeEmptySessionWelcomeTarget) -> Rgba {
+    match target {
+        NativeEmptySessionWelcomeTarget::NewLocalShell => Rgba::with_alpha(48, 108, 72, 170),
+        NativeEmptySessionWelcomeTarget::CommandPalette => Rgba::with_alpha(48, 82, 132, 170),
+    }
 }
 
 fn apply_search_bar_overlay(
@@ -8046,6 +8585,29 @@ fn push_palette_text(
         color,
         style_flags: CellFlags::default(),
     });
+}
+
+fn push_centered_palette_text(
+    frame: &mut FramePlan,
+    panel: PalettePanel,
+    metrics: CellMetrics,
+    row_offset: u16,
+    text: &str,
+    color: Rgba,
+) {
+    if row_offset >= panel.rows || panel.cols == 0 {
+        return;
+    }
+
+    let width = panel.cols.saturating_sub(2).max(1);
+    let text = truncate_cells(text, width);
+    let col_offset = if panel.cols <= 2 {
+        0
+    } else {
+        let text_width = text_cell_width(&text).min(width);
+        1 + width.saturating_sub(text_width) / 2
+    };
+    push_palette_text(frame, panel, metrics, row_offset, col_offset, &text, color);
 }
 
 fn search_ime_cursor_cell(
@@ -10135,6 +10697,115 @@ mod tests {
     }
 
     #[test]
+    fn empty_session_local_shell_replaces_exited_runtime_without_parking_stale_buffer() {
+        let exited_size = GridSize::new(3, 24);
+        let new_size = GridSize::new(5, 40);
+        let mut app = TerminalApp::new(MockTransport::new(exited_size), exited_size);
+        app.write_input(b"dead-runtime").unwrap();
+
+        let mut terminal = BasicTerminal::with_scrollback_limit(exited_size, 11);
+        terminal.feed(b"stale exited terminal text");
+        let mut terminal_search = TerminalSearch::default();
+        terminal_search.open(&terminal.search_text_rows(), Some("stale"));
+        let mut shell_integration = ShellIntegrationState::default();
+        shell_integration.apply_current_directory(test_current_directory("/stale"));
+        let mut sessions = NativeSessionRegistry::default();
+        let mut parked_sessions = NativeSessionRuntimeRegistry::default();
+        let mut template = LocalPtyConfig::new(exited_size);
+        template.program = Some("/bin/zsh".to_owned());
+        template.args(["-l"]);
+        template.cwd("/work/project");
+        template.env("WITTY_SESSION", "daily");
+        let config = local_new_tab_config(&template, new_size);
+        let mut captured_config = None;
+
+        let session_id = replace_with_tracked_local_session_with_spawner(
+            &mut app,
+            &mut terminal,
+            &mut terminal_search,
+            &mut shell_integration,
+            &mut sessions,
+            &mut parked_sessions,
+            config.clone(),
+            |config| {
+                captured_config = Some(config.clone());
+                Ok(MockTransport::new(config.size))
+            },
+            new_size,
+        )
+        .unwrap();
+
+        assert_eq!(captured_config, Some(config));
+        assert_eq!(session_id, NativeSessionId(1));
+        assert_eq!(sessions.as_slice().len(), 1);
+        assert_eq!(sessions.active().unwrap().id, session_id);
+        assert_eq!(
+            sessions.active().unwrap().profile_action.profile_id,
+            "local-1"
+        );
+        assert_eq!(
+            sessions.active().unwrap().profile_action.mode,
+            NativeProfileActionStartMode::ReplaceCurrentSession
+        );
+        assert_eq!(parked_sessions.as_slice().len(), 0);
+        app.write_input(b"new-local").unwrap();
+        assert_eq!(app.transport().written(), b"new-local");
+        assert_eq!(app.transport().size(), new_size);
+        assert_eq!(terminal.max_scrollback_lines(), 11);
+        assert!(terminal
+            .search_text_rows()
+            .iter()
+            .all(|row| !row.text.contains("stale exited terminal text")));
+        assert!(!terminal_search.is_open());
+        assert_eq!(shell_integration.current_directory(), None);
+    }
+
+    #[test]
+    fn empty_session_local_shell_spawn_failure_preserves_exited_state() {
+        let size = GridSize::new(3, 24);
+        let mut app = TerminalApp::new(MockTransport::new(size), size);
+        app.write_input(b"dead-runtime").unwrap();
+
+        let mut terminal = BasicTerminal::with_scrollback_limit(size, 11);
+        terminal.feed(b"stale exited terminal text");
+        let mut terminal_search = TerminalSearch::default();
+        terminal_search.open(&terminal.search_text_rows(), Some("stale"));
+        let mut shell_integration = ShellIntegrationState::default();
+        shell_integration.apply_current_directory(test_current_directory("/stale"));
+        let mut sessions = NativeSessionRegistry::default();
+        let mut parked_sessions = NativeSessionRuntimeRegistry::default();
+
+        let err = replace_with_tracked_local_session_with_spawner(
+            &mut app,
+            &mut terminal,
+            &mut terminal_search,
+            &mut shell_integration,
+            &mut sessions,
+            &mut parked_sessions,
+            LocalPtyConfig::new(size),
+            |_config| Err(anyhow::anyhow!("new local shell unavailable")),
+            size,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "new local shell unavailable");
+        assert_eq!(app.transport().written(), b"dead-runtime");
+        assert!(terminal
+            .search_text_rows()
+            .iter()
+            .any(|row| row.text.contains("stale exited terminal")));
+        assert!(terminal_search.is_open());
+        assert_eq!(
+            shell_integration
+                .current_directory()
+                .map(|directory| directory.path.as_str()),
+            Some("/stale")
+        );
+        assert!(sessions.as_slice().is_empty());
+        assert!(parked_sessions.as_slice().is_empty());
+    }
+
+    #[test]
     fn native_profile_action_new_tab_start_parks_runtime_without_replacing_active_state() {
         let size = GridSize::new(3, 24);
         let mut app = TerminalApp::new(MockTransport::new(size), size);
@@ -10266,6 +10937,63 @@ mod tests {
             parked_sessions.as_slice()[0].runtime.transport.written(),
             b"active-write-still-active"
         );
+    }
+
+    #[test]
+    fn native_profile_action_new_tab_without_active_session_starts_active_runtime() {
+        let size = GridSize::new(3, 24);
+        let mut app = TerminalApp::new(MockTransport::new(size), size);
+        app.write_input(b"dead-runtime").unwrap();
+
+        let mut terminal = BasicTerminal::with_scrollback_limit(size, 11);
+        terminal.feed(b"stale exited terminal text");
+        let mut terminal_search = TerminalSearch::default();
+        terminal_search.open(&terminal.search_text_rows(), Some("stale"));
+        let mut shell_integration = ShellIntegrationState::default();
+        shell_integration.apply_current_directory(test_current_directory("/stale"));
+        let mut sessions = NativeSessionRegistry::default();
+        let mut parked_sessions = NativeSessionRuntimeRegistry::default();
+
+        let handoff = test_profile_action_handoff(
+            PendingProfileActionKey::profile_launch(1),
+            NativeResolvedProfileActionKind::ProfileLaunch,
+            "prod",
+            "open production",
+            "prod.example.com",
+        );
+        let plan = native_profile_action_start_plan(handoff, NativeProfileActionStartMode::NewTab);
+
+        let execution = apply_native_profile_action_start_plan_with_transport(
+            &mut app,
+            &mut terminal,
+            &mut terminal_search,
+            &mut shell_integration,
+            &mut sessions,
+            &mut parked_sessions,
+            plan,
+            MockTransport::new(size),
+            size,
+        );
+
+        assert_eq!(
+            execution.plan.mode,
+            NativeProfileActionStartMode::ReplaceCurrentSession
+        );
+        assert_eq!(sessions.as_slice().len(), 1);
+        assert_eq!(sessions.active().unwrap().profile_action.profile_id, "prod");
+        assert_eq!(
+            sessions.active().unwrap().profile_action.mode,
+            NativeProfileActionStartMode::ReplaceCurrentSession
+        );
+        assert!(parked_sessions.as_slice().is_empty());
+        app.write_input(b"profile-write").unwrap();
+        assert_eq!(app.transport().written(), b"profile-write");
+        assert!(terminal
+            .search_text_rows()
+            .iter()
+            .all(|row| !row.text.contains("stale exited terminal text")));
+        assert!(!terminal_search.is_open());
+        assert_eq!(shell_integration.current_directory(), None);
     }
 
     #[test]
@@ -14907,6 +15635,153 @@ mod tests {
             profile_action_overlay_target_for_text_col(&snapshot.display_rows[1], 0, width),
             NativeProfileActionOverlayTarget::Row
         );
+    }
+
+    #[test]
+    fn empty_session_welcome_overlay_hides_stale_terminal_frame_and_renders_actions() {
+        let metrics = CellMetrics::default();
+        let grid_size = GridSize::new(12, 80);
+        let mut frame = FramePlan {
+            glyphs: vec![GlyphBatchItem {
+                origin: cell_origin(CellPoint::new(5, 4), metrics),
+                text: "[process exited] stale terminal text".to_owned(),
+                color: Rgba::WHITE,
+                style_flags: CellFlags::default(),
+            }],
+            cursor: Some(RectBatchItem {
+                origin: cell_origin(CellPoint::new(5, 4), metrics),
+                size: metrics.cell,
+                color: Rgba::WHITE,
+            }),
+            selection: vec![RectBatchItem {
+                origin: cell_origin(CellPoint::new(5, 4), metrics),
+                size: metrics.cell,
+                color: Rgba::WHITE,
+            }],
+            search_highlights: vec![RectBatchItem {
+                origin: cell_origin(CellPoint::new(5, 4), metrics),
+                size: metrics.cell,
+                color: Rgba::WHITE,
+            }],
+            hyperlink_underlines: vec![RectBatchItem {
+                origin: cell_origin(CellPoint::new(5, 4), metrics),
+                size: metrics.cell,
+                color: Rgba::WHITE,
+            }],
+            ..FramePlan::default()
+        };
+
+        apply_empty_session_welcome_overlay(&mut frame, true, None, None, metrics, grid_size);
+
+        assert!(frame.cursor.is_none());
+        assert!(frame.selection.is_empty());
+        assert!(frame.search_highlights.is_empty());
+        assert!(frame.hyperlink_underlines.is_empty());
+        assert!(!frame
+            .glyphs
+            .iter()
+            .any(|glyph| glyph.text.contains("stale terminal text")));
+        assert!(frame
+            .glyphs
+            .iter()
+            .any(|glyph| glyph.text.contains("No active shell")));
+        assert!(frame
+            .glyphs
+            .iter()
+            .any(|glyph| glyph.text.contains("[New Local Shell]")));
+        assert!(frame
+            .glyphs
+            .iter()
+            .any(|glyph| glyph.text.contains("[Command Palette]")));
+    }
+
+    #[test]
+    fn empty_session_welcome_hit_test_maps_visible_buttons_only() {
+        let metrics = CellMetrics::default();
+        let grid_size = GridSize::new(12, 80);
+        let panel = empty_session_welcome_panel(grid_size).unwrap();
+        let button_row = panel.start.row + empty_session_welcome_button_row(panel);
+        let spans = empty_session_welcome_button_spans(panel.cols.saturating_sub(2));
+        let local_span = spans
+            .iter()
+            .find(|span| span.target == NativeEmptySessionWelcomeTarget::NewLocalShell)
+            .unwrap();
+        let palette_span = spans
+            .iter()
+            .find(|span| span.target == NativeEmptySessionWelcomeTarget::CommandPalette)
+            .unwrap();
+
+        let local_hit = empty_session_welcome_hit_for_position(
+            physical_position_for_cell(
+                CellPoint::new(button_row, panel.start.col + 1 + local_span.start_col),
+                metrics,
+            ),
+            metrics,
+            grid_size,
+        )
+        .unwrap();
+        let palette_hit = empty_session_welcome_hit_for_position(
+            physical_position_for_cell(
+                CellPoint::new(button_row, panel.start.col + 1 + palette_span.start_col),
+                metrics,
+            ),
+            metrics,
+            grid_size,
+        )
+        .unwrap();
+        let title_hit = empty_session_welcome_hit_for_position(
+            physical_position_for_cell(
+                CellPoint::new(panel.start.row, panel.start.col + 1),
+                metrics,
+            ),
+            metrics,
+            grid_size,
+        );
+        let outside_hit = empty_session_welcome_hit_for_position(
+            physical_position_for_cell(CellPoint::new(button_row, 0), metrics),
+            metrics,
+            grid_size,
+        );
+
+        assert_eq!(
+            local_hit.target,
+            NativeEmptySessionWelcomeTarget::NewLocalShell
+        );
+        assert_eq!(
+            palette_hit.target,
+            NativeEmptySessionWelcomeTarget::CommandPalette
+        );
+        assert_eq!(title_hit, None);
+        assert_eq!(outside_hit, None);
+    }
+
+    #[test]
+    fn empty_session_welcome_overlay_shows_sanitized_start_failure_notice() {
+        let metrics = CellMetrics::default();
+        let mut frame = FramePlan::default();
+
+        apply_empty_session_welcome_overlay(
+            &mut frame,
+            true,
+            Some("New local shell failed:\npty unavailable"),
+            None,
+            metrics,
+            GridSize::new(12, 80),
+        );
+
+        assert!(frame.glyphs.iter().any(|glyph| glyph
+            .text
+            .contains("New local shell failed: pty unavailable")));
+    }
+
+    #[test]
+    fn native_window_commands_include_new_local_shell() {
+        let commands = native_window_command_registrations();
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].id, WITTY_NEW_LOCAL_SHELL_COMMAND_ID);
+        assert_eq!(commands[0].title, "New Local Shell");
+        assert_eq!(commands[0].source_plugin, "builtin");
     }
 
     #[test]
