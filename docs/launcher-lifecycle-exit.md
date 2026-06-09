@@ -1,6 +1,6 @@
 # Launcher Lifecycle Exit
 
-Updated: 2026-05-30
+Updated: 2026-06-09
 
 ## Purpose
 
@@ -32,3 +32,15 @@ The test fails if:
 
 Cleanup still sends `SIGTERM` only after failures or for non-launcher smoke
 modes that intentionally keep helper servers alive until the harness ends.
+
+## Native Last Shell Exit
+
+The native local PTY path treats the active child process exit as a last-session
+close event. The built-in default policy is `close-window`, so pressing Ctrl-D
+in the last local shell exits Witty.
+
+Set `window-last-active-close = "block"` in `.wittyrc`, or
+`window_last_active_close = "block"` in the legacy `window.v1.json`, to keep
+the window open after the last shell exits. That non-closing state leaves the
+runtime marked exited so a follow-up welcome-screen flow can detect that no
+active shell remains.

@@ -1266,6 +1266,16 @@ impl AppOptions {
                 self.font_family = Some(parse_wittyrc_font_family(&value)?);
             }
         }
+        if !self.explicit.window_last_active_close_policy {
+            if let Some(value) = config.window_last_active_close {
+                self.window_smoke.last_active_close_policy =
+                    parse_window_last_active_close_policy_value(
+                        &value,
+                        "window-last-active-close",
+                    )?;
+                self.explicit.window_last_active_close_policy = true;
+            }
+        }
         Ok(())
     }
 }
@@ -1406,6 +1416,8 @@ struct NativeWindowConfig {
 struct WittyrcConfig {
     #[serde(default, rename = "font-family")]
     font_family: Option<String>,
+    #[serde(default, rename = "window-last-active-close")]
+    window_last_active_close: Option<String>,
 }
 
 fn default_native_window_config_path() -> Result<PathBuf> {
@@ -1493,7 +1505,7 @@ fn native_window_config_template() -> String {
         "scrollback_lines": 20000,
         "mouse_selection_override": "shift-select",
         "osc52_clipboard": "disabled",
-        "window_last_active_close": "block"
+        "window_last_active_close": "close-window"
     });
     let mut text = serde_json::to_string_pretty(&template)
         .expect("native window config template should serialize");
@@ -1764,6 +1776,7 @@ fn wittyrc_effective_config_summary(
         "font_family": font_config.family(),
         "font_size": font_config.font_size(),
         "font_source_count": options.font_paths.len(),
+        "window_last_active_close": options.window_smoke.last_active_close_policy.as_config_value(),
     });
     let mut text = serde_json::to_string_pretty(&value)
         .context("serialize wittyrc effective config summary")?;
@@ -3252,13 +3265,13 @@ mod tests {
     }
 
     #[test]
-    fn app_options_parse_window_defaults_last_active_close_to_block() {
+    fn app_options_parse_window_defaults_last_active_close_to_close_window() {
         let options = AppOptions::parse(["--window".to_owned()]).unwrap();
 
         assert_eq!(options.mode, AppMode::Window);
         assert_eq!(
             options.window_smoke.last_active_close_policy,
-            WindowLastActiveClosePolicy::Block
+            WindowLastActiveClosePolicy::CloseWindow
         );
     }
 
@@ -3591,7 +3604,7 @@ mod tests {
     }
 
     #[test]
-    fn wittyrc_template_is_bundled_toml_with_maple_font_family() {
+    fn wittyrc_template_is_bundled_toml_with_maple_font_family_and_exit_policy() {
         let template = wittyrc_template();
         let config: WittyrcConfig = toml::from_str(template).unwrap();
 
@@ -3599,7 +3612,12 @@ mod tests {
             config.font_family.as_deref(),
             Some(RECOMMENDED_TERMINAL_FONT_FAMILY)
         );
+        assert_eq!(
+            config.window_last_active_close.as_deref(),
+            Some("close-window")
+        );
         assert!(template.contains("font-family = \"Maple Mono NF CN\""));
+        assert!(template.contains("window-last-active-close = \"close-window\""));
         assert!(template.ends_with('\n'));
     }
 
@@ -3629,6 +3647,7 @@ mod tests {
             config.font_family.as_deref(),
             Some(RECOMMENDED_TERMINAL_FONT_FAMILY)
         );
+        assert_eq!(config.window_last_active_close, None);
         assert!(read_wittyrc_config(&root.join("missing.wittyrc"))
             .unwrap()
             .is_none());
@@ -3658,6 +3677,7 @@ mod tests {
                     assert_eq!(path, Path::new("/configs/.wittyrc"));
                     Ok(Some(WittyrcConfig {
                         font_family: Some("Maple Mono NF CN".to_owned()),
+                        window_last_active_close: Some("block".to_owned()),
                     }))
                 },
             )
@@ -3671,6 +3691,7 @@ mod tests {
                     Ok(Some(NativeWindowConfig {
                         font_family: Some("Hack Nerd Font".to_owned()),
                         font_size: Some(18),
+                        window_last_active_close: Some("close-window".to_owned()),
                         ..NativeWindowConfig::default()
                     }))
                 },
@@ -3684,6 +3705,10 @@ mod tests {
             Some(RECOMMENDED_TERMINAL_FONT_FAMILY)
         );
         assert_eq!(options.font_size, Some(18));
+        assert_eq!(
+            options.window_smoke.last_active_close_policy,
+            WindowLastActiveClosePolicy::Block
+        );
 
         let mut env_options = app_options_parse_with_env(
             ["--window", "--wittyrc", "/configs/.wittyrc"],
@@ -3699,6 +3724,7 @@ mod tests {
                 |_| {
                     Ok(Some(WittyrcConfig {
                         font_family: Some("Maple Mono NF CN".to_owned()),
+                        ..WittyrcConfig::default()
                     }))
                 },
             )
@@ -3799,6 +3825,7 @@ mod tests {
                 assert_eq!(path, Path::new("/candidate/.wittyrc"));
                 Ok(Some(WittyrcConfig {
                     font_family: Some("Maple Mono NF CN".to_owned()),
+                    ..WittyrcConfig::default()
                 }))
             },
         )
@@ -3850,6 +3877,7 @@ mod tests {
                 |_| {
                     Ok(Some(WittyrcConfig {
                         font_family: Some("Maple Mono NF CN".to_owned()),
+                        ..WittyrcConfig::default()
                     }))
                 },
             )
@@ -3921,6 +3949,10 @@ mod tests {
         assert_eq!(
             options.osc52_clipboard_policy,
             Osc52ClipboardPolicy::Disabled
+        );
+        assert_eq!(
+            options.window_smoke.last_active_close_policy,
+            WindowLastActiveClosePolicy::CloseWindow
         );
         assert!(template.ends_with('\n'));
     }

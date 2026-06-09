@@ -93,8 +93,8 @@ pub struct WindowSmokeOptions {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WindowLastActiveClosePolicy {
-    #[default]
     Block,
+    #[default]
     CloseWindow,
     FallbackLocalSession,
 }
@@ -1002,6 +1002,40 @@ where
     activated_target && closed_old_active
 }
 
+fn close_exited_active_native_session<T>(
+    app: &mut TerminalApp<T>,
+    terminal: &mut BasicTerminal,
+    terminal_search: &mut TerminalSearch,
+    shell_integration: &mut ShellIntegrationState,
+    sessions: &mut NativeSessionRegistry,
+    parked_sessions: &mut NativeSessionRuntimeRegistry<T>,
+    policy: NativeActiveSessionCloseFallbackPolicy,
+) -> NativeSessionCloseResult
+where
+    T: TerminalTransport,
+{
+    if sessions.active().is_none() {
+        return native_session_close_result_for_last_active_policy(policy);
+    }
+
+    if close_active_native_session_by_switching_to_parked(
+        app,
+        terminal,
+        terminal_search,
+        shell_integration,
+        sessions,
+        parked_sessions,
+    ) {
+        return NativeSessionCloseResult::Closed;
+    }
+
+    if !has_inactive_parked_native_session_runtime(sessions, parked_sessions) {
+        return native_session_close_result_for_last_active_policy(policy);
+    }
+
+    NativeSessionCloseResult::Ignored
+}
+
 fn replace_with_untracked_local_session<T>(
     app: &mut TerminalApp<T>,
     terminal: &mut BasicTerminal,
@@ -1201,8 +1235,8 @@ impl NativeSessionCloseEventRequests {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum NativeActiveSessionCloseFallbackPolicy {
-    #[default]
     Block,
+    #[default]
     CloseWindow,
     FallbackLocalSession,
 }
@@ -1276,6 +1310,14 @@ fn native_session_close_result_for_fallback_action(
     }
 }
 
+fn native_session_close_result_for_last_active_policy(
+    policy: NativeActiveSessionCloseFallbackPolicy,
+) -> NativeSessionCloseResult {
+    native_session_close_result_for_fallback_action(
+        native_active_session_close_fallback_action_without_switch_target(policy),
+    )
+}
+
 fn native_session_close_event_requests(
     result: NativeSessionCloseResult,
 ) -> NativeSessionCloseEventRequests {
@@ -1292,6 +1334,16 @@ fn native_session_close_event_requests(
         | NativeSessionCloseResult::BlockedLastActive
         | NativeSessionCloseResult::Ignored => NativeSessionCloseEventRequests::default(),
     }
+}
+
+fn has_inactive_parked_native_session_runtime<T>(
+    sessions: &NativeSessionRegistry,
+    parked_sessions: &NativeSessionRuntimeRegistry<T>,
+) -> bool {
+    sessions
+        .inactive_session_ids()
+        .into_iter()
+        .any(|id| parked_sessions.contains(id))
 }
 
 fn take_native_event_request_flag(requested: &mut bool) -> bool {
@@ -3220,6 +3272,50 @@ impl TerminalWindowApp {
         }
     }
 
+    fn handle_active_transport_exit(&mut self, code: Option<i32>) -> NativeSessionCloseResult {
+        self.exited = true;
+        let message = match code {
+            Some(code) => format!("\r\n[process exited: {code}]\r\n"),
+            None => "\r\n[process exited]\r\n".to_owned(),
+        };
+        self.terminal.feed(message.as_bytes());
+
+        let close_result = close_exited_active_native_session(
+            &mut self.app,
+            &mut self.terminal,
+            &mut self.terminal_search,
+            &mut self.shell_integration,
+            &mut self.profile_action_sessions,
+            &mut self.profile_action_session_runtimes,
+            self.active_session_close_fallback_policy,
+        );
+        let requests = native_session_close_event_requests(close_result);
+        requests.apply_to(
+            &mut self.window_close_requested,
+            &mut self.fallback_local_session_requested,
+        );
+
+        if close_result == NativeSessionCloseResult::Closed {
+            self.command_block_action_menu.close();
+            self.selection_anchor = None;
+            self.last_left_click = None;
+            self.hovered_session_tab = None;
+            self.session_tab_notice = None;
+            self.hovered_profile_action = None;
+            self.hovered_update_notice = None;
+            self.hovered_hyperlink = None;
+            self.hovered_command_block_id = None;
+            self.exited = false;
+            self.synchronized_output_deadline = None;
+            self.cursor_blink = CursorBlinkState::default();
+            self.text_blink = TextBlinkState::default();
+        } else if requests.any() {
+            self.synchronized_output_deadline = None;
+        }
+
+        close_result
+    }
+
     fn poll_transport(&mut self) -> bool {
         let mut changed = false;
         let mut force_render = false;
@@ -3231,12 +3327,7 @@ impl TerminalWindowApp {
                     changed = true;
                 }
                 Ok(Some(TransportEvent::Exit { code })) => {
-                    self.exited = true;
-                    let message = match code {
-                        Some(code) => format!("\r\n[process exited: {code}]\r\n"),
-                        None => "\r\n[process exited]\r\n".to_owned(),
-                    };
-                    self.terminal.feed(message.as_bytes());
+                    self.handle_active_transport_exit(code);
                     changed = true;
                     force_render = true;
                 }
@@ -4111,17 +4202,13 @@ impl TerminalWindowApp {
             ) {
                 return NativeSessionCloseResult::Closed;
             }
-            if !self
-                .profile_action_sessions
-                .inactive_session_ids()
-                .into_iter()
-                .any(|id| self.profile_action_session_runtimes.contains(id))
-            {
-                let fallback_action =
-                    native_active_session_close_fallback_action_without_switch_target(
-                        self.active_session_close_fallback_policy,
-                    );
-                return native_session_close_result_for_fallback_action(fallback_action);
+            if !has_inactive_parked_native_session_runtime(
+                &self.profile_action_sessions,
+                &self.profile_action_session_runtimes,
+            ) {
+                return native_session_close_result_for_last_active_policy(
+                    self.active_session_close_fallback_policy,
+                );
             }
             return NativeSessionCloseResult::Ignored;
         }
@@ -5053,6 +5140,19 @@ impl ApplicationHandler for TerminalWindowApp {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let changed = self.poll_transport();
+        if self.take_window_close_request() {
+            event_loop.exit();
+            return;
+        }
+        if self.take_fallback_local_session_request() {
+            if let Err(err) = self.start_fallback_local_session() {
+                eprintln!("failed to start fallback local session: {err:#}");
+                self.session_tab_notice = Some(NativeSessionTabStripNotice::LastActiveCloseBlocked);
+                self.rebuild_frame();
+            }
+            self.request_redraw();
+            return;
+        }
         if changed {
             if let Some(window) = &self.window {
                 window.request_redraw();
@@ -10946,6 +11046,218 @@ mod tests {
     }
 
     #[test]
+    fn native_child_exit_of_untracked_last_session_requests_window_close_by_default() {
+        let size = GridSize::new(3, 24);
+        let mut app = TerminalApp::new(MockTransport::new(size), size);
+        let mut terminal = BasicTerminal::with_scrollback_limit(size, 5);
+        let mut terminal_search = TerminalSearch::default();
+        let mut shell_integration = ShellIntegrationState::default();
+        let mut registry = NativeSessionRegistry::default();
+        let mut parked_sessions = NativeSessionRuntimeRegistry::default();
+
+        let result = close_exited_active_native_session(
+            &mut app,
+            &mut terminal,
+            &mut terminal_search,
+            &mut shell_integration,
+            &mut registry,
+            &mut parked_sessions,
+            NativeActiveSessionCloseFallbackPolicy::default(),
+        );
+
+        assert_eq!(result, NativeSessionCloseResult::RequestWindowClose);
+        assert!(registry.as_slice().is_empty());
+        assert!(parked_sessions.as_slice().is_empty());
+    }
+
+    #[test]
+    fn native_child_exit_of_untracked_last_session_can_block_for_welcome_screen() {
+        let size = GridSize::new(3, 24);
+        let mut app = TerminalApp::new(MockTransport::new(size), size);
+        let mut terminal = BasicTerminal::with_scrollback_limit(size, 5);
+        let mut terminal_search = TerminalSearch::default();
+        let mut shell_integration = ShellIntegrationState::default();
+        let mut registry = NativeSessionRegistry::default();
+        let mut parked_sessions = NativeSessionRuntimeRegistry::default();
+
+        let result = close_exited_active_native_session(
+            &mut app,
+            &mut terminal,
+            &mut terminal_search,
+            &mut shell_integration,
+            &mut registry,
+            &mut parked_sessions,
+            NativeActiveSessionCloseFallbackPolicy::Block,
+        );
+
+        assert_eq!(result, NativeSessionCloseResult::BlockedLastActive);
+        assert!(registry.as_slice().is_empty());
+        assert!(parked_sessions.as_slice().is_empty());
+    }
+
+    #[test]
+    fn native_child_exit_of_tracked_active_session_switches_to_parked_session() {
+        let size = GridSize::new(3, 24);
+        let mut app = TerminalApp::new(MockTransport::new(size), size);
+        app.write_input(b"active-write").unwrap();
+        let mut terminal = BasicTerminal::with_scrollback_limit(size, 5);
+        terminal.feed(b"active-visible");
+        let mut terminal_search = TerminalSearch::default();
+        terminal_search.open(&terminal.search_text_rows(), Some("active"));
+        let mut shell_integration = ShellIntegrationState::default();
+        shell_integration.apply_current_directory(test_current_directory("/active"));
+
+        let mut registry = NativeSessionRegistry::default();
+        let active_id = registry.replace_current(NativeProfileActionCurrentSession {
+            key: PendingProfileActionKey::profile_launch(0),
+            kind: NativeResolvedProfileActionKind::ProfileLaunch,
+            source_plugin: "profile-bridge".to_owned(),
+            profile_id: "active".to_owned(),
+            reason: Some("existing active session".to_owned()),
+            mode: NativeProfileActionStartMode::ReplaceCurrentSession,
+        });
+        let target_id = registry.insert_inactive(NativeProfileActionCurrentSession {
+            key: PendingProfileActionKey::profile_launch(1),
+            kind: NativeResolvedProfileActionKind::ProfileLaunch,
+            source_plugin: "profile-bridge".to_owned(),
+            profile_id: "prod".to_owned(),
+            reason: Some("open production".to_owned()),
+            mode: NativeProfileActionStartMode::NewTab,
+        });
+
+        let mut target_terminal = BasicTerminal::with_scrollback_limit(size, 9);
+        target_terminal.feed(b"target-visible");
+        let mut target_search = TerminalSearch::default();
+        target_search.open(&target_terminal.search_text_rows(), Some("target"));
+        let mut target_shell = ShellIntegrationState::default();
+        target_shell.apply_current_directory(test_current_directory("/target"));
+        let mut parked_sessions = NativeSessionRuntimeRegistry::default();
+        parked_sessions.park_or_replace(
+            target_id,
+            NativeSessionRuntime {
+                transport: MockTransport::new(size),
+                terminal: target_terminal,
+                terminal_search: target_search,
+                shell_integration: target_shell,
+            },
+        );
+
+        let result = close_exited_active_native_session(
+            &mut app,
+            &mut terminal,
+            &mut terminal_search,
+            &mut shell_integration,
+            &mut registry,
+            &mut parked_sessions,
+            NativeActiveSessionCloseFallbackPolicy::default(),
+        );
+
+        assert_eq!(result, NativeSessionCloseResult::Closed);
+        assert_eq!(active_id, NativeSessionId(1));
+        assert_eq!(registry.active().unwrap().id, target_id);
+        assert_eq!(registry.as_slice().len(), 1);
+        assert!(parked_sessions.as_slice().is_empty());
+        app.write_input(b"target-write").unwrap();
+        assert_eq!(app.transport().written(), b"target-write");
+        assert!(terminal
+            .search_text_rows()
+            .iter()
+            .any(|row| row.text.contains("target-visible")));
+        assert_eq!(terminal_search.query(), "target");
+        assert_eq!(
+            shell_integration
+                .current_directory()
+                .map(|directory| directory.path.as_str()),
+            Some("/target")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_pty_child_exit_poll_requests_window_close_by_default() {
+        let mut app = TerminalWindowApp::new(
+            Vec::new(),
+            WindowSmokeOptions::default(),
+            None,
+            Some("/bin/sh".to_owned()),
+            vec!["-lc".to_owned(), "exit 7".to_owned()],
+            None,
+            Vec::new(),
+            MouseSelectionOverridePolicy::default(),
+            Osc52ClipboardPolicy::Disabled,
+            1000,
+            None,
+            None,
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut changed = false;
+
+        while Instant::now() < deadline && !app.window_close_requested {
+            changed |= app.poll_transport();
+            if app.exited && app.window_close_requested {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(changed, "poll_transport never observed the PTY child exit");
+        assert!(app.exited);
+        assert!(app.window_close_requested);
+        assert!(!app.fallback_local_session_requested);
+        let visible_text = app
+            .terminal
+            .search_text_rows()
+            .iter()
+            .map(|row| row.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(visible_text.contains("[process exited: 7]"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_pty_child_exit_poll_can_keep_window_open_with_block_policy() {
+        let mut smoke = WindowSmokeOptions::default();
+        smoke.last_active_close_policy = WindowLastActiveClosePolicy::Block;
+        let mut app = TerminalWindowApp::new(
+            Vec::new(),
+            smoke,
+            None,
+            Some("/bin/sh".to_owned()),
+            vec!["-lc".to_owned(), "exit 0".to_owned()],
+            None,
+            Vec::new(),
+            MouseSelectionOverridePolicy::default(),
+            Osc52ClipboardPolicy::Disabled,
+            1000,
+            None,
+            None,
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut changed = false;
+
+        while Instant::now() < deadline && !app.exited {
+            changed |= app.poll_transport();
+            if app.exited {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(changed, "poll_transport never observed the PTY child exit");
+        assert!(app.exited);
+        assert!(!app.window_close_requested);
+        assert!(!app.fallback_local_session_requested);
+        assert!(app.profile_action_sessions.as_slice().is_empty());
+    }
+
+    #[test]
     fn native_session_tab_strip_hit_test_maps_visible_tab_text_only() {
         let metrics = CellMetrics::default();
         let grid_size = GridSize::new(4, 120);
@@ -11458,18 +11770,18 @@ mod tests {
     }
 
     #[test]
-    fn native_active_session_close_fallback_policy_blocks_by_default() {
+    fn native_active_session_close_fallback_policy_closes_by_default() {
         let policy = NativeActiveSessionCloseFallbackPolicy::default();
         let action = native_active_session_close_fallback_action_without_switch_target(policy);
 
         assert_eq!(
             action,
-            NativeActiveSessionCloseFallbackAction::BlockLastActive
+            NativeActiveSessionCloseFallbackAction::RequestWindowClose
         );
 
         assert_eq!(
             native_session_close_result_for_fallback_action(action),
-            NativeSessionCloseResult::BlockedLastActive
+            NativeSessionCloseResult::RequestWindowClose
         );
 
         let debug = format!("{policy:?} {action:?}");
@@ -11487,6 +11799,26 @@ mod tests {
                 "leaked close fallback policy detail {hidden:?}"
             );
         }
+    }
+
+    #[test]
+    fn native_active_session_close_fallback_policy_blocks_when_configured() {
+        let policy = NativeActiveSessionCloseFallbackPolicy::Block;
+        let action = native_active_session_close_fallback_action_without_switch_target(policy);
+
+        assert_eq!(
+            action,
+            NativeActiveSessionCloseFallbackAction::BlockLastActive
+        );
+
+        assert_eq!(
+            native_session_close_result_for_fallback_action(action),
+            NativeSessionCloseResult::BlockedLastActive
+        );
+        assert_eq!(
+            native_session_close_result_for_last_active_policy(policy),
+            NativeSessionCloseResult::BlockedLastActive
+        );
     }
 
     #[test]

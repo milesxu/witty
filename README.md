@@ -140,6 +140,7 @@ with a bundled template:
 
 ```toml
 font-family = "Maple Mono NF CN"
+window-last-active-close = "close-window"
 ```
 
 Create or inspect it without opening a window:
@@ -157,6 +158,11 @@ it. CLI flags and font environment variables take precedence over `.wittyrc`.
 The legacy native-window JSON config still loads after `.wittyrc` and remains
 useful for window size, title, launch command, cwd, env, scrollback, and other
 settings.
+
+By default, exiting the last local shell, for example with Ctrl-D, closes the
+Witty window/program. Set `window-last-active-close = "block"` in `.wittyrc`
+or `window_last_active_close = "block"` in `window.v1.json` to keep Witty open
+after the last shell exits.
 
 You can still set fonts through CLI flags, environment defaults, or
 `window.v1.json`:
