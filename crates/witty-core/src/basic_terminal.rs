@@ -3388,7 +3388,7 @@ impl Perform for BasicTerminalState {
             'J' => self.erase_in_display(param(params, 0, 0)),
             'K' => self.erase_in_line(param(params, 0, 0)),
             'g' => self.clear_tab_stop(param(params, 0, 0)),
-            'm' => self.apply_sgr(params),
+            'm' if intermediates.is_empty() => self.apply_sgr(params),
             'r' => self.set_scroll_region(params),
             't' if intermediates.is_empty() => self.window_manipulation_report(params),
             _ => {}
@@ -4512,6 +4512,23 @@ mod tests {
             snapshot.rows[0].cells[2].style.flags.underline_style,
             UnderlineStyle::Double
         );
+    }
+
+    #[test]
+    fn private_final_m_csi_does_not_apply_sgr() {
+        let mut terminal = BasicTerminal::new(GridSize::new(1, 4));
+
+        terminal.feed(b"\x1b[>4;1mA\x1b[4mB\x1b[mC");
+        let snapshot = terminal.snapshot();
+
+        assert_eq!(snapshot.rows[0].cells[0].text, "A");
+        assert_eq!(snapshot.rows[0].cells[0].style, CellStyle::default());
+        assert!(snapshot.rows[0].cells[1].style.flags.underline);
+        assert_eq!(
+            snapshot.rows[0].cells[1].style.flags.underline_style,
+            UnderlineStyle::Single
+        );
+        assert_eq!(snapshot.rows[0].cells[2].style, CellStyle::default());
     }
 
     #[test]

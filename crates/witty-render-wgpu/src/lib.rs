@@ -2162,7 +2162,9 @@ fn glyphon_color(color: Rgba) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use witty_core::{CellPoint, CellRange, CursorShape, RenderSnapshot, SearchHighlight};
+    use witty_core::{
+        BasicTerminal, CellPoint, CellRange, CursorShape, GridSize, RenderSnapshot, SearchHighlight,
+    };
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -2448,7 +2450,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_snaps_default_fish_prompt_underline_to_single_pixel() {
+    fn planner_snaps_manual_underline_to_single_pixel() {
         let mut snapshot = RenderSnapshot::from_plain_lines(&["mingxu@host >"]);
         for cell in snapshot.rows[0].cells.iter_mut().take(6) {
             cell.style.flags.underline = true;
@@ -2471,6 +2473,17 @@ mod tests {
         );
         assert_eq!(frame.text_decorations[0].color, Rgba::WHITE);
         assert_eq!(frame.stats.text_decoration_rects, 1);
+    }
+
+    #[test]
+    fn fish_keyboard_modifier_control_does_not_create_text_decoration() {
+        let mut terminal = BasicTerminal::new(GridSize::new(1, 16));
+
+        terminal.feed(b"\x1b[>4;1mmingxu\x1b[m");
+        let frame = FramePlanner::new(CellMetrics::default()).plan(&terminal.snapshot());
+
+        assert_eq!(frame.text_decorations, Vec::new());
+        assert_eq!(frame.stats.text_decoration_rects, 0);
     }
 
     #[test]

@@ -63,14 +63,20 @@ fn fish_prompt_probe() -> Result<()> {
     }
     reports.push(run_tmux_fish_case(&fish_path, &support_dir)?);
 
-    let isolated_prompt_visible = reports
+    let isolated_report = reports
         .iter()
         .find(|report| report["case_id"] == "isolated_no_config")
-        .and_then(|report| report["prompt_marker_visible"].as_bool())
-        .unwrap_or(false);
+        .context("isolated_no_config fish probe report missing")?;
+    let tmux_report = reports
+        .iter()
+        .find(|report| report["case_id"] == "tmux_isolated_fish_no_config")
+        .context("tmux_isolated_fish_no_config fish probe report missing")?;
+    let tmux_available = tmux_report["status"] != "skipped";
+    let passed = prompt_report_is_clean(isolated_report)
+        && (!tmux_available || prompt_report_is_clean(tmux_report));
 
     write_probe_report(json!({
-        "status": if isolated_prompt_visible { "passed" } else { "failed" },
+        "status": if passed { "passed" } else { "failed" },
         "fish_path": fish_path,
         "fish_version": command_version_first_line(&fish_path),
         "size": {
@@ -80,10 +86,10 @@ fn fish_prompt_probe() -> Result<()> {
         "cases": reports,
     }))?;
 
-    assert!(
-        isolated_prompt_visible,
-        "isolated fish prompt should become visible through Witty PTY replies"
-    );
+    assert_clean_prompt_report(isolated_report, "isolated_no_config");
+    if tmux_available {
+        assert_clean_prompt_report(tmux_report, "tmux_isolated_fish_no_config");
+    }
 
     Ok(())
 }
@@ -402,6 +408,63 @@ fn frame_stats_json(stats: FrameStats) -> serde_json::Value {
         "reusedRows": stats.reused_rows,
         "rebuiltRows": stats.rebuilt_rows,
     })
+}
+
+fn prompt_report_is_clean(report: &serde_json::Value) -> bool {
+    report["prompt_marker_visible"].as_bool().unwrap_or(false)
+        && frame_stat(report, "selectionRects") == Some(0)
+        && frame_stat(report, "hyperlinkUnderlineRects") == Some(0)
+        && frame_stat(report, "textDecorationRects") == Some(0)
+        && frame_stat(report, "imePreeditRects") == Some(0)
+        && report["text_decoration_rects"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+        && report["hyperlink_underline_rects"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+}
+
+fn assert_clean_prompt_report(report: &serde_json::Value, case_id: &str) {
+    assert!(
+        report["prompt_marker_visible"].as_bool().unwrap_or(false),
+        "{case_id} fish prompt should become visible through Witty PTY replies"
+    );
+    assert_eq!(
+        frame_stat(report, "selectionRects"),
+        Some(0),
+        "{case_id} should not have selection rects"
+    );
+    assert_eq!(
+        frame_stat(report, "hyperlinkUnderlineRects"),
+        Some(0),
+        "{case_id} should not have hyperlink underline rects"
+    );
+    assert_eq!(
+        frame_stat(report, "textDecorationRects"),
+        Some(0),
+        "{case_id} should not have text decoration rects"
+    );
+    assert_eq!(
+        frame_stat(report, "imePreeditRects"),
+        Some(0),
+        "{case_id} should not have IME preedit rects"
+    );
+    assert!(
+        report["text_decoration_rects"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "{case_id} should not include text decoration rect details"
+    );
+    assert!(
+        report["hyperlink_underline_rects"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "{case_id} should not include hyperlink underline rect details"
+    );
+}
+
+fn frame_stat(report: &serde_json::Value, name: &str) -> Option<u64> {
+    report["frame_stats"][name].as_u64()
 }
 
 fn rects_json(rects: &[RectBatchItem]) -> serde_json::Value {
