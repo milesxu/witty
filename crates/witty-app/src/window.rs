@@ -15,7 +15,7 @@ use winit::event::{
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, KeyCode, KeyLocation, ModifiersState, NamedKey, PhysicalKey};
-use winit::window::{ImePurpose, Window, WindowAttributes, WindowId};
+use winit::window::{Fullscreen, ImePurpose, Window, WindowAttributes, WindowId};
 use witty_core::{
     encode_terminal_focus_event, encode_terminal_mouse_event, paste_payload, terminal_char_width,
     BasicTerminal, CellFlags, CellPoint, CellRange, CursorShape, CursorState, FocusEventKind,
@@ -81,6 +81,14 @@ const NATIVE_LOCAL_SESSION_SOURCE_PLUGIN: &str = "witty-local";
 const INSTALLED_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const RESTART_BUTTON_LABEL: &str = "Restart to update";
 const WITTY_NEW_LOCAL_SHELL_COMMAND_ID: &str = "witty.new-local-shell";
+const CUSTOM_TITLEBAR_HEIGHT: f32 = 34.0;
+const CUSTOM_TITLEBAR_BUTTON_SIZE: f32 = 28.0;
+const CUSTOM_TITLEBAR_BUTTON_GAP: f32 = 4.0;
+const CUSTOM_TITLEBAR_EDGE_PADDING: f32 = 6.0;
+const CUSTOM_TITLEBAR_MENU_WIDTH: f32 = 220.0;
+const CUSTOM_TITLEBAR_MENU_ITEM_HEIGHT: f32 = 30.0;
+const CUSTOM_TITLEBAR_FULLSCREEN_REVEAL_ZONE: f64 = 4.0;
+const CUSTOM_TITLEBAR_FULLSCREEN_HIDE_DELAY: Duration = Duration::from_millis(900);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WindowSmokeOptions {
@@ -143,6 +151,54 @@ enum RuntimeFontSizeAction {
     Increase,
     Decrease,
     Reset,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeTitleBarButton {
+    Menu,
+    Minimize,
+    Maximize,
+    Close,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeTitleBarMenuItem {
+    NewLocalShell,
+    CommandPalette,
+    Search,
+    About,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeTitleBarHit {
+    Button(NativeTitleBarButton),
+    MenuItem(NativeTitleBarMenuItem),
+    DragRegion,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct NativeOverlayRect {
+    origin: PixelPoint,
+    size: PixelSize,
+}
+
+impl NativeOverlayRect {
+    fn contains_point(self, point: PixelPoint) -> bool {
+        point.x >= self.origin.x
+            && point.x < self.origin.x + self.size.width
+            && point.y >= self.origin.y
+            && point.y < self.origin.y + self.size.height
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NativeTitleBarOverlay<'a> {
+    title: &'a str,
+    window_width: f32,
+    visible: bool,
+    menu_open: bool,
+    hovered_hit: Option<NativeTitleBarHit>,
+    maximized: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2817,6 +2873,11 @@ struct TerminalWindowApp {
     size: GridSize,
     modifiers: Modifiers,
     pointer_position: Option<PhysicalPosition<f64>>,
+    window_fullscreen: bool,
+    fullscreen_titlebar_visible: bool,
+    fullscreen_titlebar_hide_deadline: Option<Instant>,
+    titlebar_menu_open: bool,
+    hovered_titlebar_hit: Option<NativeTitleBarHit>,
     hovered_session_tab: Option<NativeSessionTabStripHit>,
     hovered_profile_action: Option<NativeProfileActionOverlayHit>,
     hovered_update_notice: Option<NativeUpdateNoticeHit>,
@@ -2955,6 +3016,11 @@ impl TerminalWindowApp {
             size: startup.size,
             modifiers: Modifiers::default(),
             pointer_position: None,
+            window_fullscreen: false,
+            fullscreen_titlebar_visible: false,
+            fullscreen_titlebar_hide_deadline: None,
+            titlebar_menu_open: false,
+            hovered_titlebar_hit: None,
             hovered_session_tab: None,
             hovered_profile_action: None,
             hovered_update_notice: None,
@@ -2994,7 +3060,11 @@ impl TerminalWindowApp {
     }
 
     fn resize_grid(&mut self, physical_size: PhysicalSize<u32>) {
-        let size = grid_size_for_window(physical_size, self.metrics);
+        let size = grid_size_for_window_with_reserved_height(
+            physical_size,
+            self.metrics,
+            self.titlebar_reserved_height(),
+        );
         if size == self.size {
             return;
         }
@@ -3163,6 +3233,8 @@ impl TerminalWindowApp {
             self.text_input_target(),
             Instant::now(),
         );
+        offset_frame_y(&mut frame, self.terminal_content_y_offset());
+        apply_native_titlebar_overlay(&mut frame, self.titlebar_overlay(), self.metrics);
         frame.refresh_stats_with_rows(self.size.rows, self.size.cols, reused_rows, rebuilt_rows);
         self.frame = frame;
         self.sync_ime_cursor_area(self.active_ime_cursor(cursor.position));
@@ -3191,12 +3263,56 @@ impl TerminalWindowApp {
         }
     }
 
+    fn titlebar_visible(&self) -> bool {
+        !self.window_fullscreen || self.fullscreen_titlebar_visible || self.titlebar_menu_open
+    }
+
+    fn titlebar_reserves_space(&self) -> bool {
+        !self.window_fullscreen
+    }
+
+    fn titlebar_reserved_height(&self) -> f32 {
+        if self.titlebar_reserves_space() {
+            CUSTOM_TITLEBAR_HEIGHT
+        } else {
+            0.0
+        }
+    }
+
+    fn terminal_content_y_offset(&self) -> f32 {
+        self.titlebar_reserved_height()
+    }
+
+    fn titlebar_window_width(&self) -> f32 {
+        self.window
+            .as_ref()
+            .map(|window| window.inner_size().width as f32)
+            .unwrap_or_else(|| {
+                self.metrics.padding.x * 2.0 + f32::from(self.size.cols) * self.metrics.cell.width
+            })
+    }
+
+    fn titlebar_overlay(&self) -> NativeTitleBarOverlay<'_> {
+        NativeTitleBarOverlay {
+            title: &self.window_title,
+            window_width: self.titlebar_window_width(),
+            visible: self.titlebar_visible(),
+            menu_open: self.titlebar_menu_open,
+            hovered_hit: self.hovered_titlebar_hit,
+            maximized: self
+                .window
+                .as_ref()
+                .is_some_and(|window| window.is_maximized()),
+        }
+    }
+
     fn sync_ime_cursor_area(&self, cursor: CellPoint) {
         let Some(window) = &self.window else {
             return;
         };
 
-        let origin = cell_origin(cursor, self.metrics);
+        let mut origin = cell_origin(cursor, self.metrics);
+        origin.y += self.terminal_content_y_offset();
         let width = self.metrics.cell.width.ceil().max(1.0) as u32;
         let height = self.metrics.cell.height.ceil().max(1.0) as u32;
         window.set_ime_cursor_area(
@@ -3279,6 +3395,102 @@ impl TerminalWindowApp {
                 changed
             }
         }
+    }
+
+    fn refresh_titlebar_hover_for_current_pointer(&mut self) -> bool {
+        match self.pointer_position {
+            Some(position) => self.update_titlebar_for_cursor_position(position),
+            None => {
+                let changed = self.hovered_titlebar_hit.is_some();
+                self.hovered_titlebar_hit = None;
+                changed
+            }
+        }
+    }
+
+    fn update_titlebar_for_cursor_position(&mut self, position: PhysicalPosition<f64>) -> bool {
+        let previous_visible = self.fullscreen_titlebar_visible;
+        let previous_deadline = self.fullscreen_titlebar_hide_deadline;
+        let previous_hover = self.hovered_titlebar_hit;
+        let point = pixel_point_for_position(position);
+
+        if self.window_fullscreen {
+            if let Some(point) = point {
+                let over_reveal_zone =
+                    f64::from(point.y) <= CUSTOM_TITLEBAR_FULLSCREEN_REVEAL_ZONE;
+                let over_titlebar = self.fullscreen_titlebar_visible
+                    && point.y >= 0.0
+                    && point.y < CUSTOM_TITLEBAR_HEIGHT;
+                let over_menu = self.titlebar_menu_open
+                    && native_titlebar_menu_rect().contains_point(point);
+                if over_reveal_zone || over_titlebar || over_menu {
+                    self.fullscreen_titlebar_visible = true;
+                    self.fullscreen_titlebar_hide_deadline = None;
+                } else if self.fullscreen_titlebar_visible
+                    && !self.titlebar_menu_open
+                    && self.fullscreen_titlebar_hide_deadline.is_none()
+                {
+                    self.fullscreen_titlebar_hide_deadline =
+                        Instant::now().checked_add(CUSTOM_TITLEBAR_FULLSCREEN_HIDE_DELAY);
+                }
+            }
+        } else {
+            self.fullscreen_titlebar_visible = false;
+            self.fullscreen_titlebar_hide_deadline = None;
+        }
+
+        self.hovered_titlebar_hit = self.titlebar_hit_test(position).and_then(|hit| match hit {
+            NativeTitleBarHit::DragRegion => None,
+            hit => Some(hit),
+        });
+
+        previous_visible != self.fullscreen_titlebar_visible
+            || previous_deadline != self.fullscreen_titlebar_hide_deadline
+            || previous_hover != self.hovered_titlebar_hit
+    }
+
+    fn clear_content_hover_state(&mut self) -> bool {
+        let changed = self.hovered_update_notice.is_some()
+            || self.hovered_profile_action.is_some()
+            || self.hovered_empty_session_welcome.is_some()
+            || self.hovered_session_tab.is_some()
+            || self.hovered_hyperlink.is_some()
+            || self.hovered_command_block_id.is_some();
+        self.hovered_update_notice = None;
+        self.hovered_profile_action = None;
+        self.hovered_empty_session_welcome = None;
+        self.hovered_session_tab = None;
+        self.hovered_hyperlink = None;
+        self.hovered_command_block_id = None;
+        changed
+    }
+
+    fn titlebar_consumes_position(&self, position: PhysicalPosition<f64>) -> bool {
+        self.titlebar_hit_test(position).is_some()
+    }
+
+    fn titlebar_hit_test(&self, position: PhysicalPosition<f64>) -> Option<NativeTitleBarHit> {
+        let point = pixel_point_for_position(position)?;
+
+        if self.titlebar_menu_open {
+            if let Some(item) = native_titlebar_menu_item_for_point(point) {
+                return Some(NativeTitleBarHit::MenuItem(item));
+            }
+        }
+
+        if !self.titlebar_visible() || point.y < 0.0 || point.y >= CUSTOM_TITLEBAR_HEIGHT {
+            return None;
+        }
+
+        for button in native_titlebar_buttons() {
+            if let Some(rect) = native_titlebar_button_rect(button, self.titlebar_window_width()) {
+                if rect.contains_point(point) {
+                    return Some(NativeTitleBarHit::Button(button));
+                }
+            }
+        }
+
+        Some(NativeTitleBarHit::DragRegion)
     }
 
     fn empty_session_welcome_visible(&self) -> bool {
@@ -3565,6 +3777,32 @@ impl TerminalWindowApp {
         false
     }
 
+    fn apply_fullscreen_titlebar_hide_timeout(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        if !self.window_fullscreen || self.titlebar_menu_open {
+            self.fullscreen_titlebar_hide_deadline = None;
+            return false;
+        }
+
+        let Some(deadline) = self.fullscreen_titlebar_hide_deadline else {
+            return false;
+        };
+
+        if Instant::now() >= deadline {
+            self.fullscreen_titlebar_hide_deadline = None;
+            if self.fullscreen_titlebar_visible {
+                self.fullscreen_titlebar_visible = false;
+                self.hovered_titlebar_hit = None;
+                self.rebuild_frame();
+                self.request_redraw();
+                return true;
+            }
+            return false;
+        }
+
+        event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+        false
+    }
+
     fn apply_blink_timeouts(&mut self, event_loop: &ActiveEventLoop) -> bool {
         let now = Instant::now();
         let cursor = self.terminal.snapshot().cursor;
@@ -3763,6 +4001,11 @@ impl TerminalWindowApp {
             return;
         }
 
+        if is_toggle_fullscreen_shortcut(&event.logical_key, self.modifiers) {
+            self.toggle_fullscreen();
+            return;
+        }
+
         if is_search_shortcut(&event.logical_key, self.modifiers) {
             if self.empty_session_welcome_visible() {
                 return;
@@ -3853,6 +4096,50 @@ impl TerminalWindowApp {
     fn toggle_frame_diagnostics(&mut self) {
         self.show_diagnostics = !self.show_diagnostics;
         self.rebuild_frame();
+    }
+
+    fn toggle_fullscreen(&mut self) {
+        let Some(window) = self.window.as_ref().cloned() else {
+            return;
+        };
+
+        let entering_fullscreen = window.fullscreen().is_none();
+        if entering_fullscreen {
+            window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+            self.window_fullscreen = true;
+            self.fullscreen_titlebar_visible = false;
+            self.fullscreen_titlebar_hide_deadline = None;
+            self.titlebar_menu_open = false;
+            self.hovered_titlebar_hit = None;
+        } else {
+            window.set_fullscreen(None);
+            self.window_fullscreen = false;
+            self.fullscreen_titlebar_visible = false;
+            self.fullscreen_titlebar_hide_deadline = None;
+            self.titlebar_menu_open = false;
+            self.hovered_titlebar_hit = None;
+        }
+
+        let size = window.inner_size();
+        self.resize_grid(size);
+        self.rebuild_frame();
+    }
+
+    fn sync_window_fullscreen_state_from_window(&mut self) -> bool {
+        let fullscreen = self
+            .window
+            .as_ref()
+            .is_some_and(|window| window.fullscreen().is_some());
+        if self.window_fullscreen == fullscreen {
+            return false;
+        }
+
+        self.window_fullscreen = fullscreen;
+        self.fullscreen_titlebar_visible = false;
+        self.fullscreen_titlebar_hide_deadline = None;
+        self.titlebar_menu_open = false;
+        self.hovered_titlebar_hit = None;
+        true
     }
 
     fn copy_selection_to_clipboard(&mut self) {
@@ -4237,7 +4524,12 @@ impl TerminalWindowApp {
         &self,
         position: PhysicalPosition<f64>,
     ) -> Option<PixelPoint> {
-        let visual_point = pixel_point_for_position(position)?;
+        let mut visual_point = pixel_point_for_position(position)?;
+        let content_y_offset = self.terminal_content_y_offset();
+        if visual_point.y < content_y_offset {
+            return None;
+        }
+        visual_point.y -= content_y_offset;
         command_block_folded_visual_pixel_to_terminal_pixel_with_anchors(
             &self.shell_integration,
             self.terminal.active_screen(),
@@ -4993,7 +5285,94 @@ impl TerminalWindowApp {
         self.rebuild_frame();
     }
 
+    fn handle_titlebar_mouse_input(&mut self, state: ElementState, button: MouseButton) -> bool {
+        if button != MouseButton::Left {
+            return false;
+        }
+
+        let Some(position) = self.pointer_position else {
+            return false;
+        };
+
+        if state != ElementState::Pressed {
+            return self.titlebar_consumes_position(position);
+        }
+
+        match self.titlebar_hit_test(position) {
+            Some(NativeTitleBarHit::Button(NativeTitleBarButton::Menu)) => {
+                self.titlebar_menu_open = !self.titlebar_menu_open;
+                let _ = self.refresh_titlebar_hover_for_current_pointer();
+                self.rebuild_frame();
+                true
+            }
+            Some(NativeTitleBarHit::Button(NativeTitleBarButton::Minimize)) => {
+                self.titlebar_menu_open = false;
+                if let Some(window) = &self.window {
+                    window.set_minimized(true);
+                }
+                let _ = self.refresh_titlebar_hover_for_current_pointer();
+                self.rebuild_frame();
+                true
+            }
+            Some(NativeTitleBarHit::Button(NativeTitleBarButton::Maximize)) => {
+                self.titlebar_menu_open = false;
+                if let Some(window) = &self.window {
+                    window.set_maximized(!window.is_maximized());
+                }
+                let _ = self.refresh_titlebar_hover_for_current_pointer();
+                self.rebuild_frame();
+                true
+            }
+            Some(NativeTitleBarHit::Button(NativeTitleBarButton::Close)) => {
+                self.window_close_requested = true;
+                true
+            }
+            Some(NativeTitleBarHit::MenuItem(item)) => {
+                self.titlebar_menu_open = false;
+                self.hovered_titlebar_hit = None;
+                self.activate_titlebar_menu_item(item);
+                true
+            }
+            Some(NativeTitleBarHit::DragRegion) => {
+                self.titlebar_menu_open = false;
+                if !self.window_fullscreen {
+                    if let Some(window) = &self.window {
+                        if let Err(err) = window.drag_window() {
+                            eprintln!("failed to start window drag: {err:#}");
+                        }
+                    }
+                }
+                let _ = self.refresh_titlebar_hover_for_current_pointer();
+                self.rebuild_frame();
+                true
+            }
+            None if self.titlebar_menu_open => {
+                self.titlebar_menu_open = false;
+                self.hovered_titlebar_hit = None;
+                self.rebuild_frame();
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn activate_titlebar_menu_item(&mut self, item: NativeTitleBarMenuItem) {
+        match item {
+            NativeTitleBarMenuItem::NewLocalShell => self.start_new_local_shell_command(),
+            NativeTitleBarMenuItem::CommandPalette => self.open_command_palette(),
+            NativeTitleBarMenuItem::Search => {
+                if !self.empty_session_welcome_visible() {
+                    self.open_search();
+                }
+            }
+            NativeTitleBarMenuItem::About => self.invoke_window_command("witty.about"),
+        }
+    }
+
     fn handle_mouse_input(&mut self, state: ElementState, button: MouseButton) -> bool {
+        if self.handle_titlebar_mouse_input(state, button) {
+            return true;
+        }
         if self.handle_update_notice_click(state, button) {
             return true;
         }
@@ -5060,6 +5439,15 @@ impl TerminalWindowApp {
 
     fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) -> bool {
         self.pointer_position = Some(position);
+        let titlebar_changed = self.update_titlebar_for_cursor_position(position);
+        if self.titlebar_consumes_position(position) {
+            let content_hover_changed = self.clear_content_hover_state();
+            if titlebar_changed || content_hover_changed {
+                self.rebuild_frame();
+            }
+            return titlebar_changed || content_hover_changed;
+        }
+
         let update_hover_changed = self.set_hovered_update_notice_for_position(position);
         if self.hovered_update_notice.is_some() {
             let profile_hover_changed = self.hovered_profile_action.take().is_some();
@@ -5067,7 +5455,8 @@ impl TerminalWindowApp {
             let session_hover_changed = self.hovered_session_tab.take().is_some();
             let hyperlink_hover_changed = self.hovered_hyperlink.take().is_some();
             let command_block_hover_changed = self.hovered_command_block_id.take().is_some();
-            let hover_changed = update_hover_changed
+            let hover_changed = titlebar_changed
+                || update_hover_changed
                 || profile_hover_changed
                 || empty_hover_changed
                 || session_hover_changed
@@ -5085,7 +5474,8 @@ impl TerminalWindowApp {
             let session_hover_changed = self.hovered_session_tab.take().is_some();
             let hyperlink_hover_changed = self.hovered_hyperlink.take().is_some();
             let command_block_hover_changed = self.hovered_command_block_id.take().is_some();
-            let hover_changed = profile_hover_changed
+            let hover_changed = titlebar_changed
+                || profile_hover_changed
                 || empty_hover_changed
                 || session_hover_changed
                 || hyperlink_hover_changed
@@ -5101,7 +5491,8 @@ impl TerminalWindowApp {
             let session_hover_changed = self.hovered_session_tab.take().is_some();
             let hyperlink_hover_changed = self.hovered_hyperlink.take().is_some();
             let command_block_hover_changed = self.hovered_command_block_id.take().is_some();
-            let hover_changed = empty_hover_changed
+            let hover_changed = titlebar_changed
+                || empty_hover_changed
                 || session_hover_changed
                 || hyperlink_hover_changed
                 || command_block_hover_changed;
@@ -5115,8 +5506,10 @@ impl TerminalWindowApp {
         if self.hovered_session_tab.is_some() {
             let hyperlink_hover_changed = self.hovered_hyperlink.take().is_some();
             let command_block_hover_changed = self.hovered_command_block_id.take().is_some();
-            let hover_changed =
-                session_hover_changed || hyperlink_hover_changed || command_block_hover_changed;
+            let hover_changed = titlebar_changed
+                || session_hover_changed
+                || hyperlink_hover_changed
+                || command_block_hover_changed;
             if hover_changed {
                 self.rebuild_frame();
             }
@@ -5125,7 +5518,8 @@ impl TerminalWindowApp {
 
         let hyperlink_hover_changed = self.set_hovered_hyperlink_for_position(position);
         let command_block_hover_changed = self.set_hovered_command_block_for_position(position);
-        let hover_changed = update_hover_changed
+        let hover_changed = titlebar_changed
+            || update_hover_changed
             || profile_hover_changed
             || empty_hover_changed
             || session_hover_changed
@@ -5163,6 +5557,29 @@ impl TerminalWindowApp {
             self.rebuild_frame();
         }
         selected || hover_changed
+    }
+
+    fn handle_cursor_left(&mut self) -> bool {
+        self.pointer_position = None;
+        let content_hover_changed = self.clear_content_hover_state();
+        let titlebar_hover_changed = self.hovered_titlebar_hit.is_some();
+        self.hovered_titlebar_hit = None;
+        let mut titlebar_visibility_changed = false;
+        if self.window_fullscreen
+            && self.fullscreen_titlebar_visible
+            && !self.titlebar_menu_open
+            && self.fullscreen_titlebar_hide_deadline.is_none()
+        {
+            self.fullscreen_titlebar_hide_deadline =
+                Instant::now().checked_add(CUSTOM_TITLEBAR_FULLSCREEN_HIDE_DELAY);
+            titlebar_visibility_changed = true;
+        }
+
+        let changed = content_hover_changed || titlebar_hover_changed || titlebar_visibility_changed;
+        if changed {
+            self.rebuild_frame();
+        }
+        changed
     }
 
     fn handle_mouse_wheel(&mut self, delta: MouseScrollDelta) -> bool {
@@ -5296,6 +5713,7 @@ impl ApplicationHandler for TerminalWindowApp {
         let attrs = witty_window_identity_attributes(
             Window::default_attributes()
                 .with_title(self.window_title.clone())
+                .with_decorations(false)
                 .with_inner_size(terminal_window_initial_inner_size(
                     self.initial_window_size,
                     self.metrics,
@@ -5379,6 +5797,10 @@ impl ApplicationHandler for TerminalWindowApp {
                 let changed = self.handle_cursor_moved(position);
                 self.request_redraw_if_changed(changed);
             }
+            WindowEvent::CursorLeft { .. } => {
+                let changed = self.handle_cursor_left();
+                self.request_redraw_if_changed(changed);
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 let changed = self.handle_mouse_input(state, button);
                 if self.take_restart_exit_request() {
@@ -5410,10 +5832,14 @@ impl ApplicationHandler for TerminalWindowApp {
                 self.request_redraw_if_changed(changed);
             }
             WindowEvent::Resized(size) => {
+                let fullscreen_changed = self.sync_window_fullscreen_state_from_window();
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size.width, size.height);
                 }
                 self.resize_grid(size);
+                if fullscreen_changed {
+                    self.rebuild_frame();
+                }
                 self.request_redraw();
             }
             WindowEvent::RedrawRequested => {
@@ -5474,6 +5900,9 @@ impl ApplicationHandler for TerminalWindowApp {
         if self.apply_installed_update_check_timeout(event_loop) {
             return;
         }
+        if self.apply_fullscreen_titlebar_hide_timeout(event_loop) {
+            return;
+        }
         self.apply_blink_timeouts(event_loop);
     }
 }
@@ -5514,7 +5943,11 @@ fn terminal_window_initial_inner_size(
 
     LogicalSize::new(
         f64::from(metrics.padding.x * 2.0 + f32::from(size.cols.max(1)) * metrics.cell.width),
-        f64::from(metrics.padding.y * 2.0 + f32::from(size.rows.max(1)) * metrics.cell.height),
+        f64::from(
+            CUSTOM_TITLEBAR_HEIGHT
+                + metrics.padding.y * 2.0
+                + f32::from(size.rows.max(1)) * metrics.cell.height,
+        ),
     )
 }
 
@@ -5631,9 +6064,19 @@ fn synchronized_output_deadline_after_poll(
     existing_deadline.or_else(|| now.checked_add(SYNCHRONIZED_OUTPUT_TIMEOUT))
 }
 
+#[cfg(test)]
 fn grid_size_for_window(size: PhysicalSize<u32>, metrics: CellMetrics) -> GridSize {
+    grid_size_for_window_with_reserved_height(size, metrics, 0.0)
+}
+
+fn grid_size_for_window_with_reserved_height(
+    size: PhysicalSize<u32>,
+    metrics: CellMetrics,
+    reserved_height: f32,
+) -> GridSize {
     let usable_width = (size.width as f32 - metrics.padding.x * 2.0).max(metrics.cell.width);
-    let usable_height = (size.height as f32 - metrics.padding.y * 2.0).max(metrics.cell.height);
+    let usable_height = (size.height as f32 - reserved_height - metrics.padding.y * 2.0)
+        .max(metrics.cell.height);
     GridSize::new(
         (usable_height / metrics.cell.height)
             .floor()
@@ -6185,6 +6628,15 @@ fn is_search_shortcut(logical_key: &Key, modifiers: Modifiers) -> bool {
     state.control_key()
         && state.shift_key()
         && matches!(logical_key, Key::Character(value) if value.eq_ignore_ascii_case("f"))
+}
+
+fn is_toggle_fullscreen_shortcut(logical_key: &Key, modifiers: Modifiers) -> bool {
+    let state = modifiers.state();
+    !state.control_key()
+        && !state.alt_key()
+        && !state.super_key()
+        && !state.shift_key()
+        && matches!(logical_key, Key::Named(NamedKey::F11))
 }
 
 fn is_new_local_tab_shortcut(logical_key: &Key, modifiers: Modifiers) -> bool {
@@ -7635,6 +8087,389 @@ fn native_session_tab_hover_color(target: NativeSessionTabStripTarget) -> Rgba {
     match target {
         NativeSessionTabStripTarget::Select => Rgba::rgb(42, 62, 70),
         NativeSessionTabStripTarget::Close => Rgba::rgb(98, 48, 48),
+    }
+}
+
+fn offset_frame_y(frame: &mut FramePlan, offset: f32) {
+    if offset == 0.0 {
+        return;
+    }
+
+    for rect in frame
+        .backgrounds
+        .iter_mut()
+        .chain(frame.selection.iter_mut())
+        .chain(frame.search_highlights.iter_mut())
+        .chain(frame.hyperlink_hover.iter_mut())
+        .chain(frame.hyperlink_underlines.iter_mut())
+        .chain(frame.text_decorations.iter_mut())
+        .chain(frame.ime_preedit.iter_mut())
+    {
+        rect.origin.y += offset;
+    }
+
+    if let Some(cursor) = &mut frame.cursor {
+        cursor.origin.y += offset;
+    }
+
+    for glyph in &mut frame.glyphs {
+        glyph.origin.y += offset;
+    }
+}
+
+fn apply_native_titlebar_overlay(
+    frame: &mut FramePlan,
+    overlay: NativeTitleBarOverlay<'_>,
+    metrics: CellMetrics,
+) {
+    if !overlay.visible && !overlay.menu_open {
+        return;
+    }
+
+    let titlebar_rect = native_titlebar_rect(overlay.window_width);
+    let mut clear_regions = vec![titlebar_rect];
+    if overlay.menu_open {
+        clear_regions.push(native_titlebar_menu_rect());
+    }
+    clear_frame_regions(frame, &clear_regions);
+
+    if overlay.visible {
+        frame.backgrounds.push(rect_item(
+            titlebar_rect,
+            if overlay.menu_open {
+                Rgba::rgb(25, 31, 36)
+            } else {
+                Rgba::rgb(21, 27, 32)
+            },
+        ));
+        frame.backgrounds.push(RectBatchItem {
+            origin: PixelPoint {
+                x: 0.0,
+                y: CUSTOM_TITLEBAR_HEIGHT - 1.0,
+            },
+            size: PixelSize {
+                width: overlay.window_width.max(1.0),
+                height: 1.0,
+            },
+            color: Rgba::rgb(47, 58, 64),
+        });
+
+        for button in native_titlebar_buttons() {
+            draw_native_titlebar_button(frame, button, overlay, metrics);
+        }
+        draw_native_titlebar_title(frame, overlay, metrics);
+    }
+
+    if overlay.menu_open {
+        draw_native_titlebar_menu(frame, overlay, metrics);
+    }
+}
+
+fn clear_frame_regions(frame: &mut FramePlan, regions: &[NativeOverlayRect]) {
+    frame.backgrounds.retain(|rect| {
+        !regions
+            .iter()
+            .any(|region| rect_origin_inside(rect, region.origin, region.size))
+    });
+    frame.selection.retain(|rect| {
+        !regions
+            .iter()
+            .any(|region| rect_origin_inside(rect, region.origin, region.size))
+    });
+    frame.search_highlights.retain(|rect| {
+        !regions
+            .iter()
+            .any(|region| rect_origin_inside(rect, region.origin, region.size))
+    });
+    frame.hyperlink_hover.retain(|rect| {
+        !regions
+            .iter()
+            .any(|region| rect_origin_inside(rect, region.origin, region.size))
+    });
+    frame.hyperlink_underlines.retain(|rect| {
+        !regions
+            .iter()
+            .any(|region| rect_origin_inside(rect, region.origin, region.size))
+    });
+    frame.text_decorations.retain(|rect| {
+        !regions
+            .iter()
+            .any(|region| rect_origin_inside(rect, region.origin, region.size))
+    });
+    frame.ime_preedit.retain(|rect| {
+        !regions
+            .iter()
+            .any(|region| rect_origin_inside(rect, region.origin, region.size))
+    });
+    frame.glyphs.retain(|glyph| {
+        !regions
+            .iter()
+            .any(|region| glyph_origin_inside(glyph, region.origin, region.size))
+    });
+    if frame.cursor.as_ref().is_some_and(|cursor| {
+        regions
+            .iter()
+            .any(|region| rect_origin_inside(cursor, region.origin, region.size))
+    }) {
+        frame.cursor = None;
+    }
+}
+
+fn draw_native_titlebar_button(
+    frame: &mut FramePlan,
+    button: NativeTitleBarButton,
+    overlay: NativeTitleBarOverlay<'_>,
+    metrics: CellMetrics,
+) {
+    let Some(rect) = native_titlebar_button_rect(button, overlay.window_width) else {
+        return;
+    };
+    let hovered = overlay
+        .hovered_hit
+        .is_some_and(|hit| hit == NativeTitleBarHit::Button(button));
+    let button_color = match (button, hovered) {
+        (NativeTitleBarButton::Close, true) => Rgba::rgb(150, 45, 48),
+        (_, true) => Rgba::rgb(44, 55, 62),
+        _ => Rgba::rgb(29, 37, 43),
+    };
+    frame.backgrounds.push(rect_item(rect, button_color));
+
+    if button == NativeTitleBarButton::Menu {
+        draw_menu_button_icon(frame, rect, hovered);
+        return;
+    }
+
+    let label = match button {
+        NativeTitleBarButton::Menu => "",
+        NativeTitleBarButton::Minimize => "-",
+        NativeTitleBarButton::Maximize if overlay.maximized => "][",
+        NativeTitleBarButton::Maximize => "[]",
+        NativeTitleBarButton::Close => "x",
+    };
+    let label_width = text_cell_width(label) as f32 * metrics.cell.width;
+    frame.glyphs.push(GlyphBatchItem {
+        origin: PixelPoint {
+            x: rect.origin.x + ((rect.size.width - label_width) * 0.5).max(0.0),
+            y: ((CUSTOM_TITLEBAR_HEIGHT - metrics.cell.height) * 0.5).max(0.0),
+        },
+        text: label.to_owned(),
+        color: if button == NativeTitleBarButton::Close && hovered {
+            Rgba::rgb(255, 244, 244)
+        } else {
+            Rgba::rgb(206, 218, 222)
+        },
+        style_flags: CellFlags::default(),
+    });
+}
+
+fn draw_menu_button_icon(frame: &mut FramePlan, rect: NativeOverlayRect, hovered: bool) {
+    let color = if hovered {
+        Rgba::rgb(235, 242, 240)
+    } else {
+        Rgba::rgb(190, 205, 205)
+    };
+    let line_width = 13.0;
+    let line_height = 2.0;
+    let line_x = rect.origin.x + (rect.size.width - line_width) * 0.5;
+    for line_index in 0..3 {
+        frame.backgrounds.push(RectBatchItem {
+            origin: PixelPoint {
+                x: line_x,
+                y: rect.origin.y + 8.0 + line_index as f32 * 5.0,
+            },
+            size: PixelSize {
+                width: line_width,
+                height: line_height,
+            },
+            color,
+        });
+    }
+}
+
+fn draw_native_titlebar_title(
+    frame: &mut FramePlan,
+    overlay: NativeTitleBarOverlay<'_>,
+    metrics: CellMetrics,
+) {
+    let Some(menu_rect) =
+        native_titlebar_button_rect(NativeTitleBarButton::Menu, overlay.window_width)
+    else {
+        return;
+    };
+    let Some(minimize_rect) =
+        native_titlebar_button_rect(NativeTitleBarButton::Minimize, overlay.window_width)
+    else {
+        return;
+    };
+    let start_x = menu_rect.origin.x + menu_rect.size.width + 12.0;
+    let end_x = (minimize_rect.origin.x - 12.0).max(start_x);
+    let available_cells = ((end_x - start_x) / metrics.cell.width)
+        .floor()
+        .clamp(0.0, f32::from(u16::MAX)) as u16;
+    if available_cells == 0 {
+        return;
+    }
+
+    frame.glyphs.push(GlyphBatchItem {
+        origin: PixelPoint {
+            x: start_x,
+            y: ((CUSTOM_TITLEBAR_HEIGHT - metrics.cell.height) * 0.5).max(0.0),
+        },
+        text: truncate_cells(overlay.title, available_cells),
+        color: Rgba::rgb(218, 227, 225),
+        style_flags: CellFlags::default(),
+    });
+}
+
+fn draw_native_titlebar_menu(
+    frame: &mut FramePlan,
+    overlay: NativeTitleBarOverlay<'_>,
+    metrics: CellMetrics,
+) {
+    let menu_rect = native_titlebar_menu_rect();
+    let menu_width = menu_rect.size.width.min(overlay.window_width.max(1.0));
+    let menu_rect = NativeOverlayRect {
+        size: PixelSize {
+            width: menu_width,
+            height: menu_rect.size.height,
+        },
+        ..menu_rect
+    };
+    frame.backgrounds.push(rect_item(menu_rect, Rgba::rgb(27, 35, 40)));
+    frame.backgrounds.push(RectBatchItem {
+        origin: menu_rect.origin,
+        size: PixelSize {
+            width: menu_rect.size.width,
+            height: 1.0,
+        },
+        color: Rgba::rgb(72, 90, 96),
+    });
+
+    for (index, item) in native_titlebar_menu_items().into_iter().enumerate() {
+        let row_origin = PixelPoint {
+            x: menu_rect.origin.x,
+            y: menu_rect.origin.y + index as f32 * CUSTOM_TITLEBAR_MENU_ITEM_HEIGHT,
+        };
+        let hovered = overlay
+            .hovered_hit
+            .is_some_and(|hit| hit == NativeTitleBarHit::MenuItem(item));
+        if hovered {
+            frame.backgrounds.push(RectBatchItem {
+                origin: row_origin,
+                size: PixelSize {
+                    width: menu_rect.size.width,
+                    height: CUSTOM_TITLEBAR_MENU_ITEM_HEIGHT,
+                },
+                color: Rgba::rgb(46, 66, 74),
+            });
+        }
+        frame.glyphs.push(GlyphBatchItem {
+            origin: PixelPoint {
+                x: row_origin.x + 12.0,
+                y: row_origin.y + ((CUSTOM_TITLEBAR_MENU_ITEM_HEIGHT - metrics.cell.height) * 0.5)
+                    .max(0.0),
+            },
+            text: native_titlebar_menu_item_label(item).to_owned(),
+            color: Rgba::rgb(222, 232, 229),
+            style_flags: CellFlags::default(),
+        });
+    }
+}
+
+fn native_titlebar_rect(window_width: f32) -> NativeOverlayRect {
+    NativeOverlayRect {
+        origin: PixelPoint { x: 0.0, y: 0.0 },
+        size: PixelSize {
+            width: window_width.max(1.0),
+            height: CUSTOM_TITLEBAR_HEIGHT,
+        },
+    }
+}
+
+fn native_titlebar_buttons() -> [NativeTitleBarButton; 4] {
+    [
+        NativeTitleBarButton::Menu,
+        NativeTitleBarButton::Minimize,
+        NativeTitleBarButton::Maximize,
+        NativeTitleBarButton::Close,
+    ]
+}
+
+fn native_titlebar_button_rect(
+    button: NativeTitleBarButton,
+    window_width: f32,
+) -> Option<NativeOverlayRect> {
+    let y = ((CUSTOM_TITLEBAR_HEIGHT - CUSTOM_TITLEBAR_BUTTON_SIZE) * 0.5).max(0.0);
+    let x = match button {
+        NativeTitleBarButton::Menu => CUSTOM_TITLEBAR_EDGE_PADDING,
+        NativeTitleBarButton::Close => native_titlebar_right_button_x(window_width, 0)?,
+        NativeTitleBarButton::Maximize => native_titlebar_right_button_x(window_width, 1)?,
+        NativeTitleBarButton::Minimize => native_titlebar_right_button_x(window_width, 2)?,
+    };
+
+    Some(NativeOverlayRect {
+        origin: PixelPoint { x, y },
+        size: PixelSize {
+            width: CUSTOM_TITLEBAR_BUTTON_SIZE,
+            height: CUSTOM_TITLEBAR_BUTTON_SIZE,
+        },
+    })
+}
+
+fn native_titlebar_right_button_x(window_width: f32, index_from_right: usize) -> Option<f32> {
+    let x = window_width
+        - CUSTOM_TITLEBAR_EDGE_PADDING
+        - CUSTOM_TITLEBAR_BUTTON_SIZE
+        - index_from_right as f32 * (CUSTOM_TITLEBAR_BUTTON_SIZE + CUSTOM_TITLEBAR_BUTTON_GAP);
+    (x >= 0.0).then_some(x)
+}
+
+fn native_titlebar_menu_rect() -> NativeOverlayRect {
+    NativeOverlayRect {
+        origin: PixelPoint {
+            x: CUSTOM_TITLEBAR_EDGE_PADDING,
+            y: CUSTOM_TITLEBAR_HEIGHT,
+        },
+        size: PixelSize {
+            width: CUSTOM_TITLEBAR_MENU_WIDTH,
+            height: native_titlebar_menu_items().len() as f32 * CUSTOM_TITLEBAR_MENU_ITEM_HEIGHT,
+        },
+    }
+}
+
+fn native_titlebar_menu_items() -> [NativeTitleBarMenuItem; 4] {
+    [
+        NativeTitleBarMenuItem::NewLocalShell,
+        NativeTitleBarMenuItem::CommandPalette,
+        NativeTitleBarMenuItem::Search,
+        NativeTitleBarMenuItem::About,
+    ]
+}
+
+fn native_titlebar_menu_item_for_point(point: PixelPoint) -> Option<NativeTitleBarMenuItem> {
+    let rect = native_titlebar_menu_rect();
+    if !rect.contains_point(point) {
+        return None;
+    }
+
+    let row = ((point.y - rect.origin.y) / CUSTOM_TITLEBAR_MENU_ITEM_HEIGHT).floor() as usize;
+    native_titlebar_menu_items().get(row).copied()
+}
+
+fn native_titlebar_menu_item_label(item: NativeTitleBarMenuItem) -> &'static str {
+    match item {
+        NativeTitleBarMenuItem::NewLocalShell => "New Local Shell",
+        NativeTitleBarMenuItem::CommandPalette => "Command Palette",
+        NativeTitleBarMenuItem::Search => "Search",
+        NativeTitleBarMenuItem::About => "About Witty",
+    }
+}
+
+fn rect_item(rect: NativeOverlayRect, color: Rgba) -> RectBatchItem {
+    RectBatchItem {
+        origin: rect.origin,
+        size: rect.size,
+        color,
     }
 }
 
@@ -9602,8 +10437,44 @@ mod tests {
                 Some(GridSize::new(36, 120)),
                 CellMetrics::default()
             ),
-            LogicalSize::new(1096.0, 664.0)
+            LogicalSize::new(1096.0, 698.0)
         );
+    }
+
+    #[test]
+    fn titlebar_menu_hit_test_maps_menu_rows() {
+        let first_row = PixelPoint {
+            x: CUSTOM_TITLEBAR_EDGE_PADDING + 8.0,
+            y: CUSTOM_TITLEBAR_HEIGHT + 8.0,
+        };
+        let second_row = PixelPoint {
+            y: first_row.y + CUSTOM_TITLEBAR_MENU_ITEM_HEIGHT,
+            ..first_row
+        };
+
+        assert_eq!(
+            native_titlebar_menu_item_for_point(first_row),
+            Some(NativeTitleBarMenuItem::NewLocalShell)
+        );
+        assert_eq!(
+            native_titlebar_menu_item_for_point(second_row),
+            Some(NativeTitleBarMenuItem::CommandPalette)
+        );
+        assert_eq!(
+            native_titlebar_menu_item_for_point(PixelPoint { x: 0.0, y: 0.0 }),
+            None
+        );
+    }
+
+    #[test]
+    fn titlebar_button_rects_place_menu_left_and_close_right() {
+        let menu = native_titlebar_button_rect(NativeTitleBarButton::Menu, 640.0).unwrap();
+        let close = native_titlebar_button_rect(NativeTitleBarButton::Close, 640.0).unwrap();
+
+        assert_eq!(menu.origin.x, CUSTOM_TITLEBAR_EDGE_PADDING);
+        assert!(close.origin.x > menu.origin.x);
+        assert_eq!(menu.size.width, CUSTOM_TITLEBAR_BUTTON_SIZE);
+        assert_eq!(close.size.height, CUSTOM_TITLEBAR_BUTTON_SIZE);
     }
 
     #[test]
@@ -13881,6 +14752,22 @@ mod tests {
     fn diagnostics_shortcut_uses_f3() {
         assert!(is_frame_diagnostics_shortcut(&Key::Named(NamedKey::F3)));
         assert!(!is_frame_diagnostics_shortcut(&Key::Named(NamedKey::F2)));
+    }
+
+    #[test]
+    fn fullscreen_shortcut_uses_unmodified_f11() {
+        assert!(is_toggle_fullscreen_shortcut(
+            &Key::Named(NamedKey::F11),
+            Modifiers::from(ModifiersState::empty())
+        ));
+        assert!(!is_toggle_fullscreen_shortcut(
+            &Key::Named(NamedKey::F11),
+            Modifiers::from(ModifiersState::SHIFT)
+        ));
+        assert!(!is_toggle_fullscreen_shortcut(
+            &Key::Named(NamedKey::F10),
+            Modifiers::from(ModifiersState::empty())
+        ));
     }
 
     #[test]
