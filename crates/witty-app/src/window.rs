@@ -195,6 +195,7 @@ impl NativeOverlayRect {
 struct NativeTitleBarOverlay<'a> {
     title: &'a str,
     window_width: f32,
+    scale_factor: f32,
     visible: bool,
     menu_open: bool,
     hovered_hit: Option<NativeTitleBarHit>,
@@ -3081,6 +3082,21 @@ impl TerminalWindowApp {
         self.rebuild_frame();
     }
 
+    fn apply_window_scale_factor(&mut self, scale_factor: f64) -> bool {
+        let scale_factor = sane_window_scale_factor(scale_factor);
+        if (self.font_config.font_scale_factor() - scale_factor).abs() <= f32::EPSILON {
+            return false;
+        }
+
+        self.font_config = self.font_config.clone().with_scale_factor(scale_factor);
+        self.metrics = self.font_config.cell_metrics();
+        self.app.set_cell_metrics(self.metrics);
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_font_config(self.font_config.clone());
+        }
+        true
+    }
+
     fn apply_runtime_font_size_action(&mut self, action: RuntimeFontSizeAction) {
         let next_config = runtime_font_config_after_action(&self.font_config, action);
         if next_config == self.font_config {
@@ -3273,7 +3289,7 @@ impl TerminalWindowApp {
 
     fn titlebar_reserved_height(&self) -> f32 {
         if self.titlebar_reserves_space() {
-            CUSTOM_TITLEBAR_HEIGHT
+            native_titlebar_height(self.window_scale_factor())
         } else {
             0.0
         }
@@ -3292,10 +3308,15 @@ impl TerminalWindowApp {
             })
     }
 
+    fn window_scale_factor(&self) -> f32 {
+        self.font_config.font_scale_factor()
+    }
+
     fn titlebar_overlay(&self) -> NativeTitleBarOverlay<'_> {
         NativeTitleBarOverlay {
             title: &self.window_title,
             window_width: self.titlebar_window_width(),
+            scale_factor: self.window_scale_factor(),
             visible: self.titlebar_visible(),
             menu_open: self.titlebar_menu_open,
             hovered_hit: self.hovered_titlebar_hit,
@@ -3416,13 +3437,14 @@ impl TerminalWindowApp {
 
         if self.window_fullscreen {
             if let Some(point) = point {
+                let scale_factor = self.window_scale_factor();
                 let over_reveal_zone =
-                    f64::from(point.y) <= CUSTOM_TITLEBAR_FULLSCREEN_REVEAL_ZONE;
+                    f64::from(point.y) <= native_titlebar_fullscreen_reveal_zone(scale_factor);
                 let over_titlebar = self.fullscreen_titlebar_visible
                     && point.y >= 0.0
-                    && point.y < CUSTOM_TITLEBAR_HEIGHT;
+                    && point.y < native_titlebar_height(scale_factor);
                 let over_menu = self.titlebar_menu_open
-                    && native_titlebar_menu_rect().contains_point(point);
+                    && native_titlebar_menu_rect(scale_factor).contains_point(point);
                 if over_reveal_zone || over_titlebar || over_menu {
                     self.fullscreen_titlebar_visible = true;
                     self.fullscreen_titlebar_hide_deadline = None;
@@ -3471,19 +3493,25 @@ impl TerminalWindowApp {
 
     fn titlebar_hit_test(&self, position: PhysicalPosition<f64>) -> Option<NativeTitleBarHit> {
         let point = pixel_point_for_position(position)?;
+        let scale_factor = self.window_scale_factor();
 
         if self.titlebar_menu_open {
-            if let Some(item) = native_titlebar_menu_item_for_point(point) {
+            if let Some(item) = native_titlebar_menu_item_for_point(point, scale_factor) {
                 return Some(NativeTitleBarHit::MenuItem(item));
             }
         }
 
-        if !self.titlebar_visible() || point.y < 0.0 || point.y >= CUSTOM_TITLEBAR_HEIGHT {
+        if !self.titlebar_visible()
+            || point.y < 0.0
+            || point.y >= native_titlebar_height(scale_factor)
+        {
             return None;
         }
 
         for button in native_titlebar_buttons() {
-            if let Some(rect) = native_titlebar_button_rect(button, self.titlebar_window_width()) {
+            if let Some(rect) =
+                native_titlebar_button_rect(button, self.titlebar_window_width(), scale_factor)
+            {
                 if rect.contains_point(point) {
                     return Some(NativeTitleBarHit::Button(button));
                 }
@@ -5729,6 +5757,7 @@ impl ApplicationHandler for TerminalWindowApp {
         };
         window.set_ime_allowed(true);
         window.set_ime_purpose(ImePurpose::Terminal);
+        self.apply_window_scale_factor(window.scale_factor());
 
         let size = window.inner_size();
         if self.report_startup {
@@ -5760,7 +5789,9 @@ impl ApplicationHandler for TerminalWindowApp {
         self.renderer = Some(renderer);
         self.window = Some(window);
         self.resize_grid(size);
-        self.sync_ime_cursor_area(self.active_ime_cursor(self.terminal.snapshot().cursor.position));
+        self.sync_ime_cursor_area(self.active_ime_cursor(
+            self.terminal.snapshot().cursor.position,
+        ));
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -5832,13 +5863,55 @@ impl ApplicationHandler for TerminalWindowApp {
                 self.request_redraw_if_changed(changed);
             }
             WindowEvent::Resized(size) => {
+                let scale_factor = self
+                    .window
+                    .as_ref()
+                    .map(|window| window.scale_factor());
+                let scale_changed = scale_factor
+                    .map(|scale_factor| self.apply_window_scale_factor(scale_factor))
+                    .unwrap_or(false);
                 let fullscreen_changed = self.sync_window_fullscreen_state_from_window();
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size.width, size.height);
                 }
                 self.resize_grid(size);
-                if fullscreen_changed {
+                if scale_changed {
+                    let _ = self.refresh_titlebar_hover_for_current_pointer();
+                    let _ = self.refresh_session_tab_hover_for_current_pointer();
+                    let _ = self.refresh_profile_action_hover_for_current_pointer();
+                    let _ = self.refresh_empty_session_welcome_hover_for_current_pointer();
+                }
+                if fullscreen_changed || scale_changed {
                     self.rebuild_frame();
+                }
+                if scale_changed {
+                    self.sync_ime_cursor_area(
+                        self.active_ime_cursor(self.terminal.snapshot().cursor.position),
+                    );
+                }
+                self.request_redraw();
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                let scale_changed = self.apply_window_scale_factor(scale_factor);
+                let size = self
+                    .window
+                    .as_ref()
+                    .map(|window| window.inner_size())
+                    .unwrap_or(PhysicalSize::new(0, 0));
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.resize(size.width, size.height);
+                }
+                self.resize_grid(size);
+                if scale_changed {
+                    self.refresh_search_after_terminal_change();
+                    let _ = self.refresh_titlebar_hover_for_current_pointer();
+                    let _ = self.refresh_session_tab_hover_for_current_pointer();
+                    let _ = self.refresh_profile_action_hover_for_current_pointer();
+                    let _ = self.refresh_empty_session_welcome_hover_for_current_pointer();
+                    self.rebuild_frame();
+                    self.sync_ime_cursor_area(
+                        self.active_ime_cursor(self.terminal.snapshot().cursor.position),
+                    );
                 }
                 self.request_redraw();
             }
@@ -5951,6 +6024,14 @@ fn terminal_window_initial_inner_size(
     )
 }
 
+fn sane_window_scale_factor(scale_factor: f64) -> f32 {
+    if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor as f32
+    } else {
+        1.0
+    }
+}
+
 fn native_window_startup_report_line(
     size: PhysicalSize<u32>,
     active_session_close_fallback_policy: NativeActiveSessionCloseFallbackPolicy,
@@ -5989,6 +6070,8 @@ fn native_window_startup_report_json(
         "surface_height": size.height,
         "font_family": font_config.family(),
         "font_size": font_config.font_size(),
+        "font_scale_factor": font_config.font_scale_factor(),
+        "effective_font_size": font_config.effective_font_size(),
         "font_source_count": font_source_count,
         "will_request_adapter": true,
         "vulkan_enabled_by_witty": false,
@@ -6033,6 +6116,8 @@ fn native_window_first_frame_report_json(
         "surface_height": size.height,
         "font_family": font_config.family(),
         "font_size": font_config.font_size(),
+        "font_scale_factor": font_config.font_scale_factor(),
+        "effective_font_size": font_config.effective_font_size(),
         "font_source_count": font_source_count,
         "visible_rows": stats.visible_rows,
         "visible_cols": stats.visible_cols,
@@ -6698,6 +6783,7 @@ fn runtime_font_config_after_action(
         config.family().map(str::to_owned),
         runtime_font_size_after_action(config.font_size(), action),
     )
+    .with_scale_factor(config.font_scale_factor())
 }
 
 fn runtime_font_size_after_action(current: u16, action: RuntimeFontSizeAction) -> u16 {
@@ -8126,10 +8212,11 @@ fn apply_native_titlebar_overlay(
         return;
     }
 
-    let titlebar_rect = native_titlebar_rect(overlay.window_width);
+    let scale_factor = overlay.scale_factor;
+    let titlebar_rect = native_titlebar_rect(overlay.window_width, scale_factor);
     let mut clear_regions = vec![titlebar_rect];
     if overlay.menu_open {
-        clear_regions.push(native_titlebar_menu_rect());
+        clear_regions.push(native_titlebar_menu_rect(scale_factor));
     }
     clear_frame_regions(frame, &clear_regions);
 
@@ -8145,11 +8232,12 @@ fn apply_native_titlebar_overlay(
         frame.backgrounds.push(RectBatchItem {
             origin: PixelPoint {
                 x: 0.0,
-                y: CUSTOM_TITLEBAR_HEIGHT - 1.0,
+                y: native_titlebar_height(scale_factor)
+                    - native_titlebar_separator_height(scale_factor),
             },
             size: PixelSize {
                 width: overlay.window_width.max(1.0),
-                height: 1.0,
+                height: native_titlebar_separator_height(scale_factor),
             },
             color: Rgba::rgb(47, 58, 64),
         });
@@ -8221,7 +8309,8 @@ fn draw_native_titlebar_button(
     overlay: NativeTitleBarOverlay<'_>,
     metrics: CellMetrics,
 ) {
-    let Some(rect) = native_titlebar_button_rect(button, overlay.window_width) else {
+    let scale_factor = overlay.scale_factor;
+    let Some(rect) = native_titlebar_button_rect(button, overlay.window_width, scale_factor) else {
         return;
     };
     let hovered = overlay
@@ -8235,7 +8324,7 @@ fn draw_native_titlebar_button(
     frame.backgrounds.push(rect_item(rect, button_color));
 
     if button == NativeTitleBarButton::Menu {
-        draw_menu_button_icon(frame, rect, hovered);
+        draw_menu_button_icon(frame, rect, hovered, scale_factor);
         return;
     }
 
@@ -8250,7 +8339,7 @@ fn draw_native_titlebar_button(
     frame.glyphs.push(GlyphBatchItem {
         origin: PixelPoint {
             x: rect.origin.x + ((rect.size.width - label_width) * 0.5).max(0.0),
-            y: ((CUSTOM_TITLEBAR_HEIGHT - metrics.cell.height) * 0.5).max(0.0),
+            y: ((native_titlebar_height(scale_factor) - metrics.cell.height) * 0.5).max(0.0),
         },
         text: label.to_owned(),
         color: if button == NativeTitleBarButton::Close && hovered {
@@ -8262,20 +8351,27 @@ fn draw_native_titlebar_button(
     });
 }
 
-fn draw_menu_button_icon(frame: &mut FramePlan, rect: NativeOverlayRect, hovered: bool) {
+fn draw_menu_button_icon(
+    frame: &mut FramePlan,
+    rect: NativeOverlayRect,
+    hovered: bool,
+    scale_factor: f32,
+) {
     let color = if hovered {
         Rgba::rgb(235, 242, 240)
     } else {
         Rgba::rgb(190, 205, 205)
     };
-    let line_width = 13.0;
-    let line_height = 2.0;
+    let line_width = 13.0 * scale_factor;
+    let line_height = native_titlebar_separator_height(scale_factor) * 2.0;
+    let line_top = 8.0 * scale_factor;
+    let line_gap = 5.0 * scale_factor;
     let line_x = rect.origin.x + (rect.size.width - line_width) * 0.5;
     for line_index in 0..3 {
         frame.backgrounds.push(RectBatchItem {
             origin: PixelPoint {
                 x: line_x,
-                y: rect.origin.y + 8.0 + line_index as f32 * 5.0,
+                y: rect.origin.y + line_top + line_index as f32 * line_gap,
             },
             size: PixelSize {
                 width: line_width,
@@ -8291,18 +8387,26 @@ fn draw_native_titlebar_title(
     overlay: NativeTitleBarOverlay<'_>,
     metrics: CellMetrics,
 ) {
-    let Some(menu_rect) =
-        native_titlebar_button_rect(NativeTitleBarButton::Menu, overlay.window_width)
+    let scale_factor = overlay.scale_factor;
+    let Some(menu_rect) = native_titlebar_button_rect(
+        NativeTitleBarButton::Menu,
+        overlay.window_width,
+        scale_factor,
+    )
     else {
         return;
     };
-    let Some(minimize_rect) =
-        native_titlebar_button_rect(NativeTitleBarButton::Minimize, overlay.window_width)
+    let Some(minimize_rect) = native_titlebar_button_rect(
+        NativeTitleBarButton::Minimize,
+        overlay.window_width,
+        scale_factor,
+    )
     else {
         return;
     };
-    let start_x = menu_rect.origin.x + menu_rect.size.width + 12.0;
-    let end_x = (minimize_rect.origin.x - 12.0).max(start_x);
+    let title_margin = 12.0 * scale_factor;
+    let start_x = menu_rect.origin.x + menu_rect.size.width + title_margin;
+    let end_x = (minimize_rect.origin.x - title_margin).max(start_x);
     let available_cells = ((end_x - start_x) / metrics.cell.width)
         .floor()
         .clamp(0.0, f32::from(u16::MAX)) as u16;
@@ -8313,7 +8417,7 @@ fn draw_native_titlebar_title(
     frame.glyphs.push(GlyphBatchItem {
         origin: PixelPoint {
             x: start_x,
-            y: ((CUSTOM_TITLEBAR_HEIGHT - metrics.cell.height) * 0.5).max(0.0),
+            y: ((native_titlebar_height(scale_factor) - metrics.cell.height) * 0.5).max(0.0),
         },
         text: truncate_cells(overlay.title, available_cells),
         color: Rgba::rgb(218, 227, 225),
@@ -8326,7 +8430,8 @@ fn draw_native_titlebar_menu(
     overlay: NativeTitleBarOverlay<'_>,
     metrics: CellMetrics,
 ) {
-    let menu_rect = native_titlebar_menu_rect();
+    let scale_factor = overlay.scale_factor;
+    let menu_rect = native_titlebar_menu_rect(scale_factor);
     let menu_width = menu_rect.size.width.min(overlay.window_width.max(1.0));
     let menu_rect = NativeOverlayRect {
         size: PixelSize {
@@ -8340,7 +8445,7 @@ fn draw_native_titlebar_menu(
         origin: menu_rect.origin,
         size: PixelSize {
             width: menu_rect.size.width,
-            height: 1.0,
+            height: native_titlebar_separator_height(scale_factor),
         },
         color: Rgba::rgb(72, 90, 96),
     });
@@ -8348,7 +8453,7 @@ fn draw_native_titlebar_menu(
     for (index, item) in native_titlebar_menu_items().into_iter().enumerate() {
         let row_origin = PixelPoint {
             x: menu_rect.origin.x,
-            y: menu_rect.origin.y + index as f32 * CUSTOM_TITLEBAR_MENU_ITEM_HEIGHT,
+            y: menu_rect.origin.y + index as f32 * native_titlebar_menu_item_height(scale_factor),
         };
         let hovered = overlay
             .hovered_hit
@@ -8358,16 +8463,18 @@ fn draw_native_titlebar_menu(
                 origin: row_origin,
                 size: PixelSize {
                     width: menu_rect.size.width,
-                    height: CUSTOM_TITLEBAR_MENU_ITEM_HEIGHT,
+                    height: native_titlebar_menu_item_height(scale_factor),
                 },
                 color: Rgba::rgb(46, 66, 74),
             });
         }
         frame.glyphs.push(GlyphBatchItem {
             origin: PixelPoint {
-                x: row_origin.x + 12.0,
-                y: row_origin.y + ((CUSTOM_TITLEBAR_MENU_ITEM_HEIGHT - metrics.cell.height) * 0.5)
-                    .max(0.0),
+                x: row_origin.x + 12.0 * scale_factor,
+                y: row_origin.y
+                    + ((native_titlebar_menu_item_height(scale_factor) - metrics.cell.height)
+                        * 0.5)
+                        .max(0.0),
             },
             text: native_titlebar_menu_item_label(item).to_owned(),
             color: Rgba::rgb(222, 232, 229),
@@ -8376,12 +8483,12 @@ fn draw_native_titlebar_menu(
     }
 }
 
-fn native_titlebar_rect(window_width: f32) -> NativeOverlayRect {
+fn native_titlebar_rect(window_width: f32, scale_factor: f32) -> NativeOverlayRect {
     NativeOverlayRect {
         origin: PixelPoint { x: 0.0, y: 0.0 },
         size: PixelSize {
             width: window_width.max(1.0),
-            height: CUSTOM_TITLEBAR_HEIGHT,
+            height: native_titlebar_height(scale_factor),
         },
     }
 }
@@ -8395,44 +8502,98 @@ fn native_titlebar_buttons() -> [NativeTitleBarButton; 4] {
     ]
 }
 
+fn native_titlebar_scale(scale_factor: f32) -> f32 {
+    if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    }
+}
+
+fn native_titlebar_height(scale_factor: f32) -> f32 {
+    CUSTOM_TITLEBAR_HEIGHT * native_titlebar_scale(scale_factor)
+}
+
+fn native_titlebar_button_size(scale_factor: f32) -> f32 {
+    CUSTOM_TITLEBAR_BUTTON_SIZE * native_titlebar_scale(scale_factor)
+}
+
+fn native_titlebar_button_gap(scale_factor: f32) -> f32 {
+    CUSTOM_TITLEBAR_BUTTON_GAP * native_titlebar_scale(scale_factor)
+}
+
+fn native_titlebar_edge_padding(scale_factor: f32) -> f32 {
+    CUSTOM_TITLEBAR_EDGE_PADDING * native_titlebar_scale(scale_factor)
+}
+
+fn native_titlebar_menu_width(scale_factor: f32) -> f32 {
+    CUSTOM_TITLEBAR_MENU_WIDTH * native_titlebar_scale(scale_factor)
+}
+
+fn native_titlebar_menu_item_height(scale_factor: f32) -> f32 {
+    CUSTOM_TITLEBAR_MENU_ITEM_HEIGHT * native_titlebar_scale(scale_factor)
+}
+
+fn native_titlebar_separator_height(scale_factor: f32) -> f32 {
+    native_titlebar_scale(scale_factor).max(1.0)
+}
+
+fn native_titlebar_fullscreen_reveal_zone(scale_factor: f32) -> f64 {
+    CUSTOM_TITLEBAR_FULLSCREEN_REVEAL_ZONE * f64::from(native_titlebar_scale(scale_factor))
+}
+
 fn native_titlebar_button_rect(
     button: NativeTitleBarButton,
     window_width: f32,
+    scale_factor: f32,
 ) -> Option<NativeOverlayRect> {
-    let y = ((CUSTOM_TITLEBAR_HEIGHT - CUSTOM_TITLEBAR_BUTTON_SIZE) * 0.5).max(0.0);
+    let button_size = native_titlebar_button_size(scale_factor);
+    let y = ((native_titlebar_height(scale_factor) - button_size) * 0.5).max(0.0);
     let x = match button {
-        NativeTitleBarButton::Menu => CUSTOM_TITLEBAR_EDGE_PADDING,
-        NativeTitleBarButton::Close => native_titlebar_right_button_x(window_width, 0)?,
-        NativeTitleBarButton::Maximize => native_titlebar_right_button_x(window_width, 1)?,
-        NativeTitleBarButton::Minimize => native_titlebar_right_button_x(window_width, 2)?,
+        NativeTitleBarButton::Menu => native_titlebar_edge_padding(scale_factor),
+        NativeTitleBarButton::Close => {
+            native_titlebar_right_button_x(window_width, 0, scale_factor)?
+        }
+        NativeTitleBarButton::Maximize => {
+            native_titlebar_right_button_x(window_width, 1, scale_factor)?
+        }
+        NativeTitleBarButton::Minimize => {
+            native_titlebar_right_button_x(window_width, 2, scale_factor)?
+        }
     };
 
     Some(NativeOverlayRect {
         origin: PixelPoint { x, y },
         size: PixelSize {
-            width: CUSTOM_TITLEBAR_BUTTON_SIZE,
-            height: CUSTOM_TITLEBAR_BUTTON_SIZE,
+            width: button_size,
+            height: button_size,
         },
     })
 }
 
-fn native_titlebar_right_button_x(window_width: f32, index_from_right: usize) -> Option<f32> {
+fn native_titlebar_right_button_x(
+    window_width: f32,
+    index_from_right: usize,
+    scale_factor: f32,
+) -> Option<f32> {
+    let button_size = native_titlebar_button_size(scale_factor);
     let x = window_width
-        - CUSTOM_TITLEBAR_EDGE_PADDING
-        - CUSTOM_TITLEBAR_BUTTON_SIZE
-        - index_from_right as f32 * (CUSTOM_TITLEBAR_BUTTON_SIZE + CUSTOM_TITLEBAR_BUTTON_GAP);
+        - native_titlebar_edge_padding(scale_factor)
+        - button_size
+        - index_from_right as f32 * (button_size + native_titlebar_button_gap(scale_factor));
     (x >= 0.0).then_some(x)
 }
 
-fn native_titlebar_menu_rect() -> NativeOverlayRect {
+fn native_titlebar_menu_rect(scale_factor: f32) -> NativeOverlayRect {
     NativeOverlayRect {
         origin: PixelPoint {
-            x: CUSTOM_TITLEBAR_EDGE_PADDING,
-            y: CUSTOM_TITLEBAR_HEIGHT,
+            x: native_titlebar_edge_padding(scale_factor),
+            y: native_titlebar_height(scale_factor),
         },
         size: PixelSize {
-            width: CUSTOM_TITLEBAR_MENU_WIDTH,
-            height: native_titlebar_menu_items().len() as f32 * CUSTOM_TITLEBAR_MENU_ITEM_HEIGHT,
+            width: native_titlebar_menu_width(scale_factor),
+            height: native_titlebar_menu_items().len() as f32
+                * native_titlebar_menu_item_height(scale_factor),
         },
     }
 }
@@ -8446,13 +8607,17 @@ fn native_titlebar_menu_items() -> [NativeTitleBarMenuItem; 4] {
     ]
 }
 
-fn native_titlebar_menu_item_for_point(point: PixelPoint) -> Option<NativeTitleBarMenuItem> {
-    let rect = native_titlebar_menu_rect();
+fn native_titlebar_menu_item_for_point(
+    point: PixelPoint,
+    scale_factor: f32,
+) -> Option<NativeTitleBarMenuItem> {
+    let rect = native_titlebar_menu_rect(scale_factor);
     if !rect.contains_point(point) {
         return None;
     }
 
-    let row = ((point.y - rect.origin.y) / CUSTOM_TITLEBAR_MENU_ITEM_HEIGHT).floor() as usize;
+    let row = ((point.y - rect.origin.y) / native_titlebar_menu_item_height(scale_factor)).floor()
+        as usize;
     native_titlebar_menu_items().get(row).copied()
 }
 
@@ -10443,38 +10608,56 @@ mod tests {
 
     #[test]
     fn titlebar_menu_hit_test_maps_menu_rows() {
+        let scale_factor = 1.0;
         let first_row = PixelPoint {
-            x: CUSTOM_TITLEBAR_EDGE_PADDING + 8.0,
-            y: CUSTOM_TITLEBAR_HEIGHT + 8.0,
+            x: native_titlebar_edge_padding(scale_factor) + 8.0,
+            y: native_titlebar_height(scale_factor) + 8.0,
         };
         let second_row = PixelPoint {
-            y: first_row.y + CUSTOM_TITLEBAR_MENU_ITEM_HEIGHT,
+            y: first_row.y + native_titlebar_menu_item_height(scale_factor),
             ..first_row
         };
 
         assert_eq!(
-            native_titlebar_menu_item_for_point(first_row),
+            native_titlebar_menu_item_for_point(first_row, scale_factor),
             Some(NativeTitleBarMenuItem::NewLocalShell)
         );
         assert_eq!(
-            native_titlebar_menu_item_for_point(second_row),
+            native_titlebar_menu_item_for_point(second_row, scale_factor),
             Some(NativeTitleBarMenuItem::CommandPalette)
         );
         assert_eq!(
-            native_titlebar_menu_item_for_point(PixelPoint { x: 0.0, y: 0.0 }),
+            native_titlebar_menu_item_for_point(PixelPoint { x: 0.0, y: 0.0 }, scale_factor),
             None
         );
     }
 
     #[test]
     fn titlebar_button_rects_place_menu_left_and_close_right() {
-        let menu = native_titlebar_button_rect(NativeTitleBarButton::Menu, 640.0).unwrap();
-        let close = native_titlebar_button_rect(NativeTitleBarButton::Close, 640.0).unwrap();
+        let scale_factor = 1.0;
+        let menu =
+            native_titlebar_button_rect(NativeTitleBarButton::Menu, 640.0, scale_factor).unwrap();
+        let close =
+            native_titlebar_button_rect(NativeTitleBarButton::Close, 640.0, scale_factor).unwrap();
 
-        assert_eq!(menu.origin.x, CUSTOM_TITLEBAR_EDGE_PADDING);
+        assert_eq!(menu.origin.x, native_titlebar_edge_padding(scale_factor));
         assert!(close.origin.x > menu.origin.x);
-        assert_eq!(menu.size.width, CUSTOM_TITLEBAR_BUTTON_SIZE);
-        assert_eq!(close.size.height, CUSTOM_TITLEBAR_BUTTON_SIZE);
+        assert_eq!(menu.size.width, native_titlebar_button_size(scale_factor));
+        assert_eq!(close.size.height, native_titlebar_button_size(scale_factor));
+    }
+
+    #[test]
+    fn titlebar_geometry_scales_for_hidpi() {
+        let scale_factor = 2.0;
+        let menu =
+            native_titlebar_button_rect(NativeTitleBarButton::Menu, 1280.0, scale_factor).unwrap();
+        let menu_panel = native_titlebar_menu_rect(scale_factor);
+
+        assert_eq!(native_titlebar_height(scale_factor), 68.0);
+        assert_eq!(menu.origin.x, 12.0);
+        assert_eq!(menu.size.width, 56.0);
+        assert_eq!(menu_panel.origin.y, 68.0);
+        assert_eq!(menu_panel.size.height, 240.0);
     }
 
     #[test]

@@ -51,6 +51,20 @@ impl CellMetrics {
             padding: DEFAULT_TERMINAL_PADDING,
         }
     }
+
+    pub fn scale(self, scale_factor: f32) -> Self {
+        let scale_factor = sane_font_scale_factor(scale_factor);
+        Self {
+            cell: PixelSize {
+                width: self.cell.width * scale_factor,
+                height: self.cell.height * scale_factor,
+            },
+            padding: PixelPoint {
+                x: self.padding.x * scale_factor,
+                y: self.padding.y * scale_factor,
+            },
+        }
+    }
 }
 
 impl Default for CellMetrics {
@@ -1257,10 +1271,11 @@ pub struct WgpuRectRenderer {
     rect_vertex_capacity: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RendererFontConfig {
     family: Option<String>,
     font_size: u16,
+    font_scale_factor: f32,
 }
 
 impl RendererFontConfig {
@@ -1272,7 +1287,13 @@ impl RendererFontConfig {
         Self {
             family: normalize_font_family(family),
             font_size,
+            font_scale_factor: 1.0,
         }
+    }
+
+    pub fn with_scale_factor(mut self, scale_factor: f32) -> Self {
+        self.font_scale_factor = sane_font_scale_factor(scale_factor);
+        self
     }
 
     pub fn family(&self) -> Option<&str> {
@@ -1283,13 +1304,21 @@ impl RendererFontConfig {
         self.font_size
     }
 
+    pub fn font_scale_factor(&self) -> f32 {
+        self.font_scale_factor
+    }
+
+    pub fn effective_font_size(&self) -> f32 {
+        f32::from(self.font_size) * self.font_scale_factor
+    }
+
     pub fn line_height(&self) -> f32 {
         DEFAULT_TERMINAL_LINE_HEIGHT
-            * (f32::from(self.font_size) / f32::from(DEFAULT_TERMINAL_FONT_SIZE))
+            * (self.effective_font_size() / f32::from(DEFAULT_TERMINAL_FONT_SIZE))
     }
 
     pub fn cell_metrics(&self) -> CellMetrics {
-        CellMetrics::for_font_size(self.font_size)
+        CellMetrics::for_font_size(self.font_size).scale(self.font_scale_factor)
     }
 }
 
@@ -1780,6 +1809,14 @@ fn normalize_font_family(family: Option<String>) -> Option<String> {
         .filter(|family| !family.is_empty())
 }
 
+fn sane_font_scale_factor(scale_factor: f32) -> f32 {
+    if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    }
+}
+
 #[derive(Default)]
 struct TextBufferCache {
     items: Vec<TextBufferItem>,
@@ -1828,13 +1865,14 @@ impl TextBufferCache {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct TextBufferKey {
     text: String,
     width_px: u32,
     style_flags: CellFlags,
     font_family: Option<String>,
     font_size: u16,
+    font_scale_factor: f32,
 }
 
 impl TextBufferKey {
@@ -1850,6 +1888,7 @@ impl TextBufferKey {
             style_flags: glyph.style_flags,
             font_family: font_config.family.clone(),
             font_size: font_config.font_size,
+            font_scale_factor: font_config.font_scale_factor,
         }
     }
 }
@@ -1864,7 +1903,8 @@ struct TextBufferItem {
 
 impl TextBufferItem {
     fn new(font_system: &mut FontSystem, key: TextBufferKey, glyph: &GlyphBatchItem) -> Self {
-        let metrics = text_metrics_for_style_flags(glyph.style_flags, key.font_size);
+        let metrics =
+            text_metrics_for_style_flags(glyph.style_flags, key.font_size, key.font_scale_factor);
         let mut buffer = Buffer::new(font_system, metrics);
         buffer.set_size(
             font_system,
@@ -1899,8 +1939,12 @@ fn text_attrs_for_style_flags<'a>(flags: CellFlags, font_family: Option<&'a str>
     attrs
 }
 
-fn text_metrics_for_style_flags(flags: CellFlags, font_size: u16) -> Metrics {
-    let font_size = f32::from(font_size);
+fn text_metrics_for_style_flags(
+    flags: CellFlags,
+    font_size: u16,
+    font_scale_factor: f32,
+) -> Metrics {
+    let font_size = f32::from(font_size) * sane_font_scale_factor(font_scale_factor);
     let line_height =
         DEFAULT_TERMINAL_LINE_HEIGHT * (font_size / f32::from(DEFAULT_TERMINAL_FONT_SIZE));
     let metrics = Metrics::new(font_size, line_height);
@@ -2038,7 +2082,7 @@ fn text_buffer_width_px(
     let line_height = font_config.line_height();
     let available_width = (surface_width - glyph.origin.x).max(line_height);
     let estimated_cell_width = if visible_cols == 0 {
-        f32::from(font_config.font_size())
+        font_config.effective_font_size()
     } else {
         (surface_width / f32::from(visible_cols)).max(1.0)
     };
@@ -2750,9 +2794,26 @@ mod tests {
         let metrics = config.cell_metrics();
 
         assert_eq!(config.font_size(), 21);
+        assert_eq!(config.font_scale_factor(), 1.0);
+        assert_eq!(config.effective_font_size(), 21.0);
         assert!((config.line_height() - 27.0).abs() < 0.001);
         assert!((metrics.cell.width - 13.5).abs() < 0.001);
         assert!((metrics.cell.height - 27.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn renderer_font_config_scales_metrics_from_scale_factor() {
+        let config = RendererFontConfig::with_font_size(None, 14).with_scale_factor(2.0);
+        let metrics = config.cell_metrics();
+
+        assert_eq!(config.font_size(), 14);
+        assert_eq!(config.font_scale_factor(), 2.0);
+        assert_eq!(config.effective_font_size(), 28.0);
+        assert!((config.line_height() - 36.0).abs() < 0.001);
+        assert!((metrics.cell.width - 18.0).abs() < 0.001);
+        assert!((metrics.cell.height - 36.0).abs() < 0.001);
+        assert!((metrics.padding.x - 16.0).abs() < 0.001);
+        assert!((metrics.padding.y - 16.0).abs() < 0.001);
     }
 
     #[test]
@@ -2787,13 +2848,14 @@ mod tests {
 
     #[test]
     fn text_metrics_for_style_flags_scales_baseline_shift_runs() {
-        let normal = text_metrics_for_style_flags(CellFlags::default(), DEFAULT_TERMINAL_FONT_SIZE);
+        let normal =
+            text_metrics_for_style_flags(CellFlags::default(), DEFAULT_TERMINAL_FONT_SIZE, 1.0);
         assert_eq!(normal, Metrics::new(14.0, DEFAULT_TERMINAL_LINE_HEIGHT));
 
         let mut superscript = CellFlags::default();
         superscript.baseline_shift = BaselineShift::Superscript;
         let superscript_metrics =
-            text_metrics_for_style_flags(superscript, DEFAULT_TERMINAL_FONT_SIZE);
+            text_metrics_for_style_flags(superscript, DEFAULT_TERMINAL_FONT_SIZE, 1.0);
 
         assert!((superscript_metrics.font_size - 10.08).abs() < 0.001);
         assert!((superscript_metrics.line_height - 12.96).abs() < 0.001);
@@ -2801,14 +2863,22 @@ mod tests {
         let mut subscript = CellFlags::default();
         subscript.baseline_shift = BaselineShift::Subscript;
         assert_eq!(
-            text_metrics_for_style_flags(subscript, DEFAULT_TERMINAL_FONT_SIZE),
+            text_metrics_for_style_flags(subscript, DEFAULT_TERMINAL_FONT_SIZE, 1.0),
             superscript_metrics
         );
     }
 
     #[test]
     fn text_metrics_for_style_flags_uses_configured_font_size() {
-        let metrics = text_metrics_for_style_flags(CellFlags::default(), 21);
+        let metrics = text_metrics_for_style_flags(CellFlags::default(), 21, 1.0);
+
+        assert_eq!(metrics.font_size, 21.0);
+        assert!((metrics.line_height - 27.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn text_metrics_for_style_flags_uses_font_scale_factor() {
+        let metrics = text_metrics_for_style_flags(CellFlags::default(), 14, 1.5);
 
         assert_eq!(metrics.font_size, 21.0);
         assert!((metrics.line_height - 27.0).abs() < 0.001);
@@ -3325,6 +3395,26 @@ mod tests {
 
         assert_eq!(
             cache.sync(&mut font_system, &larger_font, 800.0, 80, &glyphs),
+            TextBufferSyncStats {
+                reused: 0,
+                rebuilt: 1,
+                retired: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn text_buffer_cache_rebuilds_on_font_scale_factor_change() {
+        let mut font_system = FontSystem::new();
+        let mut cache = TextBufferCache::default();
+        let glyphs = vec![glyph_item(0.0, 0.0, "icons", Rgba::WHITE)];
+        let default_font = RendererFontConfig::default();
+        let hidpi_font = RendererFontConfig::default().with_scale_factor(2.0);
+
+        cache.sync(&mut font_system, &default_font, 800.0, 80, &glyphs);
+
+        assert_eq!(
+            cache.sync(&mut font_system, &hidpi_font, 800.0, 80, &glyphs),
             TextBufferSyncStats {
                 reused: 0,
                 rebuilt: 1,
