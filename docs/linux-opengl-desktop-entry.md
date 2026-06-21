@@ -1,6 +1,6 @@
 # Linux OpenGL Desktop Entry
 
-Updated: 2026-06-01
+Updated: 2026-06-21
 
 This repo carries desktop entry templates at
 `packaging/linux/dev.witty.Witty.desktop` and
@@ -21,11 +21,12 @@ The template follows the same launcher-level backend policy observed on
 `aibookmx` for Warp:
 
 ```text
-Exec=env WGPU_BACKEND=gl ... --window
+Exec=env WGPU_BACKEND=gl WITTY_LOG=... ... --window
 ```
 
 That keeps OpenGL selection visible at the launcher boundary instead of relying
-on an interactive shell to export `WGPU_BACKEND`.
+on an interactive shell to export `WGPU_BACKEND`. `WITTY_LOG` keeps GNOME menu
+launches writing levelled logs under the Witty state directory.
 
 For a local user install, use:
 
@@ -40,6 +41,10 @@ The installer writes `~/.local/bin/witty`, installs hicolor icons named
 path in `Exec`. It also writes an installed-build marker at
 `$XDG_STATE_HOME/witty/install-state.v1.json`, or
 `~/.local/state/witty/install-state.v1.json` if `XDG_STATE_HOME` is unset.
+Native window logs are written under `$XDG_STATE_HOME/witty/logs/`, or
+`~/.local/state/witty/logs/` if `XDG_STATE_HOME` is unset. Override
+`WITTY_DESKTOP_LOG` during install to change the desktop launcher's default
+filter.
 Running installed windows compare their startup build id with that marker and
 show a native `Restart to update` action after a newer local install. The
 restart path writes `restart-state.v1.<pid>.json` in the Witty state directory

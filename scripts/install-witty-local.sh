@@ -17,6 +17,7 @@ BUILD_PROFILE="debug"
 BINARY_SOURCE=""
 BINARY_OVERRIDE=0
 ICON_SIZES=(16 24 32 48 64 128 256 512)
+DESKTOP_LOG_FILTER="${WITTY_DESKTOP_LOG:-info,witty_app::fullscreen=debug,wgpu=warn,naga=warn}"
 
 usage() {
   cat <<'MSG'
@@ -37,6 +38,7 @@ Options:
 
 Environment:
   WITTY_INSTALL_PREFIX      Default install prefix override.
+  WITTY_DESKTOP_LOG         Log filter written into the desktop launcher.
   XDG_STATE_HOME            State directory override for install-state.v1.json.
 MSG
 }
@@ -178,6 +180,9 @@ fi
 
 desktop_exec_line() {
   printf '/usr/bin/env WGPU_BACKEND=gl '
+  printf 'WITTY_LOG='
+  desktop_exec_arg "${DESKTOP_LOG_FILTER}"
+  printf ' '
   desktop_exec_arg "${BIN_TARGET}"
   printf ' --window'
 }

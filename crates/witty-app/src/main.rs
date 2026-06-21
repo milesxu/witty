@@ -1,3 +1,4 @@
+mod logging;
 mod real_tui_smoke;
 mod update_state;
 mod window;
@@ -63,6 +64,17 @@ const RECOMMENDED_TERMINAL_FONT_FAMILY: &str = "Maple Mono NF CN";
 
 fn main() -> anyhow::Result<()> {
     let mut options = AppOptions::parse(std::env::args().skip(1))?;
+    let _logging_guard = if options.mode == AppMode::Window {
+        match logging::init_window_logging() {
+            Ok(guard) => Some(guard),
+            Err(err) => {
+                eprintln!("failed to initialize Witty logging: {err:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let wittyrc_config_load =
         options.apply_wittyrc_defaults(default_wittyrc_path, read_wittyrc_config)?;
     let native_window_config_load = options.apply_native_window_config_defaults(
@@ -160,6 +172,12 @@ fn main() -> anyhow::Result<()> {
         return witty_launcher::run_cli(options.launcher_args);
     }
     if options.mode == AppMode::Window {
+        tracing::info!(
+            target: "witty_app::window",
+            version = env!("CARGO_PKG_VERSION"),
+            debug_assertions = cfg!(debug_assertions),
+            "starting Witty native window"
+        );
         let restore_state = match options.restore_state_path.as_ref() {
             Some(path) => Some(
                 read_restart_snapshot(path)
@@ -168,7 +186,7 @@ fn main() -> anyhow::Result<()> {
             ),
             None => None,
         };
-        return window::run(
+        let result = window::run(
             options.wasm_plugins,
             options.window_smoke,
             options.window_title,
@@ -184,6 +202,15 @@ fn main() -> anyhow::Result<()> {
             options.font_paths,
             restore_state,
         );
+        match &result {
+            Ok(()) => tracing::info!(target: "witty_app::window", "Witty native window exited"),
+            Err(err) => tracing::error!(
+                target: "witty_app::window",
+                error = ?err,
+                "Witty native window exited with error"
+            ),
+        }
+        return result;
     }
     if options.mode == AppMode::PtySmoke {
         return run_pty_smoke();

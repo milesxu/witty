@@ -71,12 +71,17 @@ scripts/install-witty-local.sh --dry-run
 scripts/install-witty-local.sh
 ```
 
-The installer builds `witty-app` by default, installs the binary to
+The installer builds the debug `witty-app` binary by default, installs it to
 `~/.local/bin/witty`, installs hicolor icons as `dev.witty.Witty`, and writes
 `~/.local/share/applications/dev.witty.Witty.desktop`. The installed launcher
-uses `Exec=/usr/bin/env WGPU_BACKEND=gl ~/.local/bin/witty --window`,
-`Icon=dev.witty.Witty`, `Terminal=false`, and
-`StartupWMClass=dev.witty.Witty`. It also writes an install marker at
+uses `/usr/bin/env` to set `WGPU_BACKEND=gl` and `WITTY_LOG=...` before running
+`~/.local/bin/witty --window`; it also sets `Icon=dev.witty.Witty`,
+`Terminal=false`, and `StartupWMClass=dev.witty.Witty`. Native window logs are
+written under
+`$XDG_STATE_HOME/witty/logs/`, or `~/.local/state/witty/logs/` when
+`XDG_STATE_HOME` is unset. Set `WITTY_LOG`, `RUST_LOG`, or the install-time
+`WITTY_DESKTOP_LOG` override to change log levels; release builds keep the same
+levelled logging path. The installer also writes an install marker at
 `$XDG_STATE_HOME/witty/install-state.v1.json`, or
 `~/.local/state/witty/install-state.v1.json` when `XDG_STATE_HOME` is unset.
 Already running installed windows poll that marker and show an update notice

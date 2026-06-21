@@ -3,7 +3,7 @@ Type=Application
 Name=Witty OpenGL
 GenericName=Terminal Emulator
 Comment=Witty terminal using the wgpu OpenGL backend
-Exec=env WGPU_BACKEND=gl witty --window
+Exec=env WGPU_BACKEND=gl WITTY_LOG="info,witty_app::fullscreen=debug,wgpu=warn,naga=warn" witty --window
 Icon=dev.witty.Witty
 Terminal=false
 Categories=System;TerminalEmulator;

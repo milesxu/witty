@@ -15,6 +15,7 @@ use winit::event::{
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, KeyCode, KeyLocation, ModifiersState, NamedKey, PhysicalKey};
+use winit::monitor::MonitorHandle;
 use winit::window::{Fullscreen, ImePurpose, Window, WindowAttributes, WindowId};
 use witty_core::{
     encode_terminal_focus_event, encode_terminal_mouse_event, paste_payload, terminal_char_width,
@@ -77,6 +78,10 @@ const SEARCH_SCROLL_BUFFER_ROWS: u16 = 1;
 const SYNCHRONIZED_OUTPUT_TIMEOUT: Duration = Duration::from_millis(150);
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const TEXT_BLINK_INTERVAL: Duration = Duration::from_millis(500);
+const FULLSCREEN_MONITOR_SIZE_TOLERANCE_PX: u32 = 8;
+const FULLSCREEN_REAFFIRM_INTERVAL: Duration = Duration::from_millis(120);
+const FULLSCREEN_REAFFIRM_DURATION: Duration = Duration::from_millis(1_200);
+const WINDOWED_RESTORE_MAX_ATTEMPTS: u8 = 8;
 const NATIVE_LOCAL_SESSION_SOURCE_PLUGIN: &str = "witty-local";
 const INSTALLED_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const RESTART_BUTTON_LABEL: &str = "Restart to update";
@@ -2875,6 +2880,14 @@ struct TerminalWindowApp {
     modifiers: Modifiers,
     pointer_position: Option<PhysicalPosition<f64>>,
     window_fullscreen: bool,
+    fullscreen_target_monitor: Option<MonitorHandle>,
+    fullscreen_target_size: Option<PhysicalSize<u32>>,
+    fullscreen_target_scale_factor: Option<f64>,
+    fullscreen_windowed_restore_size: Option<PhysicalSize<u32>>,
+    fullscreen_reaffirm_until: Option<Instant>,
+    fullscreen_next_reaffirm: Option<Instant>,
+    pending_windowed_restore_size: Option<PhysicalSize<u32>>,
+    pending_windowed_restore_attempts: u8,
     fullscreen_titlebar_visible: bool,
     fullscreen_titlebar_hide_deadline: Option<Instant>,
     titlebar_menu_open: bool,
@@ -3018,6 +3031,14 @@ impl TerminalWindowApp {
             modifiers: Modifiers::default(),
             pointer_position: None,
             window_fullscreen: false,
+            fullscreen_target_monitor: None,
+            fullscreen_target_size: None,
+            fullscreen_target_scale_factor: None,
+            fullscreen_windowed_restore_size: None,
+            fullscreen_reaffirm_until: None,
+            fullscreen_next_reaffirm: None,
+            pending_windowed_restore_size: None,
+            pending_windowed_restore_attempts: 0,
             fullscreen_titlebar_visible: false,
             fullscreen_titlebar_hide_deadline: None,
             titlebar_menu_open: false,
@@ -3095,6 +3116,14 @@ impl TerminalWindowApp {
             renderer.set_font_config(self.font_config.clone());
         }
         true
+    }
+
+    fn effective_window_scale_factor(&self, window: &Window, fallback: f64) -> f64 {
+        if self.window_fullscreen {
+            self.fullscreen_target_scale_factor.unwrap_or(fallback)
+        } else {
+            window.scale_factor()
+        }
     }
 
     fn apply_runtime_font_size_action(&mut self, action: RuntimeFontSizeAction) {
@@ -4131,21 +4160,12 @@ impl TerminalWindowApp {
             return;
         };
 
-        let entering_fullscreen = window.fullscreen().is_none();
+        let entering_fullscreen =
+            !self.window_fullscreen || !self.window_fullscreen_is_effective(&window);
         if entering_fullscreen {
-            window.set_fullscreen(Some(Fullscreen::Borderless(None)));
-            self.window_fullscreen = true;
-            self.fullscreen_titlebar_visible = false;
-            self.fullscreen_titlebar_hide_deadline = None;
-            self.titlebar_menu_open = false;
-            self.hovered_titlebar_hit = None;
+            self.enter_fullscreen(&window);
         } else {
-            window.set_fullscreen(None);
-            self.window_fullscreen = false;
-            self.fullscreen_titlebar_visible = false;
-            self.fullscreen_titlebar_hide_deadline = None;
-            self.titlebar_menu_open = false;
-            self.hovered_titlebar_hit = None;
+            self.exit_fullscreen(&window);
         }
 
         let size = window.inner_size();
@@ -4153,20 +4173,273 @@ impl TerminalWindowApp {
         self.rebuild_frame();
     }
 
-    fn sync_window_fullscreen_state_from_window(&mut self) -> bool {
-        let fullscreen = self
-            .window
-            .as_ref()
-            .is_some_and(|window| window.fullscreen().is_some());
-        if self.window_fullscreen == fullscreen {
+    fn enter_fullscreen(&mut self, window: &Window) {
+        let target_monitor = window.current_monitor();
+        let target_size = target_monitor.as_ref().map(|monitor| monitor.size());
+        let target_scale_factor = fullscreen_target_scale_factor(target_monitor.as_ref(), window);
+
+        if !self.window_fullscreen {
+            self.fullscreen_windowed_restore_size = Some(window.inner_size());
+            self.pending_windowed_restore_size = None;
+            self.pending_windowed_restore_attempts = 0;
+        }
+        self.log_fullscreen_debug("enter-before", Some(window));
+        apply_borderless_fullscreen(window, target_monitor.clone());
+        self.window_fullscreen = true;
+        self.fullscreen_target_monitor = target_monitor;
+        self.fullscreen_target_size = target_size;
+        self.fullscreen_target_scale_factor = Some(target_scale_factor);
+        let _ = self.apply_window_scale_factor(target_scale_factor);
+        self.schedule_fullscreen_reaffirm();
+        self.reset_fullscreen_overlay_state();
+        self.log_fullscreen_debug("enter-after", Some(window));
+    }
+
+    fn exit_fullscreen(&mut self, window: &Window) {
+        self.log_fullscreen_debug("exit-before", Some(window));
+        clear_fullscreen_size_guard(window);
+        let restore_size = self.fullscreen_windowed_restore_size.take();
+        window.set_fullscreen(None);
+        self.window_fullscreen = false;
+        self.fullscreen_target_monitor = None;
+        self.fullscreen_target_size = None;
+        self.fullscreen_target_scale_factor = None;
+        self.fullscreen_reaffirm_until = None;
+        self.fullscreen_next_reaffirm = None;
+        self.pending_windowed_restore_size = restore_size;
+        self.pending_windowed_restore_attempts = 0;
+        self.reset_fullscreen_overlay_state();
+        self.log_fullscreen_debug("exit-after", Some(window));
+    }
+
+    fn repair_fullscreen(&mut self, window: &Window) {
+        let target_monitor = self
+            .fullscreen_target_monitor
+            .clone()
+            .or_else(|| window.current_monitor());
+        let target_size = self
+            .fullscreen_target_size
+            .or_else(|| target_monitor.as_ref().map(|monitor| monitor.size()));
+        let target_scale_factor = self
+            .fullscreen_target_scale_factor
+            .unwrap_or_else(|| fullscreen_target_scale_factor(target_monitor.as_ref(), window));
+
+        self.log_fullscreen_debug("repair-before", Some(window));
+        apply_borderless_fullscreen(window, target_monitor.clone());
+        if let Some(size) = target_size {
+            let _ = window.request_inner_size(size);
+        }
+
+        self.window_fullscreen = true;
+        self.fullscreen_target_monitor = target_monitor;
+        self.fullscreen_target_size = target_size;
+        self.fullscreen_target_scale_factor = Some(target_scale_factor);
+        let _ = self.apply_window_scale_factor(target_scale_factor);
+        self.schedule_fullscreen_reaffirm();
+        self.reset_fullscreen_overlay_state();
+        self.log_fullscreen_debug("repair-after", Some(window));
+    }
+
+    fn reassert_fullscreen(&mut self, window: &Window) {
+        let target_monitor = self
+            .fullscreen_target_monitor
+            .clone()
+            .or_else(|| window.current_monitor());
+        let target_size = self
+            .fullscreen_target_size
+            .or_else(|| target_monitor.as_ref().map(|monitor| monitor.size()));
+        let target_scale_factor = self
+            .fullscreen_target_scale_factor
+            .unwrap_or_else(|| fullscreen_target_scale_factor(target_monitor.as_ref(), window));
+
+        self.log_fullscreen_debug("reassert-before", Some(window));
+        apply_borderless_fullscreen(window, target_monitor.clone());
+        if let Some(size) = target_size {
+            let _ = window.request_inner_size(size);
+        }
+
+        self.fullscreen_target_monitor = target_monitor;
+        self.fullscreen_target_size = target_size;
+        self.fullscreen_target_scale_factor = Some(target_scale_factor);
+        let _ = self.apply_window_scale_factor(target_scale_factor);
+        self.log_fullscreen_debug("reassert-after", Some(window));
+    }
+
+    fn schedule_fullscreen_reaffirm(&mut self) {
+        let now = Instant::now();
+        self.fullscreen_reaffirm_until = now.checked_add(FULLSCREEN_REAFFIRM_DURATION);
+        self.fullscreen_next_reaffirm = Some(now);
+    }
+
+    fn apply_fullscreen_reaffirm_timeout(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        if !self.window_fullscreen {
+            self.fullscreen_reaffirm_until = None;
+            self.fullscreen_next_reaffirm = None;
             return false;
         }
 
-        self.window_fullscreen = fullscreen;
+        let Some(until) = self.fullscreen_reaffirm_until else {
+            self.fullscreen_next_reaffirm = None;
+            return false;
+        };
+
+        let now = Instant::now();
+        if now >= until {
+            self.fullscreen_reaffirm_until = None;
+            self.fullscreen_next_reaffirm = None;
+            return false;
+        }
+
+        let Some(next) = self.fullscreen_next_reaffirm else {
+            self.fullscreen_next_reaffirm = Some(now);
+            return false;
+        };
+
+        if now < next {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+            return false;
+        }
+
+        if let Some(window) = self.window.as_ref().cloned() {
+            self.reassert_fullscreen(&window);
+        }
+        self.fullscreen_next_reaffirm = now.checked_add(FULLSCREEN_REAFFIRM_INTERVAL);
+        if let Some(next) = self.fullscreen_next_reaffirm {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+        }
+        true
+    }
+
+    fn apply_pending_windowed_restore(&mut self, window: &Window) -> bool {
+        let Some(size) = self.pending_windowed_restore_size else {
+            return false;
+        };
+
+        if self.window_fullscreen || window.fullscreen().is_some() {
+            return false;
+        }
+
+        if !fullscreen_inner_size_is_degraded(window.inner_size(), size)
+            && !fullscreen_inner_size_is_degraded(size, window.inner_size())
+        {
+            self.pending_windowed_restore_size = None;
+            self.pending_windowed_restore_attempts = 0;
+            return false;
+        }
+
+        if self.pending_windowed_restore_attempts >= WINDOWED_RESTORE_MAX_ATTEMPTS {
+            self.pending_windowed_restore_size = None;
+            self.pending_windowed_restore_attempts = 0;
+            return false;
+        }
+
+        self.pending_windowed_restore_attempts =
+            self.pending_windowed_restore_attempts.saturating_add(1);
+        let _ = window.request_inner_size(size);
+        true
+    }
+
+    fn reset_fullscreen_overlay_state(&mut self) {
         self.fullscreen_titlebar_visible = false;
         self.fullscreen_titlebar_hide_deadline = None;
         self.titlebar_menu_open = false;
         self.hovered_titlebar_hit = None;
+    }
+
+    fn log_fullscreen_debug(&self, label: &str, window: Option<&Window>) {
+        if !fullscreen_debug_enabled() {
+            return;
+        }
+
+        let window = window.or(self.window.as_deref());
+        let (
+            winit_fullscreen,
+            inner_size,
+            window_scale_factor,
+            current_monitor_name,
+            current_monitor_size,
+            current_monitor_scale_factor,
+        ) = window.map(fullscreen_window_debug_state).unwrap_or_default();
+
+        tracing::debug!(
+            target: "witty_app::fullscreen",
+            label,
+            app_fullscreen = self.window_fullscreen,
+            winit_fullscreen,
+            inner_size = ?inner_size,
+            window_scale_factor = ?window_scale_factor,
+            current_monitor = ?current_monitor_name,
+            current_monitor_size = ?current_monitor_size,
+            current_monitor_scale_factor = ?current_monitor_scale_factor,
+            target_size = ?self.fullscreen_target_size,
+            target_scale_factor = ?self.fullscreen_target_scale_factor,
+            restore_size = ?self.fullscreen_windowed_restore_size,
+            pending_restore = ?self.pending_windowed_restore_size,
+            reaffirm_active = self.fullscreen_reaffirm_until.is_some(),
+            "fullscreen state"
+        );
+    }
+
+    fn window_fullscreen_is_effective(&self, window: &Window) -> bool {
+        window_fullscreen_is_effective(window, self.fullscreen_target_size)
+    }
+
+    fn sync_window_fullscreen_state_from_window(&mut self) -> bool {
+        let Some(window) = self.window.as_ref().cloned() else {
+            let changed = self.window_fullscreen
+                || self.fullscreen_target_monitor.is_some()
+                || self.fullscreen_target_size.is_some()
+                || self.fullscreen_target_scale_factor.is_some()
+                || self.fullscreen_windowed_restore_size.is_some()
+                || self.fullscreen_reaffirm_until.is_some()
+                || self.fullscreen_next_reaffirm.is_some()
+                || self.pending_windowed_restore_size.is_some()
+                || self.pending_windowed_restore_attempts != 0;
+            self.window_fullscreen = false;
+            self.fullscreen_target_monitor = None;
+            self.fullscreen_target_size = None;
+            self.fullscreen_target_scale_factor = None;
+            self.fullscreen_windowed_restore_size = None;
+            self.fullscreen_reaffirm_until = None;
+            self.fullscreen_next_reaffirm = None;
+            self.pending_windowed_restore_size = None;
+            self.pending_windowed_restore_attempts = 0;
+            self.reset_fullscreen_overlay_state();
+            return changed;
+        };
+
+        if self.window_fullscreen && !self.window_fullscreen_is_effective(&window) {
+            self.repair_fullscreen(&window);
+            return true;
+        }
+
+        let fullscreen = window.fullscreen().is_some();
+        if !self.window_fullscreen && fullscreen {
+            self.fullscreen_target_monitor = window.current_monitor();
+            self.fullscreen_target_size = self
+                .fullscreen_target_monitor
+                .as_ref()
+                .map(|monitor| monitor.size());
+            self.fullscreen_target_scale_factor = Some(fullscreen_target_scale_factor(
+                self.fullscreen_target_monitor.as_ref(),
+                &window,
+            ));
+        } else if !fullscreen {
+            self.fullscreen_target_monitor = None;
+            self.fullscreen_target_size = None;
+            self.fullscreen_target_scale_factor = None;
+            self.fullscreen_reaffirm_until = None;
+            self.fullscreen_next_reaffirm = None;
+            let _ = self.apply_pending_windowed_restore(&window);
+        }
+
+        let state_changed = self.window_fullscreen != fullscreen;
+        if !state_changed {
+            return false;
+        }
+
+        self.window_fullscreen = fullscreen;
+        self.reset_fullscreen_overlay_state();
         true
     }
 
@@ -5859,14 +6132,20 @@ impl ApplicationHandler for TerminalWindowApp {
                 self.request_redraw_if_changed(changed);
             }
             WindowEvent::Focused(focused) => {
-                let changed = self.handle_focus_event(focused);
+                self.log_fullscreen_debug(if focused { "focused-true" } else { "focused-false" }, None);
+                let focus_changed = self.handle_focus_event(focused);
+                let fullscreen_changed = self.sync_window_fullscreen_state_from_window();
+                if self.window_fullscreen {
+                    self.schedule_fullscreen_reaffirm();
+                }
+                let changed = focus_changed || fullscreen_changed;
                 self.request_redraw_if_changed(changed);
             }
             WindowEvent::Resized(size) => {
-                let scale_factor = self
-                    .window
-                    .as_ref()
-                    .map(|window| window.scale_factor());
+                self.log_fullscreen_debug("resized", None);
+                let scale_factor = self.window.as_ref().map(|window| {
+                    self.effective_window_scale_factor(window, window.scale_factor())
+                });
                 let scale_changed = scale_factor
                     .map(|scale_factor| self.apply_window_scale_factor(scale_factor))
                     .unwrap_or(false);
@@ -5892,6 +6171,12 @@ impl ApplicationHandler for TerminalWindowApp {
                 self.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.log_fullscreen_debug("scale-factor-changed", None);
+                let scale_factor = self
+                    .window
+                    .as_ref()
+                    .map(|window| self.effective_window_scale_factor(window, scale_factor))
+                    .unwrap_or(scale_factor);
                 let scale_changed = self.apply_window_scale_factor(scale_factor);
                 let size = self
                     .window
@@ -5964,6 +6249,19 @@ impl ApplicationHandler for TerminalWindowApp {
             return;
         }
 
+        if self.apply_fullscreen_reaffirm_timeout(event_loop) {
+            return;
+        }
+
+        if let Some(window) = self.window.as_ref().cloned() {
+            if self.apply_pending_windowed_restore(&window) {
+                if let Some(deadline) = Instant::now().checked_add(FULLSCREEN_REAFFIRM_INTERVAL) {
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+                }
+                return;
+            }
+        }
+
         if self.apply_synchronized_output_timeout(event_loop) {
             return;
         }
@@ -6022,6 +6320,90 @@ fn terminal_window_initial_inner_size(
                 + f32::from(size.rows.max(1)) * metrics.cell.height,
         ),
     )
+}
+
+fn fullscreen_debug_enabled() -> bool {
+    tracing::enabled!(target: "witty_app::fullscreen", tracing::Level::DEBUG)
+}
+
+fn fullscreen_target_scale_factor(monitor: Option<&MonitorHandle>, window: &Window) -> f64 {
+    monitor
+        .map(|monitor| monitor.scale_factor())
+        .unwrap_or_else(|| window.scale_factor())
+}
+
+fn fullscreen_window_debug_state(
+    window: &Window,
+) -> (
+    bool,
+    Option<PhysicalSize<u32>>,
+    Option<f64>,
+    Option<String>,
+    Option<PhysicalSize<u32>>,
+    Option<f64>,
+) {
+    let monitor = window.current_monitor();
+    (
+        window.fullscreen().is_some(),
+        Some(window.inner_size()),
+        Some(window.scale_factor()),
+        monitor.as_ref().and_then(|monitor| monitor.name()),
+        monitor.as_ref().map(|monitor| monitor.size()),
+        monitor.as_ref().map(|monitor| monitor.scale_factor()),
+    )
+}
+
+fn apply_borderless_fullscreen(window: &Window, monitor: Option<MonitorHandle>) {
+    window.set_fullscreen(Some(Fullscreen::Borderless(monitor)));
+}
+
+fn clear_fullscreen_size_guard(window: &Window) {
+    window.set_min_inner_size::<PhysicalSize<u32>>(None);
+}
+
+fn window_fullscreen_is_effective(
+    window: &Window,
+    target_size: Option<PhysicalSize<u32>>,
+) -> bool {
+    let fullscreen = window.fullscreen().is_some();
+    let monitor_size = target_size.or_else(|| {
+        window.current_monitor().map(|monitor| monitor.size())
+    });
+    fullscreen_is_effective_for_size(
+        fullscreen,
+        window.inner_size(),
+        monitor_size,
+    )
+}
+
+fn fullscreen_is_effective_for_size(
+    fullscreen: bool,
+    inner_size: PhysicalSize<u32>,
+    monitor_size: Option<PhysicalSize<u32>>,
+) -> bool {
+    if !fullscreen {
+        return false;
+    }
+
+    let Some(monitor_size) = monitor_size else {
+        return true;
+    };
+
+    !fullscreen_inner_size_is_degraded(inner_size, monitor_size)
+}
+
+fn fullscreen_inner_size_is_degraded(
+    inner_size: PhysicalSize<u32>,
+    monitor_size: PhysicalSize<u32>,
+) -> bool {
+    inner_size
+        .width
+        .saturating_add(FULLSCREEN_MONITOR_SIZE_TOLERANCE_PX)
+        < monitor_size.width
+        || inner_size
+            .height
+            .saturating_add(FULLSCREEN_MONITOR_SIZE_TOLERANCE_PX)
+            < monitor_size.height
 }
 
 fn sane_window_scale_factor(scale_factor: f64) -> f32 {
@@ -14950,6 +15332,46 @@ mod tests {
         assert!(!is_toggle_fullscreen_shortcut(
             &Key::Named(NamedKey::F10),
             Modifiers::from(ModifiersState::empty())
+        ));
+    }
+
+    #[test]
+    fn fullscreen_size_degradation_allows_small_compositor_drift() {
+        assert!(!fullscreen_inner_size_is_degraded(
+            PhysicalSize::new(1916, 1076),
+            PhysicalSize::new(1920, 1080)
+        ));
+        assert!(fullscreen_inner_size_is_degraded(
+            PhysicalSize::new(1280, 720),
+            PhysicalSize::new(1920, 1080)
+        ));
+        assert!(fullscreen_inner_size_is_degraded(
+            PhysicalSize::new(1920, 900),
+            PhysicalSize::new(1920, 1080)
+        ));
+    }
+
+    #[test]
+    fn fullscreen_effectiveness_requires_flag_and_non_degraded_size() {
+        assert!(!fullscreen_is_effective_for_size(
+            false,
+            PhysicalSize::new(1920, 1080),
+            Some(PhysicalSize::new(1920, 1080))
+        ));
+        assert!(fullscreen_is_effective_for_size(
+            true,
+            PhysicalSize::new(960, 540),
+            None
+        ));
+        assert!(fullscreen_is_effective_for_size(
+            true,
+            PhysicalSize::new(1920, 1080),
+            Some(PhysicalSize::new(1920, 1080))
+        ));
+        assert!(!fullscreen_is_effective_for_size(
+            true,
+            PhysicalSize::new(960, 540),
+            Some(PhysicalSize::new(1920, 1080))
         ));
     }
 
