@@ -54,6 +54,8 @@ const WITTYRC_TEMPLATE: &str = include_str!("../templates/wittyrc");
 const WITTYRC_CONFIG_MAX_TOML_BYTES: u64 = 64 * 1024;
 const MIN_TERMINAL_FONT_SIZE: u16 = 6;
 const MAX_TERMINAL_FONT_SIZE: u16 = 96;
+const MIN_TERMINAL_PADDING: u16 = 0;
+const MAX_TERMINAL_PADDING: u16 = 64;
 const DEFAULT_WINDOW_ROWS: u16 = 24;
 const DEFAULT_WINDOW_COLS: u16 = 80;
 const MIN_WINDOW_ROWS: u16 = 5;
@@ -199,6 +201,7 @@ fn main() -> anyhow::Result<()> {
             options.max_scrollback_lines,
             options.font_family,
             options.font_size,
+            options.terminal_padding,
             options.font_paths,
             restore_state,
         );
@@ -288,6 +291,7 @@ struct AppOptions {
     max_scrollback_lines: usize,
     font_family: Option<String>,
     font_size: Option<u16>,
+    terminal_padding: Option<u16>,
     font_paths: Vec<PathBuf>,
     restore_state_path: Option<PathBuf>,
     wittyrc_path: Option<PathBuf>,
@@ -313,6 +317,7 @@ struct AppOptionsExplicit {
     max_scrollback_lines: bool,
     font_family: bool,
     font_size: bool,
+    terminal_padding: bool,
     font_paths: bool,
     cwd: bool,
     window_cols: bool,
@@ -344,6 +349,7 @@ impl AppOptions {
         let mut max_scrollback_lines_explicit = false;
         let mut font_family = None;
         let mut font_size = None;
+        let mut terminal_padding = None;
         let mut font_paths = Vec::new();
         let mut restore_state_path = None;
         let mut wittyrc_path = None;
@@ -616,6 +622,17 @@ impl AppOptions {
                     }
                     font_size = Some(parse_font_size(&value, "--font-size")?);
                     explicit.font_size = true;
+                    window_only_args_seen = true;
+                }
+                "--terminal-padding" => {
+                    let Some(value) = args.next() else {
+                        bail!("--terminal-padding requires a value");
+                    };
+                    if terminal_padding.is_some() {
+                        bail!("only one --terminal-padding value is allowed");
+                    }
+                    terminal_padding = Some(parse_terminal_padding(&value, "--terminal-padding")?);
+                    explicit.terminal_padding = true;
                     window_only_args_seen = true;
                 }
                 "--font-path" => {
@@ -1063,6 +1080,7 @@ impl AppOptions {
             max_scrollback_lines,
             font_family,
             font_size,
+            terminal_padding,
             font_paths,
             restore_state_path,
             wittyrc_path,
@@ -1198,6 +1216,12 @@ impl AppOptions {
                 self.font_size = Some(validate_font_size(value, "font_size")?);
             }
         }
+        if !self.explicit.terminal_padding && self.terminal_padding.is_none() {
+            if let Some(value) = config.terminal_padding {
+                self.terminal_padding =
+                    Some(validate_terminal_padding(value, "terminal_padding")?);
+            }
+        }
         if !self.explicit.font_paths && self.font_paths.is_empty() && !config.font_paths.is_empty()
         {
             self.font_paths = config
@@ -1291,6 +1315,13 @@ impl AppOptions {
         if !self.explicit.font_family && self.font_family.is_none() {
             if let Some(value) = config.font_family {
                 self.font_family = Some(parse_wittyrc_font_family(&value)?);
+            }
+        }
+        if !self.explicit.terminal_padding && self.terminal_padding.is_none() {
+            if let Some(value) = config.terminal_padding {
+                self.terminal_padding =
+                    Some(validate_terminal_padding(value, "terminal-padding")?);
+                self.explicit.terminal_padding = true;
             }
         }
         if !self.explicit.window_last_active_close_policy {
@@ -1421,6 +1452,8 @@ struct NativeWindowConfig {
     #[serde(default)]
     font_size: Option<u16>,
     #[serde(default)]
+    terminal_padding: Option<u16>,
+    #[serde(default)]
     font_paths: Vec<PathBuf>,
     #[serde(default)]
     cwd: Option<PathBuf>,
@@ -1443,6 +1476,8 @@ struct NativeWindowConfig {
 struct WittyrcConfig {
     #[serde(default, rename = "font-family")]
     font_family: Option<String>,
+    #[serde(default, rename = "terminal-padding")]
+    terminal_padding: Option<u16>,
     #[serde(default, rename = "window-last-active-close")]
     window_last_active_close: Option<String>,
 }
@@ -1519,6 +1554,7 @@ fn native_window_config_template() -> String {
     let template = serde_json::json!({
         "font_family": RECOMMENDED_TERMINAL_FONT_FAMILY,
         "font_size": 16,
+        "terminal_padding": 0,
         "window_title": "Witty",
         "program": null,
         "args": [],
@@ -1697,12 +1733,7 @@ fn native_window_effective_config_summary(
     config_load: &NativeWindowConfigLoadReport,
     wittyrc_load: &WittyrcConfigLoadReport,
 ) -> Result<String> {
-    let font_config = match options.font_size {
-        Some(font_size) => {
-            RendererFontConfig::with_font_size(options.font_family.clone(), font_size)
-        }
-        None => RendererFontConfig::new(options.font_family.clone()),
-    };
+    let font_config = renderer_font_config_for_options(options);
     let grid = options
         .window_smoke
         .initial_size
@@ -1754,6 +1785,7 @@ fn native_window_effective_config_summary(
         "env_keys": env_keys,
         "font_family": font_config.family(),
         "font_size": font_config.font_size(),
+        "terminal_padding": font_config.terminal_padding(),
         "font_source_count": options.font_paths.len(),
         "window_cols": grid.cols,
         "window_rows": grid.rows,
@@ -1773,12 +1805,7 @@ fn wittyrc_effective_config_summary(
     wittyrc_load: &WittyrcConfigLoadReport,
     window_config_load: &NativeWindowConfigLoadReport,
 ) -> Result<String> {
-    let font_config = match options.font_size {
-        Some(font_size) => {
-            RendererFontConfig::with_font_size(options.font_family.clone(), font_size)
-        }
-        None => RendererFontConfig::new(options.font_family.clone()),
-    };
+    let font_config = renderer_font_config_for_options(options);
     let value = serde_json::json!({
         "event": "witty.wittyrc_effective",
         "opens_window": false,
@@ -1802,6 +1829,7 @@ fn wittyrc_effective_config_summary(
         },
         "font_family": font_config.family(),
         "font_size": font_config.font_size(),
+        "terminal_padding": font_config.terminal_padding(),
         "font_source_count": options.font_paths.len(),
         "window_last_active_close": options.window_smoke.last_active_close_policy.as_config_value(),
     });
@@ -1809,6 +1837,19 @@ fn wittyrc_effective_config_summary(
         .context("serialize wittyrc effective config summary")?;
     text.push('\n');
     Ok(text)
+}
+
+fn renderer_font_config_for_options(options: &AppOptions) -> RendererFontConfig {
+    let config = match options.font_size {
+        Some(font_size) => {
+            RendererFontConfig::with_font_size(options.font_family.clone(), font_size)
+        }
+        None => RendererFontConfig::new(options.font_family.clone()),
+    };
+    match options.terminal_padding {
+        Some(padding) => config.with_terminal_padding(f32::from(padding)),
+        None => config,
+    }
 }
 
 fn set_profile_store_command(
@@ -2134,6 +2175,20 @@ fn validate_font_size(size: u16, name: &str) -> Result<u16> {
         bail!("{name} must be between {MIN_TERMINAL_FONT_SIZE} and {MAX_TERMINAL_FONT_SIZE}");
     }
     Ok(size)
+}
+
+fn parse_terminal_padding(value: &str, name: &str) -> Result<u16> {
+    let padding = value
+        .parse::<u16>()
+        .with_context(|| format!("{name} must be an integer"))?;
+    validate_terminal_padding(padding, name)
+}
+
+fn validate_terminal_padding(padding: u16, name: &str) -> Result<u16> {
+    if !(MIN_TERMINAL_PADDING..=MAX_TERMINAL_PADDING).contains(&padding) {
+        bail!("{name} must be between {MIN_TERMINAL_PADDING} and {MAX_TERMINAL_PADDING}");
+    }
+    Ok(padding)
 }
 
 fn parse_window_cols(value: &str, name: &str) -> Result<u16> {
@@ -3081,6 +3136,7 @@ mod tests {
         assert_eq!(options.max_scrollback_lines, DEFAULT_MAX_SCROLLBACK_LINES);
         assert_eq!(options.font_family, None);
         assert_eq!(options.font_size, None);
+        assert_eq!(options.terminal_padding, None);
         assert!(options.font_paths.is_empty());
         assert!(options.launcher_args.is_empty());
         assert_eq!(
@@ -3389,6 +3445,8 @@ mod tests {
             "JetBrainsMono Nerd Font".to_owned(),
             "--font-size".to_owned(),
             "16".to_owned(),
+            "--terminal-padding".to_owned(),
+            "8".to_owned(),
             "--font-path".to_owned(),
             "/fonts/JetBrainsMonoNerdFont-Regular.ttf".to_owned(),
             "--font-path".to_owned(),
@@ -3408,6 +3466,7 @@ mod tests {
             Some("JetBrainsMono Nerd Font")
         );
         assert_eq!(options.font_size, Some(16));
+        assert_eq!(options.terminal_padding, Some(8));
         assert_eq!(
             options.font_paths,
             vec![
@@ -3443,6 +3502,7 @@ mod tests {
             env: BTreeMap::from([("WITTY_SESSION".to_owned(), "config".to_owned())]),
             font_family: Some("  Hack Nerd Font  ".to_owned()),
             font_size: Some(18),
+            terminal_padding: Some(6),
             font_paths: vec![
                 PathBuf::from("/fonts/HackNerdFont-Regular.ttf"),
                 PathBuf::from("/fonts/SymbolsNerdFontMono-Regular.ttf"),
@@ -3476,6 +3536,7 @@ mod tests {
         );
         assert_eq!(options.font_family.as_deref(), Some("Hack Nerd Font"));
         assert_eq!(options.font_size, Some(18));
+        assert_eq!(options.terminal_padding, Some(6));
         assert_eq!(
             options.font_paths,
             vec![
@@ -3524,6 +3585,8 @@ mod tests {
                 "2500",
                 "--font-size",
                 "16",
+                "--terminal-padding",
+                "2",
                 "--cwd",
                 "/cli/project",
                 "--env",
@@ -3552,6 +3615,7 @@ mod tests {
             ]),
             font_family: Some("Hack Nerd Font".to_owned()),
             font_size: Some(18),
+            terminal_padding: Some(8),
             font_paths: vec![PathBuf::from("/config/Hack.ttf")],
             cwd: Some(PathBuf::from("/config/project")),
             scrollback_lines: Some(50000),
@@ -3588,6 +3652,7 @@ mod tests {
         assert_eq!(options.max_scrollback_lines, 2500);
         assert_eq!(options.cwd.as_deref(), Some(Path::new("/cli/project")));
         assert_eq!(options.font_size, Some(16));
+        assert_eq!(options.terminal_padding, Some(2));
         assert_eq!(
             options.mouse_selection_override,
             MouseSelectionOverridePolicy::ShiftSelect
@@ -3620,6 +3685,7 @@ mod tests {
 
         assert_eq!(options.font_family, None);
         assert_eq!(options.font_size, None);
+        assert_eq!(options.terminal_padding, None);
         assert!(options.font_paths.is_empty());
         assert_eq!(options.cwd, None);
         assert_eq!(options.window_title, None);
@@ -3643,7 +3709,9 @@ mod tests {
             config.window_last_active_close.as_deref(),
             Some("close-window")
         );
+        assert_eq!(config.terminal_padding, Some(0));
         assert!(template.contains("font-family = \"Maple Mono NF CN\""));
+        assert!(template.contains("terminal-padding = 0"));
         assert!(template.contains("window-last-active-close = \"close-window\""));
         assert!(template.ends_with('\n'));
     }
@@ -3666,7 +3734,12 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let config_path = root.join(".wittyrc");
         let unknown_path = root.join("unknown.wittyrc");
-        std::fs::write(&config_path, r#"font-family = "Maple Mono NF CN""#).unwrap();
+        std::fs::write(
+            &config_path,
+            r#"font-family = "Maple Mono NF CN"
+terminal-padding = 4"#,
+        )
+        .unwrap();
         std::fs::write(&unknown_path, r#"font_family = "Maple Mono NF CN""#).unwrap();
 
         let config = read_wittyrc_config(&config_path).unwrap().unwrap();
@@ -3674,6 +3747,7 @@ mod tests {
             config.font_family.as_deref(),
             Some(RECOMMENDED_TERMINAL_FONT_FAMILY)
         );
+        assert_eq!(config.terminal_padding, Some(4));
         assert_eq!(config.window_last_active_close, None);
         assert!(read_wittyrc_config(&root.join("missing.wittyrc"))
             .unwrap()
@@ -3704,6 +3778,7 @@ mod tests {
                     assert_eq!(path, Path::new("/configs/.wittyrc"));
                     Ok(Some(WittyrcConfig {
                         font_family: Some("Maple Mono NF CN".to_owned()),
+                        terminal_padding: Some(4),
                         window_last_active_close: Some("block".to_owned()),
                     }))
                 },
@@ -3718,6 +3793,7 @@ mod tests {
                     Ok(Some(NativeWindowConfig {
                         font_family: Some("Hack Nerd Font".to_owned()),
                         font_size: Some(18),
+                        terminal_padding: Some(8),
                         window_last_active_close: Some("close-window".to_owned()),
                         ..NativeWindowConfig::default()
                     }))
@@ -3732,6 +3808,7 @@ mod tests {
             Some(RECOMMENDED_TERMINAL_FONT_FAMILY)
         );
         assert_eq!(options.font_size, Some(18));
+        assert_eq!(options.terminal_padding, Some(4));
         assert_eq!(
             options.window_smoke.last_active_close_policy,
             WindowLastActiveClosePolicy::Block
@@ -3751,6 +3828,7 @@ mod tests {
                 |_| {
                     Ok(Some(WittyrcConfig {
                         font_family: Some("Maple Mono NF CN".to_owned()),
+                        terminal_padding: Some(5),
                         ..WittyrcConfig::default()
                     }))
                 },
@@ -3761,6 +3839,7 @@ mod tests {
             env_options.font_family.as_deref(),
             Some("JetBrainsMono Nerd Font")
         );
+        assert_eq!(env_options.terminal_padding, Some(5));
     }
 
     #[test]
@@ -3904,6 +3983,7 @@ mod tests {
                 |_| {
                     Ok(Some(WittyrcConfig {
                         font_family: Some("Maple Mono NF CN".to_owned()),
+                        terminal_padding: Some(7),
                         ..WittyrcConfig::default()
                     }))
                 },
@@ -3917,6 +3997,7 @@ mod tests {
                     Ok(Some(NativeWindowConfig {
                         font_family: Some("Hack Nerd Font".to_owned()),
                         font_size: Some(16),
+                        terminal_padding: Some(3),
                         ..NativeWindowConfig::default()
                     }))
                 },
@@ -3939,6 +4020,7 @@ mod tests {
         assert_eq!(json["window_config"]["required"], true);
         assert_eq!(json["font_family"], RECOMMENDED_TERMINAL_FONT_FAMILY);
         assert_eq!(json["font_size"], 18);
+        assert_eq!(json["terminal_padding"], 7.0);
     }
 
     #[test]
@@ -3954,6 +4036,7 @@ mod tests {
             Some(RECOMMENDED_TERMINAL_FONT_FAMILY)
         );
         assert_eq!(options.font_size, Some(16));
+        assert_eq!(options.terminal_padding, Some(0));
         assert_eq!(options.window_title.as_deref(), Some("Witty"));
         assert_eq!(options.program, None);
         assert!(options.args.is_empty());
@@ -4098,6 +4181,7 @@ mod tests {
                     env: BTreeMap::from([("WITTY_SESSION".to_owned(), "candidate".to_owned())]),
                     font_family: Some("JetBrainsMono Nerd Font".to_owned()),
                     font_size: Some(16),
+                    terminal_padding: Some(8),
                     font_paths: vec![PathBuf::from("/missing/SymbolsNerdFontMono.ttf")],
                     cwd: Some(PathBuf::from("/work/project")),
                     scrollback_lines: Some(20000),
@@ -4177,6 +4261,7 @@ mod tests {
                         env: BTreeMap::from([("TOKEN".to_owned(), "config-token".to_owned())]),
                         font_family: Some("Config Font".to_owned()),
                         font_size: Some(16),
+                        terminal_padding: Some(8),
                         font_paths: vec![PathBuf::from("/fonts/Symbols.ttf")],
                         cwd: Some(PathBuf::from("/config/project")),
                         scrollback_lines: Some(20000),
@@ -4216,6 +4301,7 @@ mod tests {
         assert_eq!(json["env_keys"], serde_json::json!(["TOKEN"]));
         assert_eq!(json["font_family"], "JetBrainsMono Nerd Font");
         assert_eq!(json["font_size"], 18);
+        assert_eq!(json["terminal_padding"], 8.0);
         assert_eq!(json["font_source_count"], 1);
         assert_eq!(json["window_cols"], 100);
         assert_eq!(json["window_rows"], 36);
@@ -4337,6 +4423,10 @@ mod tests {
                 env: BTreeMap::from([(" ".to_owned(), "bad".to_owned())]),
                 ..NativeWindowConfig::default()
             },
+            NativeWindowConfig {
+                terminal_padding: Some(MAX_TERMINAL_PADDING + 1),
+                ..NativeWindowConfig::default()
+            },
         ] {
             let mut options = AppOptions::parse([
                 "--window".to_owned(),
@@ -4411,6 +4501,7 @@ mod tests {
                 "env": {"WITTY_SESSION": "daily", "TERM": "xterm-witty"},
                 "font_family": "Hack Nerd Font",
                 "font_size": 18,
+                "terminal_padding": 4,
                 "font_paths": ["/fonts/Hack.ttf"],
                 "cwd": "/work/project",
                 "scrollback_lines": 12000,
@@ -4437,6 +4528,7 @@ mod tests {
         );
         assert_eq!(config.font_family.as_deref(), Some("Hack Nerd Font"));
         assert_eq!(config.font_size, Some(18));
+        assert_eq!(config.terminal_padding, Some(4));
         assert_eq!(config.font_paths, vec![PathBuf::from("/fonts/Hack.ttf")]);
         assert_eq!(config.cwd.as_deref(), Some(Path::new("/work/project")));
         assert_eq!(config.scrollback_lines, Some(12000));
@@ -6051,6 +6143,7 @@ Host prod
         assert!(AppOptions::parse(["--scrollback-lines".to_owned()]).is_err());
         assert!(AppOptions::parse(["--font-family".to_owned()]).is_err());
         assert!(AppOptions::parse(["--font-size".to_owned()]).is_err());
+        assert!(AppOptions::parse(["--terminal-padding".to_owned()]).is_err());
         assert!(AppOptions::parse(["--font-path".to_owned()]).is_err());
         assert!(AppOptions::parse(["--window-cols".to_owned()]).is_err());
         assert!(AppOptions::parse(["--window-rows".to_owned()]).is_err());
@@ -6067,6 +6160,7 @@ Host prod
             AppOptions::parse(["--font-family".to_owned(), "Hack Nerd Font".to_owned()]).is_err()
         );
         assert!(AppOptions::parse(["--font-size".to_owned(), "16".to_owned()]).is_err());
+        assert!(AppOptions::parse(["--terminal-padding".to_owned(), "8".to_owned()]).is_err());
         assert!(
             AppOptions::parse(["--font-path".to_owned(), "/fonts/Hack.ttf".to_owned()]).is_err()
         );
@@ -6100,6 +6194,26 @@ Host prod
             "--window".to_owned(),
             "--font-size".to_owned(),
             "97".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--window".to_owned(),
+            "--terminal-padding".to_owned(),
+            "wide".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--window".to_owned(),
+            "--terminal-padding".to_owned(),
+            "65".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--window".to_owned(),
+            "--terminal-padding".to_owned(),
+            "4".to_owned(),
+            "--terminal-padding".to_owned(),
+            "8".to_owned(),
         ])
         .is_err());
         assert!(AppOptions::parse([

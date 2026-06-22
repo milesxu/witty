@@ -2114,6 +2114,7 @@ pub fn run(
     max_scrollback_lines: usize,
     font_family: Option<String>,
     font_size: Option<u16>,
+    terminal_padding: Option<u16>,
     font_paths: Vec<PathBuf>,
     restore_state: Option<RestartSnapshotV1>,
 ) -> anyhow::Result<()> {
@@ -2132,6 +2133,7 @@ pub fn run(
         max_scrollback_lines,
         font_family,
         font_size,
+        terminal_padding,
         font_paths,
         restore_state,
     )?;
@@ -2940,6 +2942,7 @@ impl TerminalWindowApp {
         max_scrollback_lines: usize,
         font_family: Option<String>,
         font_size: Option<u16>,
+        terminal_padding: Option<u16>,
         font_paths: Vec<PathBuf>,
         restore_state: Option<RestartSnapshotV1>,
     ) -> Result<Self> {
@@ -2985,6 +2988,10 @@ impl TerminalWindowApp {
         let font_config = match font_size {
             Some(font_size) => RendererFontConfig::with_font_size(font_family, font_size),
             None => RendererFontConfig::new(font_family),
+        };
+        let font_config = match terminal_padding {
+            Some(padding) => font_config.with_terminal_padding(f32::from(padding)),
+            None => font_config,
         };
         let metrics = font_config.cell_metrics();
         app.set_cell_metrics(metrics);
@@ -6453,6 +6460,7 @@ fn native_window_startup_report_json(
         "font_family": font_config.family(),
         "font_size": font_config.font_size(),
         "font_scale_factor": font_config.font_scale_factor(),
+        "terminal_padding": font_config.terminal_padding(),
         "effective_font_size": font_config.effective_font_size(),
         "font_source_count": font_source_count,
         "will_request_adapter": true,
@@ -6499,6 +6507,7 @@ fn native_window_first_frame_report_json(
         "font_family": font_config.family(),
         "font_size": font_config.font_size(),
         "font_scale_factor": font_config.font_scale_factor(),
+        "terminal_padding": font_config.terminal_padding(),
         "effective_font_size": font_config.effective_font_size(),
         "font_source_count": font_source_count,
         "visible_rows": stats.visible_rows,
@@ -7166,6 +7175,7 @@ fn runtime_font_config_after_action(
         runtime_font_size_after_action(config.font_size(), action),
     )
     .with_scale_factor(config.font_scale_factor())
+    .with_terminal_padding(config.terminal_padding())
 }
 
 fn runtime_font_size_after_action(current: u16, action: RuntimeFontSizeAction) -> u16 {
@@ -10970,7 +10980,7 @@ mod tests {
     fn grid_size_tracks_cell_metrics() {
         let size = grid_size_for_window(PhysicalSize::new(98, 44), CellMetrics::default());
 
-        assert_eq!(size, GridSize::new(1, 9));
+        assert_eq!(size, GridSize::new(2, 10));
     }
 
     #[test]
@@ -10984,7 +10994,7 @@ mod tests {
                 Some(GridSize::new(36, 120)),
                 CellMetrics::default()
             ),
-            LogicalSize::new(1096.0, 698.0)
+            LogicalSize::new(1080.0, 682.0)
         );
     }
 
@@ -11074,6 +11084,7 @@ mod tests {
         assert_eq!(report["surface_height"], 540);
         assert!(report["font_family"].is_null());
         assert_eq!(report["font_size"], 14);
+        assert_eq!(report["terminal_padding"], 0.0);
         assert_eq!(report["font_source_count"], 0);
         assert_eq!(report["will_request_adapter"], true);
         assert_eq!(report["vulkan_enabled_by_witty"], false);
@@ -11113,6 +11124,7 @@ mod tests {
         assert_eq!(report["surface_height"], 540);
         assert_eq!(report["font_family"], "JetBrainsMono Nerd Font");
         assert_eq!(report["font_size"], 18);
+        assert_eq!(report["terminal_padding"], 0.0);
         assert_eq!(report["font_source_count"], 2);
         assert_eq!(report["visible_rows"], 24);
         assert_eq!(report["visible_cols"], 80);
@@ -11189,7 +11201,8 @@ mod tests {
     #[test]
     fn native_window_startup_report_names_configured_font_metadata() {
         let font_config =
-            RendererFontConfig::with_font_size(Some("Symbols Nerd Font Mono".to_owned()), 18);
+            RendererFontConfig::with_font_size(Some("Symbols Nerd Font Mono".to_owned()), 18)
+                .with_terminal_padding(4.0);
         let report = native_window_startup_report_json(
             PhysicalSize::new(960, 540),
             NativeActiveSessionCloseFallbackPolicy::Block,
@@ -11199,6 +11212,7 @@ mod tests {
 
         assert_eq!(report["font_family"], "Symbols Nerd Font Mono");
         assert_eq!(report["font_size"], 18);
+        assert_eq!(report["terminal_padding"], 4.0);
         assert_eq!(report["font_source_count"], 2);
     }
 
@@ -13352,6 +13366,7 @@ mod tests {
             1000,
             None,
             None,
+            None,
             Vec::new(),
             None,
         )
@@ -13397,6 +13412,7 @@ mod tests {
             MouseSelectionOverridePolicy::default(),
             Osc52ClipboardPolicy::Disabled,
             1000,
+            None,
             None,
             None,
             Vec::new(),
@@ -15446,12 +15462,16 @@ mod tests {
             DEFAULT_TERMINAL_FONT_SIZE
         );
 
-        let config =
-            RendererFontConfig::with_font_size(Some("JetBrainsMono Nerd Font".to_owned()), 18);
+        let config = RendererFontConfig::with_font_size(
+            Some("JetBrainsMono Nerd Font".to_owned()),
+            18,
+        )
+        .with_terminal_padding(8.0);
         let next = runtime_font_config_after_action(&config, RuntimeFontSizeAction::Increase);
 
         assert_eq!(next.family(), Some("JetBrainsMono Nerd Font"));
         assert_eq!(next.font_size(), 19);
+        assert_eq!(next.terminal_padding(), 8.0);
     }
 
     #[test]

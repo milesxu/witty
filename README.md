@@ -145,6 +145,7 @@ with a bundled template:
 
 ```toml
 font-family = "Maple Mono NF CN"
+terminal-padding = 0
 window-last-active-close = "close-window"
 ```
 
@@ -179,6 +180,7 @@ scripts/run-witty-native-opengl.sh --font-list nerd
 cargo run -p witty-app -- --window \
   --font-family "Maple Mono NF CN" \
   --font-size 16 \
+  --terminal-padding 0 \
   --font-path /path/to/SymbolsNerdFontMono-Regular.ttf
 WITTY_FONT_FAMILY="Maple Mono NF CN" witty --window
 ```
@@ -186,7 +188,9 @@ WITTY_FONT_FAMILY="Maple Mono NF CN" witty --window
 `--font-list` is non-graphical; add a filter before copying the exact family
 name into `--font-family`, `WITTY_FONT_FAMILY`, or config. `--font-path` is
 repeatable and accepts `.ttf`, `.otf`, and `.ttc` files. `WITTY_FONT_PATHS`
-uses the platform path-list separator, `:` on Linux.
+uses the platform path-list separator, `:` on Linux. Terminal padding defaults
+to `0`; set `terminal-padding = 8` in `.wittyrc` or pass `--terminal-padding 8`
+to restore the earlier inset.
 
 The compatible JSON config file is `window.v1.json` under the Witty config
 directory, normally `$XDG_CONFIG_HOME/witty/` or `~/.config/witty/` on Linux.

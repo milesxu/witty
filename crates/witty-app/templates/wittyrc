@@ -1,2 +1,3 @@
 font-family = "Maple Mono NF CN"
+terminal-padding = 0
 window-last-active-close = "close-window"

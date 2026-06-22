@@ -17,7 +17,8 @@ use witty_core::{
 pub const DEFAULT_TERMINAL_FONT_SIZE: u16 = 14;
 const DEFAULT_TERMINAL_LINE_HEIGHT: f32 = 18.0;
 const DEFAULT_TERMINAL_CELL_WIDTH: f32 = 9.0;
-const DEFAULT_TERMINAL_PADDING: PixelPoint = PixelPoint { x: 8.0, y: 8.0 };
+const DEFAULT_TERMINAL_PADDING: PixelPoint = PixelPoint { x: 0.0, y: 0.0 };
+const DEFAULT_SURFACE_CLEAR_COLOR: Rgba = Rgba::BLACK;
 const BASELINE_SHIFT_FONT_SCALE: f32 = 0.72;
 const MAX_GLYPHON_TEXT_AREA_CHARS: usize = 120;
 const MAX_GLYPHON_RENDERER_CHARS: usize = 120;
@@ -1276,6 +1277,7 @@ pub struct RendererFontConfig {
     family: Option<String>,
     font_size: u16,
     font_scale_factor: f32,
+    terminal_padding: f32,
 }
 
 impl RendererFontConfig {
@@ -1288,11 +1290,17 @@ impl RendererFontConfig {
             family: normalize_font_family(family),
             font_size,
             font_scale_factor: 1.0,
+            terminal_padding: DEFAULT_TERMINAL_PADDING.x,
         }
     }
 
     pub fn with_scale_factor(mut self, scale_factor: f32) -> Self {
         self.font_scale_factor = sane_font_scale_factor(scale_factor);
+        self
+    }
+
+    pub fn with_terminal_padding(mut self, padding: f32) -> Self {
+        self.terminal_padding = sane_terminal_padding(padding);
         self
     }
 
@@ -1308,6 +1316,10 @@ impl RendererFontConfig {
         self.font_scale_factor
     }
 
+    pub fn terminal_padding(&self) -> f32 {
+        self.terminal_padding
+    }
+
     pub fn effective_font_size(&self) -> f32 {
         f32::from(self.font_size) * self.font_scale_factor
     }
@@ -1318,7 +1330,12 @@ impl RendererFontConfig {
     }
 
     pub fn cell_metrics(&self) -> CellMetrics {
-        CellMetrics::for_font_size(self.font_size).scale(self.font_scale_factor)
+        let mut metrics = CellMetrics::for_font_size(self.font_size);
+        metrics.padding = PixelPoint {
+            x: self.terminal_padding,
+            y: self.terminal_padding,
+        };
+        metrics.scale(self.font_scale_factor)
     }
 }
 
@@ -1645,12 +1662,7 @@ impl WgpuRectRenderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.015,
-                            g: 0.018,
-                            b: 0.024,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(wgpu_clear_color(DEFAULT_SURFACE_CLEAR_COLOR)),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -1814,6 +1826,14 @@ fn sane_font_scale_factor(scale_factor: f32) -> f32 {
         scale_factor
     } else {
         1.0
+    }
+}
+
+fn sane_terminal_padding(padding: f32) -> f32 {
+    if padding.is_finite() && padding >= 0.0 {
+        padding
+    } else {
+        DEFAULT_TERMINAL_PADDING.x
     }
 }
 
@@ -2199,6 +2219,16 @@ fn rgba_to_linear(color: Rgba) -> [f32; 4] {
     ]
 }
 
+fn wgpu_clear_color(color: Rgba) -> wgpu::Color {
+    let [r, g, b, a] = rgba_to_linear(color);
+    wgpu::Color {
+        r: f64::from(r),
+        g: f64::from(g),
+        b: f64::from(b),
+        a: f64::from(a),
+    }
+}
+
 fn glyphon_color(color: Rgba) -> Color {
     Color::rgb(color.r, color.g, color.b)
 }
@@ -2207,7 +2237,8 @@ fn glyphon_color(color: Rgba) -> Color {
 mod tests {
     use super::*;
     use witty_core::{
-        BasicTerminal, CellPoint, CellRange, CursorShape, GridSize, RenderSnapshot, SearchHighlight,
+        BasicTerminal, CellPoint, CellRange, CellStyle, CursorShape, GridSize, RenderSnapshot,
+        SearchHighlight,
     };
 
     #[cfg(target_os = "linux")]
@@ -2231,6 +2262,25 @@ mod tests {
         assert_eq!(frame.glyphs.len(), 1);
         assert_eq!(frame.glyphs[0].text, "hi");
         assert!(frame.cursor.is_some());
+    }
+
+    #[test]
+    fn surface_clear_color_matches_default_terminal_background() {
+        let clear = wgpu_clear_color(DEFAULT_SURFACE_CLEAR_COLOR);
+
+        assert_eq!(DEFAULT_SURFACE_CLEAR_COLOR, CellStyle::default().background);
+        assert_eq!(clear.r, 0.0);
+        assert_eq!(clear.g, 0.0);
+        assert_eq!(clear.b, 0.0);
+        assert_eq!(clear.a, 1.0);
+    }
+
+    #[test]
+    fn default_cell_metrics_use_zero_terminal_padding() {
+        assert_eq!(
+            CellMetrics::default().padding,
+            PixelPoint { x: 0.0, y: 0.0 }
+        );
     }
 
     #[test]
@@ -2812,6 +2862,18 @@ mod tests {
         assert!((config.line_height() - 36.0).abs() < 0.001);
         assert!((metrics.cell.width - 18.0).abs() < 0.001);
         assert!((metrics.cell.height - 36.0).abs() < 0.001);
+        assert!((metrics.padding.x - 0.0).abs() < 0.001);
+        assert!((metrics.padding.y - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn renderer_font_config_uses_configured_terminal_padding() {
+        let config = RendererFontConfig::with_font_size(None, 14)
+            .with_terminal_padding(8.0)
+            .with_scale_factor(2.0);
+        let metrics = config.cell_metrics();
+
+        assert_eq!(config.terminal_padding(), 8.0);
         assert!((metrics.padding.x - 16.0).abs() < 0.001);
         assert!((metrics.padding.y - 16.0).abs() < 0.001);
     }
