@@ -1113,7 +1113,7 @@ where
         NativeProfileActionStartMode::ReplaceCurrentSession => {
             let max_scrollback_lines = terminal.max_scrollback_lines();
             app.replace_transport(transport);
-            *terminal = BasicTerminal::with_scrollback_limit(size, max_scrollback_lines);
+            *terminal = basic_terminal_like(size, max_scrollback_lines, terminal);
             *terminal_search = TerminalSearch::default();
             *shell_integration = ShellIntegrationState::default();
         }
@@ -1126,10 +1126,7 @@ where
                 session_id,
                 NativeSessionRuntime {
                     transport,
-                    terminal: BasicTerminal::with_scrollback_limit(
-                        size,
-                        terminal.max_scrollback_lines(),
-                    ),
+                    terminal: basic_terminal_like(size, terminal.max_scrollback_lines(), terminal),
                     terminal_search: TerminalSearch::default(),
                     shell_integration: ShellIntegrationState::default(),
                 },
@@ -1285,7 +1282,7 @@ fn replace_with_untracked_local_session<T>(
 {
     let max_scrollback_lines = terminal.max_scrollback_lines();
     app.replace_transport(transport);
-    *terminal = BasicTerminal::with_scrollback_limit(size, max_scrollback_lines);
+    *terminal = basic_terminal_like(size, max_scrollback_lines, terminal);
     *terminal_search = TerminalSearch::default();
     *shell_integration = ShellIntegrationState::default();
     sessions.clear();
@@ -1431,7 +1428,7 @@ where
         new_session_id,
         NativeSessionRuntime {
             transport,
-            terminal: BasicTerminal::with_scrollback_limit(size, terminal.max_scrollback_lines()),
+            terminal: basic_terminal_like(size, terminal.max_scrollback_lines(), terminal),
             terminal_search: TerminalSearch::default(),
             shell_integration: ShellIntegrationState::default(),
         },
@@ -2287,6 +2284,8 @@ pub fn run(
     background_opacity: Option<f32>,
     background_image_path: Option<PathBuf>,
     background_image_fit: Option<RendererBackgroundImageFit>,
+    cursor_shape: CursorShape,
+    cursor_blink: bool,
     session_tab_position: NativeSessionTabPosition,
     session_tab_label_style: NativeSessionTabLabelStyle,
     session_tab_display_policy: NativeSessionTabDisplayPolicy,
@@ -2314,6 +2313,8 @@ pub fn run(
         background_opacity,
         background_image_path,
         background_image_fit,
+        cursor_shape,
+        cursor_blink,
         session_tab_position,
         session_tab_label_style,
         session_tab_display_policy,
@@ -2426,6 +2427,26 @@ fn local_pty_config_for_launch(
         set_local_pty_env_pair(&mut config.env, pair);
     }
     Ok(config)
+}
+
+fn basic_terminal_with_cursor_style(
+    size: GridSize,
+    max_scrollback_lines: usize,
+    cursor_shape: CursorShape,
+    cursor_blink: bool,
+) -> BasicTerminal {
+    let mut terminal = BasicTerminal::with_scrollback_limit(size, max_scrollback_lines);
+    terminal.set_default_cursor_style(cursor_shape, cursor_blink);
+    terminal
+}
+
+fn basic_terminal_like(
+    size: GridSize,
+    max_scrollback_lines: usize,
+    template: &BasicTerminal,
+) -> BasicTerminal {
+    let (cursor_shape, cursor_blink) = template.default_cursor_style();
+    basic_terminal_with_cursor_style(size, max_scrollback_lines, cursor_shape, cursor_blink)
 }
 
 fn set_local_pty_env_pair(env: &mut Vec<(String, String)>, pair: (String, String)) {
@@ -2915,8 +2936,11 @@ fn native_window_session_startup_for_launch(
     size: GridSize,
     max_scrollback_lines: usize,
     local_tab_config: LocalPtyConfig,
+    cursor_shape: CursorShape,
+    cursor_blink: bool,
 ) -> Result<NativeWindowSessionStartup> {
-    let terminal = BasicTerminal::with_scrollback_limit(size, max_scrollback_lines);
+    let terminal =
+        basic_terminal_with_cursor_style(size, max_scrollback_lines, cursor_shape, cursor_blink);
     let transport = LocalPtyTransport::spawn(local_tab_config.clone())?;
     Ok(NativeWindowSessionStartup {
         size,
@@ -2932,6 +2956,8 @@ fn native_window_session_startup_for_restore(
     snapshot: RestartSnapshotV1,
     fallback_local_tab_config: LocalPtyConfig,
     max_scrollback_lines: usize,
+    cursor_shape: CursorShape,
+    cursor_blink: bool,
 ) -> Result<NativeWindowSessionStartup> {
     let size = snapshot.window.grid_size();
     let active_tab = snapshot
@@ -2941,7 +2967,8 @@ fn native_window_session_startup_for_restore(
     let active_config = active_tab.launch.to_local_pty_config(size);
     let transport =
         LocalPtyTransport::spawn(active_config).context("spawn active restored local pty")?;
-    let terminal = BasicTerminal::with_scrollback_limit(size, max_scrollback_lines);
+    let terminal =
+        basic_terminal_with_cursor_style(size, max_scrollback_lines, cursor_shape, cursor_blink);
     let mut sessions = NativeSessionRegistry::default();
     let mut parked_sessions = NativeSessionRuntimeRegistry::default();
 
@@ -2961,7 +2988,12 @@ fn native_window_session_startup_for_restore(
             session_id,
             NativeSessionRuntime {
                 transport,
-                terminal: BasicTerminal::with_scrollback_limit(size, max_scrollback_lines),
+                terminal: basic_terminal_with_cursor_style(
+                    size,
+                    max_scrollback_lines,
+                    cursor_shape,
+                    cursor_blink,
+                ),
                 terminal_search: TerminalSearch::default(),
                 shell_integration: ShellIntegrationState::default(),
             },
@@ -3185,6 +3217,8 @@ impl TerminalWindowApp {
         background_opacity: Option<f32>,
         background_image_path: Option<PathBuf>,
         background_image_fit: Option<RendererBackgroundImageFit>,
+        cursor_shape: CursorShape,
+        cursor_blink: bool,
         session_tab_position: NativeSessionTabPosition,
         session_tab_label_style: NativeSessionTabLabelStyle,
         session_tab_display_policy: NativeSessionTabDisplayPolicy,
@@ -3210,11 +3244,15 @@ impl TerminalWindowApp {
                 snapshot,
                 local_tab_config.clone(),
                 max_scrollback_lines,
+                cursor_shape,
+                cursor_blink,
             )?,
             None => native_window_session_startup_for_launch(
                 size,
                 max_scrollback_lines,
                 local_tab_config,
+                cursor_shape,
+                cursor_blink,
             )?,
         };
         let mut app = TerminalApp::new(startup.transport, startup.size);
@@ -14990,6 +15028,8 @@ mod tests {
             None,
             None,
             None,
+            CursorShape::Block,
+            true,
             NativeSessionTabPosition::Bottom,
             NativeSessionTabLabelStyle::Index,
             NativeSessionTabDisplayPolicy::default(),
@@ -15045,6 +15085,8 @@ mod tests {
             None,
             None,
             None,
+            CursorShape::Block,
+            true,
             NativeSessionTabPosition::Bottom,
             NativeSessionTabLabelStyle::Index,
             NativeSessionTabDisplayPolicy::default(),

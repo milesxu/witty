@@ -151,6 +151,8 @@ terminal-padding = 0
 background-opacity = 1.0
 background-image = "null"
 background-image-fit = "cover"
+cursor-shape = "block"
+cursor-blink = true
 session-tab-position = "top"
 session-tab-label = "index"
 session-tab-show-single = false
@@ -193,6 +195,8 @@ cargo run -p witty-app -- --window \
   --background-opacity 0.85 \
   --background-image /path/to/background.png \
   --background-image-fit cover \
+  --cursor-shape bar \
+  --cursor-blink true \
   --font-path /path/to/SymbolsNerdFontMono-Regular.ttf
 WITTY_FONT_FAMILY="Maple Mono NF CN" witty --window
 ```
@@ -208,6 +212,10 @@ with `background-opacity = 0.85` or `--background-opacity 0.85`. Set
 fall back to desktop transparency. Background images default to
 `background-image-fit = "cover"`, which scales the image to fill the window and
 center-crops any overflow. The CLI spelling is `--background-image-fit cover`.
+Cursor shape defaults to `block`; set `cursor-shape = "underline"` or
+`"bar"` for horizontal or vertical cursors. Set `cursor-blink = false` for a
+steady cursor. CLI spellings are `--cursor-shape block|underline|bar` and
+`--cursor-blink true|false`.
 
 The session tab strip is hidden by default so it never covers shell output or a
 tmux status line. Set `session-tab-show-single = true` or

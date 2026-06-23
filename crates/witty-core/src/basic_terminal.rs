@@ -178,6 +178,14 @@ impl BasicTerminal {
         self.state.set_max_scrollback_lines(max_scrollback_lines);
     }
 
+    pub fn set_default_cursor_style(&mut self, shape: CursorShape, blink: bool) {
+        self.state.set_default_cursor_style(shape, blink);
+    }
+
+    pub fn default_cursor_style(&self) -> (CursorShape, bool) {
+        self.state.default_cursor_style()
+    }
+
     pub fn visible_row_anchors(&self) -> Vec<TerminalVisibleRowAnchor> {
         self.state.visible_row_anchors()
     }
@@ -544,6 +552,8 @@ struct BasicTerminalState {
     palette_overrides: BTreeMap<u8, Rgba>,
     default_foreground: Rgba,
     default_background: Rgba,
+    default_cursor_shape: CursorShape,
+    default_cursor_blink: bool,
     cursor_color: Option<Rgba>,
     scrollback: VecDeque<Vec<BasicCell>>,
     scrollback_row_anchors: VecDeque<u64>,
@@ -605,6 +615,8 @@ impl BasicTerminalState {
             palette_overrides: BTreeMap::new(),
             default_foreground: CellStyle::default().foreground,
             default_background: CellStyle::default().background,
+            default_cursor_shape: CursorShape::Block,
+            default_cursor_blink: true,
             cursor_color: None,
             scrollback: VecDeque::new(),
             scrollback_row_anchors: VecDeque::new(),
@@ -1309,26 +1321,27 @@ impl BasicTerminalState {
         self.default_foreground = CellStyle::default().foreground;
         self.default_background = CellStyle::default().background;
         self.cursor_color = None;
-        self.main.cursor.shape = CursorShape::Block;
+        self.main.cursor.shape = self.default_cursor_shape;
         self.main.cursor.visible = true;
-        self.main.cursor.blink = true;
-        self.alternate.cursor.shape = CursorShape::Block;
+        self.main.cursor.blink = self.default_cursor_blink;
+        self.alternate.cursor.shape = self.default_cursor_shape;
         self.alternate.cursor.visible = true;
-        self.alternate.cursor.blink = true;
+        self.alternate.cursor.blink = self.default_cursor_blink;
         self.saved_main_cursor = None;
         self.saved_cursor = Some(self.saved_cursor_state(CellPoint::new(0, 0)));
         self.mark_full_damage();
     }
 
     fn reset(&mut self) {
+        let cursor = self.default_cursor_state();
         self.main.reset(
             self.size,
-            CursorState::default(),
+            cursor,
             &mut self.next_main_row_anchor,
         );
         self.alternate.reset(
             self.size,
-            CursorState::default(),
+            cursor,
             &mut self.next_alternate_row_anchor,
         );
         self.active_screen = ActiveScreen::Main;
@@ -2225,6 +2238,24 @@ impl BasicTerminalState {
             self.alternate.cursor.shape = shape;
             self.alternate.cursor.blink = blink;
             self.mark_row_dirty(self.cursor().position.row);
+        }
+    }
+
+    fn set_default_cursor_style(&mut self, shape: CursorShape, blink: bool) {
+        self.default_cursor_shape = shape;
+        self.default_cursor_blink = blink;
+        self.set_cursor_style(shape, blink);
+    }
+
+    fn default_cursor_style(&self) -> (CursorShape, bool) {
+        (self.default_cursor_shape, self.default_cursor_blink)
+    }
+
+    fn default_cursor_state(&self) -> CursorState {
+        CursorState {
+            shape: self.default_cursor_shape,
+            blink: self.default_cursor_blink,
+            ..CursorState::default()
         }
     }
 
@@ -6100,6 +6131,25 @@ mod tests {
         assert!(blinking_underline.cursor.blink);
         assert_eq!(steady_bar.cursor.shape, CursorShape::Bar);
         assert!(!steady_bar.cursor.blink);
+    }
+
+    #[test]
+    fn configured_default_cursor_style_survives_resets() {
+        let mut soft = BasicTerminal::new(GridSize::new(3, 8));
+        soft.set_default_cursor_style(CursorShape::Bar, false);
+        assert_eq!(soft.default_cursor_style(), (CursorShape::Bar, false));
+        soft.feed(b"\x1b[3 q\x1b[!p");
+        let soft_reset = soft.snapshot();
+
+        let mut full = BasicTerminal::new(GridSize::new(3, 8));
+        full.set_default_cursor_style(CursorShape::Bar, false);
+        full.feed(b"\x1b[3 q\x1bc");
+        let full_reset = full.snapshot();
+
+        assert_eq!(soft_reset.cursor.shape, CursorShape::Bar);
+        assert!(!soft_reset.cursor.blink);
+        assert_eq!(full_reset.cursor.shape, CursorShape::Bar);
+        assert!(!full_reset.cursor.blink);
     }
 
     #[test]

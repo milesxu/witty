@@ -22,8 +22,8 @@ use window::{
     DEFAULT_WINDOW_TITLE,
 };
 use witty_core::{
-    BasicTerminal, CellPoint, CellRange, GridSize, Osc52ClipboardPolicy, TerminalHostAction,
-    DEFAULT_MAX_SCROLLBACK_LINES,
+    BasicTerminal, CellPoint, CellRange, CursorShape, GridSize, Osc52ClipboardPolicy,
+    TerminalHostAction, DEFAULT_MAX_SCROLLBACK_LINES,
 };
 use witty_plugin_api::{
     CommandRegistration, PluginAction, PluginEvent, PluginManifest, PluginPermissions,
@@ -208,6 +208,8 @@ fn main() -> anyhow::Result<()> {
             options.background_opacity,
             options.background_image.clone(),
             options.background_image_fit,
+            options.cursor_shape,
+            options.cursor_blink,
             options.session_tab_position,
             options.session_tab_label_style,
             options.session_tab_display_policy,
@@ -304,6 +306,8 @@ struct AppOptions {
     background_opacity: Option<f32>,
     background_image: Option<PathBuf>,
     background_image_fit: Option<RendererBackgroundImageFit>,
+    cursor_shape: CursorShape,
+    cursor_blink: bool,
     session_tab_position: NativeSessionTabPosition,
     session_tab_label_style: NativeSessionTabLabelStyle,
     session_tab_display_policy: NativeSessionTabDisplayPolicy,
@@ -336,6 +340,8 @@ struct AppOptionsExplicit {
     background_opacity: bool,
     background_image: bool,
     background_image_fit: bool,
+    cursor_shape: bool,
+    cursor_blink: bool,
     session_tab_position: bool,
     session_tab_label_style: bool,
     session_tab_show_single: bool,
@@ -375,6 +381,8 @@ impl AppOptions {
         let mut background_opacity = None;
         let mut background_image = None;
         let mut background_image_fit = None;
+        let mut cursor_shape = CursorShape::Block;
+        let mut cursor_blink = true;
         let mut session_tab_position = NativeSessionTabPosition::default();
         let mut session_tab_label_style = NativeSessionTabLabelStyle::default();
         let mut session_tab_display_policy = NativeSessionTabDisplayPolicy::default();
@@ -698,6 +706,28 @@ impl AppOptions {
                         "--background-image-fit",
                     )?);
                     explicit.background_image_fit = true;
+                    window_only_args_seen = true;
+                }
+                "--cursor-shape" => {
+                    let Some(value) = args.next() else {
+                        bail!("--cursor-shape requires a value");
+                    };
+                    if explicit.cursor_shape {
+                        bail!("only one --cursor-shape value is allowed");
+                    }
+                    cursor_shape = parse_cursor_shape(&value, "--cursor-shape")?;
+                    explicit.cursor_shape = true;
+                    window_only_args_seen = true;
+                }
+                "--cursor-blink" => {
+                    let Some(value) = args.next() else {
+                        bail!("--cursor-blink requires a value");
+                    };
+                    if explicit.cursor_blink {
+                        bail!("only one --cursor-blink value is allowed");
+                    }
+                    cursor_blink = parse_bool_config(&value, "--cursor-blink")?;
+                    explicit.cursor_blink = true;
                     window_only_args_seen = true;
                 }
                 "--session-tab-position" => {
@@ -1199,6 +1229,8 @@ impl AppOptions {
             background_opacity,
             background_image,
             background_image_fit,
+            cursor_shape,
+            cursor_blink,
             session_tab_position,
             session_tab_label_style,
             session_tab_display_policy,
@@ -1360,6 +1392,16 @@ impl AppOptions {
                     Some(parse_background_image_fit(&value, "background_image_fit")?);
             }
         }
+        if !self.explicit.cursor_shape {
+            if let Some(value) = config.cursor_shape {
+                self.cursor_shape = parse_cursor_shape(&value, "cursor_shape")?;
+            }
+        }
+        if !self.explicit.cursor_blink {
+            if let Some(value) = config.cursor_blink {
+                self.cursor_blink = value;
+            }
+        }
         if !self.explicit.session_tab_position {
             if let Some(value) = config.session_tab_position {
                 self.session_tab_position =
@@ -1501,6 +1543,18 @@ impl AppOptions {
                 self.background_image_fit =
                     Some(parse_background_image_fit(&value, "background-image-fit")?);
                 self.explicit.background_image_fit = true;
+            }
+        }
+        if !self.explicit.cursor_shape {
+            if let Some(value) = config.cursor_shape {
+                self.cursor_shape = parse_cursor_shape(&value, "cursor-shape")?;
+                self.explicit.cursor_shape = true;
+            }
+        }
+        if !self.explicit.cursor_blink {
+            if let Some(value) = config.cursor_blink {
+                self.cursor_blink = value;
+                self.explicit.cursor_blink = true;
             }
         }
         if !self.explicit.window_last_active_close_policy {
@@ -1672,6 +1726,10 @@ struct NativeWindowConfig {
     #[serde(default)]
     background_image_fit: Option<String>,
     #[serde(default)]
+    cursor_shape: Option<String>,
+    #[serde(default)]
+    cursor_blink: Option<bool>,
+    #[serde(default)]
     session_tab_position: Option<String>,
     #[serde(default)]
     session_tab_label: Option<String>,
@@ -1712,6 +1770,10 @@ struct WittyrcConfig {
     background_image_fit: Option<String>,
     #[serde(default, rename = "window-last-active-close")]
     window_last_active_close: Option<String>,
+    #[serde(default, rename = "cursor-shape")]
+    cursor_shape: Option<String>,
+    #[serde(default, rename = "cursor-blink")]
+    cursor_blink: Option<bool>,
     #[serde(default, rename = "session-tab-position")]
     session_tab_position: Option<String>,
     #[serde(default, rename = "session-tab-label")]
@@ -1800,6 +1862,8 @@ fn native_window_config_template() -> String {
         "background_opacity": 1.0,
         "background_image": null,
         "background_image_fit": "cover",
+        "cursor_shape": "block",
+        "cursor_blink": true,
         "session_tab_position": "top",
         "session_tab_label": "index",
         "session_tab_show_single": false,
@@ -2042,6 +2106,8 @@ fn native_window_effective_config_summary(
             .as_ref()
             .map(|path| path.display().to_string()),
         "background_image_fit": visual_config.background_image_fit().as_config_value(),
+        "cursor_shape": cursor_shape_config_value(options.cursor_shape),
+        "cursor_blink": options.cursor_blink,
         "session_tab_position": options.session_tab_position.as_config_value(),
         "session_tab_label": options.session_tab_label_style.as_config_value(),
         "session_tab_show_single": options.session_tab_display_policy.show_single,
@@ -2097,6 +2163,8 @@ fn wittyrc_effective_config_summary(
             .as_ref()
             .map(|path| path.display().to_string()),
         "background_image_fit": visual_config.background_image_fit().as_config_value(),
+        "cursor_shape": cursor_shape_config_value(options.cursor_shape),
+        "cursor_blink": options.cursor_blink,
         "session_tab_position": options.session_tab_position.as_config_value(),
         "session_tab_label": options.session_tab_label_style.as_config_value(),
         "session_tab_show_single": options.session_tab_display_policy.show_single,
@@ -2521,6 +2589,23 @@ fn parse_background_image_fit(value: &str, name: &str) -> Result<RendererBackgro
             "{name} must be one of: {}",
             RendererBackgroundImageFit::config_values().join(", ")
         ),
+    }
+}
+
+fn parse_cursor_shape(value: &str, name: &str) -> Result<CursorShape> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "block" | "box" => Ok(CursorShape::Block),
+        "underline" | "horizontal" | "line" => Ok(CursorShape::Underline),
+        "bar" | "vertical" | "beam" => Ok(CursorShape::Bar),
+        _ => bail!("{name} must be one of: block, underline, bar"),
+    }
+}
+
+fn cursor_shape_config_value(shape: CursorShape) -> &'static str {
+    match shape {
+        CursorShape::Block => "block",
+        CursorShape::Underline => "underline",
+        CursorShape::Bar => "bar",
     }
 }
 
@@ -3821,6 +3906,10 @@ mod tests {
             "~/Pictures/witty.png".to_owned(),
             "--background-image-fit".to_owned(),
             "scale-crop".to_owned(),
+            "--cursor-shape".to_owned(),
+            "bar".to_owned(),
+            "--cursor-blink".to_owned(),
+            "false".to_owned(),
             "--session-tab-position".to_owned(),
             "top".to_owned(),
             "--session-tab-label".to_owned(),
@@ -3863,6 +3952,8 @@ mod tests {
             options.background_image_fit,
             Some(RendererBackgroundImageFit::Cover)
         );
+        assert_eq!(options.cursor_shape, CursorShape::Bar);
+        assert!(!options.cursor_blink);
         assert_eq!(options.session_tab_position, NativeSessionTabPosition::Top);
         assert_eq!(
             options.session_tab_label_style,
@@ -3914,6 +4005,8 @@ mod tests {
             background_opacity: Some(0.75),
             background_image: Some(PathBuf::from("/images/witty.png")),
             background_image_fit: Some("cover".to_owned()),
+            cursor_shape: Some("bar".to_owned()),
+            cursor_blink: Some(false),
             session_tab_position: Some("top".to_owned()),
             session_tab_label: Some("index-profile".to_owned()),
             session_tab_show_single: Some(true),
@@ -3961,6 +4054,8 @@ mod tests {
             options.background_image_fit,
             Some(RendererBackgroundImageFit::Cover)
         );
+        assert_eq!(options.cursor_shape, CursorShape::Bar);
+        assert!(!options.cursor_blink);
         assert_eq!(options.session_tab_position, NativeSessionTabPosition::Top);
         assert_eq!(
             options.session_tab_label_style,
@@ -4059,6 +4154,8 @@ mod tests {
             background_opacity: Some(0.7),
             background_image: Some(PathBuf::from("/config/background.png")),
             background_image_fit: Some("cover".to_owned()),
+            cursor_shape: Some("underline".to_owned()),
+            cursor_blink: Some(true),
             session_tab_position: Some("top".to_owned()),
             session_tab_label: Some("profile".to_owned()),
             session_tab_show_single: Some(true),
@@ -4106,6 +4203,8 @@ mod tests {
             options.background_image_fit,
             Some(RendererBackgroundImageFit::Cover)
         );
+        assert_eq!(options.cursor_shape, CursorShape::Underline);
+        assert!(options.cursor_blink);
         assert_eq!(
             options.mouse_selection_override,
             MouseSelectionOverridePolicy::ShiftSelect
@@ -4169,6 +4268,8 @@ mod tests {
         assert_eq!(config.background_opacity, Some(1.0));
         assert_eq!(config.background_image.as_deref(), Some("null"));
         assert_eq!(config.background_image_fit.as_deref(), Some("cover"));
+        assert_eq!(config.cursor_shape.as_deref(), Some("block"));
+        assert_eq!(config.cursor_blink, Some(true));
         assert_eq!(config.session_tab_position.as_deref(), Some("top"));
         assert_eq!(config.session_tab_label.as_deref(), Some("index"));
         assert_eq!(config.session_tab_show_single, Some(false));
@@ -4179,6 +4280,8 @@ mod tests {
         assert!(template.contains("background-opacity = 1.0"));
         assert!(template.contains("background-image = \"null\""));
         assert!(template.contains("background-image-fit = \"cover\""));
+        assert!(template.contains("cursor-shape = \"block\""));
+        assert!(template.contains("cursor-blink = true"));
         assert!(template.contains("session-tab-position = \"top\""));
         assert!(template.contains("session-tab-label = \"index\""));
         assert!(template.contains("session-tab-show-single = false"));
@@ -4213,6 +4316,8 @@ terminal-padding = 4
 background-opacity = 0.8
 background-image = "/images/witty.png"
 background-image-fit = "scale-and-crop"
+cursor-shape = "underline"
+cursor-blink = false
 osc52-clipboard = "allow""#,
         )
         .unwrap();
@@ -4233,6 +4338,8 @@ osc52-clipboard = "allow""#,
             config.background_image_fit.as_deref(),
             Some("scale-and-crop")
         );
+        assert_eq!(config.cursor_shape.as_deref(), Some("underline"));
+        assert_eq!(config.cursor_blink, Some(false));
         assert_eq!(config.osc52_clipboard.as_deref(), Some("allow"));
         assert_eq!(config.window_last_active_close, None);
         assert!(read_wittyrc_config(&root.join("missing.wittyrc"))
@@ -4269,6 +4376,8 @@ osc52-clipboard = "allow""#,
                         background_image: Some("/wittyrc/background.png".to_owned()),
                         background_image_fit: Some("cover".to_owned()),
                         window_last_active_close: Some("block".to_owned()),
+                        cursor_shape: Some("bar".to_owned()),
+                        cursor_blink: Some(false),
                         session_tab_position: Some("bottom".to_owned()),
                         session_tab_label: Some("index".to_owned()),
                         session_tab_show_single: Some(false),
@@ -4318,6 +4427,8 @@ osc52-clipboard = "allow""#,
             options.window_smoke.last_active_close_policy,
             WindowLastActiveClosePolicy::Block
         );
+        assert_eq!(options.cursor_shape, CursorShape::Bar);
+        assert!(!options.cursor_blink);
         assert_eq!(options.osc52_clipboard_policy, Osc52ClipboardPolicy::Allow);
 
         let mut env_options = app_options_parse_with_env(
@@ -4544,6 +4655,8 @@ osc52-clipboard = "allow""#,
         assert!((json["background_opacity"].as_f64().unwrap() - 0.65).abs() < 0.001);
         assert_eq!(json["background_image"], "/window/background.png");
         assert_eq!(json["background_image_fit"], "cover");
+        assert_eq!(json["cursor_shape"], "block");
+        assert_eq!(json["cursor_blink"], true);
     }
 
     #[test]
@@ -4566,6 +4679,8 @@ osc52-clipboard = "allow""#,
             options.background_image_fit,
             Some(RendererBackgroundImageFit::Cover)
         );
+        assert_eq!(options.cursor_shape, CursorShape::Block);
+        assert!(options.cursor_blink);
         assert_eq!(options.session_tab_position, NativeSessionTabPosition::Top);
         assert_eq!(
             options.session_tab_label_style,
@@ -4726,6 +4841,8 @@ osc52-clipboard = "allow""#,
                     background_opacity: Some(0.85),
                     background_image: Some(PathBuf::from("/candidate/background.png")),
                     background_image_fit: Some("cover".to_owned()),
+                    cursor_shape: Some("block".to_owned()),
+                    cursor_blink: Some(true),
                     session_tab_position: Some("bottom".to_owned()),
                     session_tab_label: Some("index".to_owned()),
                     session_tab_show_single: Some(false),
@@ -4815,6 +4932,8 @@ osc52-clipboard = "allow""#,
                         background_opacity: Some(0.78),
                         background_image: Some(PathBuf::from("/config/background.png")),
                         background_image_fit: Some("cover".to_owned()),
+                        cursor_shape: Some("bar".to_owned()),
+                        cursor_blink: Some(false),
                         session_tab_position: Some("bottom".to_owned()),
                         session_tab_label: Some("index".to_owned()),
                         session_tab_show_single: Some(false),
@@ -4862,6 +4981,8 @@ osc52-clipboard = "allow""#,
         assert!((json["background_opacity"].as_f64().unwrap() - 0.78).abs() < 0.001);
         assert_eq!(json["background_image"], "/cli/background.png");
         assert_eq!(json["background_image_fit"], "cover");
+        assert_eq!(json["cursor_shape"], "bar");
+        assert_eq!(json["cursor_blink"], false);
         assert_eq!(json["font_source_count"], 1);
         assert_eq!(json["window_cols"], 100);
         assert_eq!(json["window_rows"], 36);
@@ -4991,6 +5112,10 @@ osc52-clipboard = "allow""#,
                 background_opacity: Some(1.1),
                 ..NativeWindowConfig::default()
             },
+            NativeWindowConfig {
+                cursor_shape: Some("caret".to_owned()),
+                ..NativeWindowConfig::default()
+            },
         ] {
             let mut options = AppOptions::parse([
                 "--window".to_owned(),
@@ -5069,6 +5194,8 @@ osc52-clipboard = "allow""#,
                 "background_opacity": 0.84,
                 "background_image": "/images/background.png",
                 "background_image_fit": "cover",
+                "cursor_shape": "bar",
+                "cursor_blink": false,
                 "font_paths": ["/fonts/Hack.ttf"],
                 "cwd": "/work/project",
                 "scrollback_lines": 12000,
@@ -5102,6 +5229,8 @@ osc52-clipboard = "allow""#,
             Some(Path::new("/images/background.png"))
         );
         assert_eq!(config.background_image_fit.as_deref(), Some("cover"));
+        assert_eq!(config.cursor_shape.as_deref(), Some("bar"));
+        assert_eq!(config.cursor_blink, Some(false));
         assert_eq!(config.font_paths, vec![PathBuf::from("/fonts/Hack.ttf")]);
         assert_eq!(config.cwd.as_deref(), Some(Path::new("/work/project")));
         assert_eq!(config.scrollback_lines, Some(12000));
@@ -5396,6 +5525,30 @@ osc52-clipboard = "allow""#,
             options.osc52_clipboard_policy,
             Osc52ClipboardPolicy::Confirm
         );
+    }
+
+    #[test]
+    fn app_options_parse_cursor_shape_and_blink() {
+        let options = AppOptions::parse([
+            "--window".to_owned(),
+            "--cursor-shape".to_owned(),
+            "vertical".to_owned(),
+            "--cursor-blink".to_owned(),
+            "no".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.cursor_shape, CursorShape::Bar);
+        assert!(!options.cursor_blink);
+
+        let underline = AppOptions::parse([
+            "--window".to_owned(),
+            "--cursor-shape".to_owned(),
+            "horizontal".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(underline.cursor_shape, CursorShape::Underline);
+        assert!(underline.cursor_blink);
     }
 
     #[test]
@@ -6720,6 +6873,8 @@ Host prod
         assert!(AppOptions::parse(["--background-opacity".to_owned()]).is_err());
         assert!(AppOptions::parse(["--background-image".to_owned()]).is_err());
         assert!(AppOptions::parse(["--background-image-fit".to_owned()]).is_err());
+        assert!(AppOptions::parse(["--cursor-shape".to_owned()]).is_err());
+        assert!(AppOptions::parse(["--cursor-blink".to_owned()]).is_err());
         assert!(AppOptions::parse(["--font-path".to_owned()]).is_err());
         assert!(AppOptions::parse(["--window-cols".to_owned()]).is_err());
         assert!(AppOptions::parse(["--window-rows".to_owned()]).is_err());
@@ -6746,6 +6901,8 @@ Host prod
         assert!(
             AppOptions::parse(["--background-image-fit".to_owned(), "cover".to_owned()]).is_err()
         );
+        assert!(AppOptions::parse(["--cursor-shape".to_owned(), "bar".to_owned()]).is_err());
+        assert!(AppOptions::parse(["--cursor-blink".to_owned(), "false".to_owned()]).is_err());
         assert!(
             AppOptions::parse(["--font-path".to_owned(), "/fonts/Hack.ttf".to_owned()]).is_err()
         );
@@ -6847,6 +7004,34 @@ Host prod
             "cover".to_owned(),
             "--background-image-fit".to_owned(),
             "scale-crop".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--window".to_owned(),
+            "--cursor-shape".to_owned(),
+            "caret".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--window".to_owned(),
+            "--cursor-shape".to_owned(),
+            "bar".to_owned(),
+            "--cursor-shape".to_owned(),
+            "block".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--window".to_owned(),
+            "--cursor-blink".to_owned(),
+            "maybe".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--window".to_owned(),
+            "--cursor-blink".to_owned(),
+            "true".to_owned(),
+            "--cursor-blink".to_owned(),
+            "false".to_owned(),
         ])
         .is_err());
         assert!(AppOptions::parse([
