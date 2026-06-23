@@ -10,9 +10,8 @@ use glyphon::{
 use image::GenericImageView;
 use unicode_width::UnicodeWidthStr;
 use witty_core::{
-    BaselineShift, CellFlags, CellPoint, CellRange, CursorShape, CursorState, DamageRegion,
-    GridSize, HyperlinkId, RenderCell, RenderRow, RenderSnapshot, Rgba, SearchHighlight,
-    UnderlineStyle,
+    BaselineShift, CellFlags, CellPoint, CellRange, CursorShape, DamageRegion, GridSize,
+    HyperlinkId, RenderCell, RenderRow, RenderSnapshot, Rgba, SearchHighlight, UnderlineStyle,
 };
 use zune_core::{bytestream::ZCursor, colorspace::ColorSpace};
 use zune_jpeg::JpegDecoder;
@@ -291,17 +290,23 @@ impl FramePlanner {
         frame.hyperlink_hover.extend(hyperlink_hover);
 
         if snapshot.cursor.visible {
-            frame.cursor = Some(self.cursor_rect(snapshot.cursor, snapshot.cursor_color));
+            frame.cursor = Some(self.cursor_rect(snapshot, snapshot.cursor_color));
         }
     }
 
-    fn cursor_rect(&self, cursor: CursorState, cursor_color: Option<Rgba>) -> RectBatchItem {
-        let origin = self.cell_origin(cursor.position);
+    fn cursor_rect(&self, snapshot: &RenderSnapshot, cursor_color: Option<Rgba>) -> RectBatchItem {
+        let cursor = snapshot.cursor;
+        let (position, cell_width) = self.cursor_cell_span(snapshot, cursor.position);
+        let origin = self.cell_origin(position);
+        let width = f32::from(cell_width) * self.metrics.cell.width;
         let color = cursor_color.unwrap_or_else(|| Rgba::rgb(180, 180, 180));
         match cursor.shape {
             CursorShape::Block => RectBatchItem {
                 origin,
-                size: self.metrics.cell,
+                size: PixelSize {
+                    width,
+                    height: self.metrics.cell.height,
+                },
                 color,
             },
             CursorShape::Bar => RectBatchItem {
@@ -320,13 +325,28 @@ impl FramePlanner {
                         y: origin.y + self.metrics.cell.height - height,
                     },
                     size: PixelSize {
-                        width: self.metrics.cell.width,
+                        width,
                         height,
                     },
                     color,
                 }
             }
         }
+    }
+
+    fn cursor_cell_span(&self, snapshot: &RenderSnapshot, position: CellPoint) -> (CellPoint, u16) {
+        let Some(row) = snapshot.rows.iter().find(|row| row.row == position.row) else {
+            return (position, 1);
+        };
+        row.cells
+            .iter()
+            .find_map(|cell| {
+                let width = u16::from(cell.width.max(1));
+                let end = cell.point.col.saturating_add(width);
+                (position.col >= cell.point.col && position.col < end)
+                    .then_some((cell.point, width))
+            })
+            .unwrap_or((position, 1))
     }
 
     fn cursor_stem_width(&self) -> f32 {
@@ -2975,6 +2995,69 @@ mod tests {
         snapshot.cursor.shape = CursorShape::Block;
         let block = planner.plan(&snapshot).cursor.unwrap();
         assert_eq!(block.size, metrics.cell);
+    }
+
+    #[test]
+    fn planner_expands_wide_block_and_underline_cursors() {
+        let metrics = CellMetrics {
+            cell: PixelSize {
+                width: 10.0,
+                height: 20.0,
+            },
+            padding: PixelPoint { x: 0.0, y: 0.0 },
+        };
+        let planner = FramePlanner::new(metrics);
+        let mut snapshot = RenderSnapshot::from_plain_lines(&["a你b"]);
+
+        snapshot.cursor.position = CellPoint::new(0, 1);
+        snapshot.cursor.shape = CursorShape::Block;
+        let block = planner.plan(&snapshot).cursor.unwrap();
+        assert_eq!(block.origin, PixelPoint { x: 10.0, y: 0.0 });
+        assert_eq!(
+            block.size,
+            PixelSize {
+                width: 20.0,
+                height: 20.0,
+            }
+        );
+
+        snapshot.cursor.position = CellPoint::new(0, 2);
+        let continuation_block = planner.plan(&snapshot).cursor.unwrap();
+        assert_eq!(continuation_block.origin, PixelPoint { x: 10.0, y: 0.0 });
+        assert_eq!(continuation_block.size, block.size);
+
+        snapshot.cursor.position = CellPoint::new(0, 1);
+        snapshot.cursor.shape = CursorShape::Underline;
+        let underline = planner.plan(&snapshot).cursor.unwrap();
+        assert_eq!(underline.origin, PixelPoint { x: 10.0, y: 17.0 });
+        assert_eq!(
+            underline.size,
+            PixelSize {
+                width: 20.0,
+                height: 3.0,
+            }
+        );
+    }
+
+    #[test]
+    fn planner_anchors_wide_bar_cursor_to_cell_start() {
+        let metrics = CellMetrics {
+            cell: PixelSize {
+                width: 10.0,
+                height: 20.0,
+            },
+            padding: PixelPoint { x: 0.0, y: 0.0 },
+        };
+        let planner = FramePlanner::new(metrics);
+        let mut snapshot = RenderSnapshot::from_plain_lines(&["a你b"]);
+
+        snapshot.cursor.position = CellPoint::new(0, 2);
+        snapshot.cursor.shape = CursorShape::Bar;
+        let bar = planner.plan(&snapshot).cursor.unwrap();
+
+        assert_eq!(bar.origin, PixelPoint { x: 10.0, y: 0.0 });
+        assert!((bar.size.width - 1.8).abs() < f32::EPSILON * 8.0);
+        assert_eq!(bar.size.height, 20.0);
     }
 
     #[test]
