@@ -167,8 +167,8 @@ impl WindowLastActiveClosePolicy {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum NativeSessionTabPosition {
-    Top,
     #[default]
+    Top,
     Bottom,
 }
 
@@ -224,11 +224,28 @@ impl NativeSessionTabLabelStyle {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct NativeSessionTabDisplayPolicy {
+    pub show_single: bool,
+    pub show_multiple: bool,
+}
+
+impl NativeSessionTabDisplayPolicy {
+    fn should_show(self, session_count: usize) -> bool {
+        match session_count {
+            0 => false,
+            1 => self.show_single,
+            _ => self.show_multiple,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TextInputTarget {
     Terminal,
     Search,
     CommandPalette,
+    SessionSwitcher,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -241,6 +258,7 @@ enum RuntimeFontSizeAction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NativeTitleBarButton {
     Menu,
+    NewSession,
     Minimize,
     Maximize,
     Close,
@@ -248,7 +266,7 @@ enum NativeTitleBarButton {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NativeTitleBarMenuItem {
-    NewLocalShell,
+    NewSession,
     CommandPalette,
     Search,
     About,
@@ -298,6 +316,59 @@ struct CursorBlinkState {
     key: Option<CursorBlinkKey>,
     visible_phase: bool,
     next_deadline: Option<Instant>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct NativeSessionSwitcher {
+    selected_session_id: Option<NativeSessionId>,
+}
+
+impl NativeSessionSwitcher {
+    fn is_open(&self) -> bool {
+        self.selected_session_id.is_some()
+    }
+
+    fn open(&mut self, rows: &[NativeSessionTabRow], direction: i32) -> bool {
+        if rows.len() < 2 {
+            self.selected_session_id = None;
+            return false;
+        }
+
+        let active_index = rows.iter().position(|row| row.active).unwrap_or(0);
+        let selected_index = wrapping_row_index(active_index, direction, rows.len());
+        self.selected_session_id = Some(rows[selected_index].session_id);
+        true
+    }
+
+    fn move_selection(&mut self, rows: &[NativeSessionTabRow], direction: i32) -> bool {
+        if rows.len() < 2 {
+            self.selected_session_id = None;
+            return false;
+        }
+
+        let current_index = self
+            .selected_session_id
+            .and_then(|id| rows.iter().position(|row| row.session_id == id))
+            .or_else(|| rows.iter().position(|row| row.active))
+            .unwrap_or(0);
+        let selected_index = wrapping_row_index(current_index, direction, rows.len());
+        self.selected_session_id = Some(rows[selected_index].session_id);
+        true
+    }
+
+    fn close(&mut self) {
+        self.selected_session_id = None;
+    }
+}
+
+fn wrapping_row_index(current: usize, direction: i32, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+
+    let len = len as i32;
+    let next = current as i32 + direction;
+    next.rem_euclid(len) as usize
 }
 
 impl CursorBlinkState {
@@ -930,10 +1001,7 @@ where
         for record in &mut self.parked {
             record.runtime.terminal.resize(size);
             if let Err(err) = record.runtime.transport.resize(size) {
-                eprintln!(
-                    "failed to resize parked session {}: {err:#}",
-                    record.id.0
-                );
+                eprintln!("failed to resize parked session {}: {err:#}", record.id.0);
             }
             record
                 .runtime
@@ -2221,6 +2289,7 @@ pub fn run(
     background_image_fit: Option<RendererBackgroundImageFit>,
     session_tab_position: NativeSessionTabPosition,
     session_tab_label_style: NativeSessionTabLabelStyle,
+    session_tab_display_policy: NativeSessionTabDisplayPolicy,
     font_paths: Vec<PathBuf>,
     restore_state: Option<RestartSnapshotV1>,
 ) -> anyhow::Result<()> {
@@ -2247,6 +2316,7 @@ pub fn run(
         background_image_fit,
         session_tab_position,
         session_tab_label_style,
+        session_tab_display_policy,
         font_paths,
         restore_state,
     )?;
@@ -2297,7 +2367,11 @@ fn load_window_background_image(
             return None;
         }
     };
-    match RendererBackgroundImage::decode_cover_limited(&bytes, target_size.width, target_size.height) {
+    match RendererBackgroundImage::decode_cover_limited(
+        &bytes,
+        target_size.width,
+        target_size.height,
+    ) {
         Ok(image) => Some(image),
         Err(err) => {
             eprintln!(
@@ -2772,11 +2846,8 @@ pub(crate) fn native_command_block_smoke() -> Result<NativeCommandBlockSmoke> {
         metrics,
         folded_size,
     );
-    let folded_second_glyph_row = folded_frame
-        .glyphs
-        .iter()
-        .find(|glyph| glyph.text.contains("second"))
-        .map(|glyph| ((glyph.origin.y - metrics.padding.y) / metrics.cell.height).floor() as u16);
+    let folded_second_glyph_row =
+        glyph_row_containing_text(&folded_frame.glyphs, metrics, "second");
     let folded_visual_gutter_point = PixelPoint {
         x: metrics.padding.x + 2.0,
         y: metrics.padding.y + metrics.cell.height * 1.5,
@@ -3031,6 +3102,8 @@ struct TerminalWindowApp {
     session_tab_notice: Option<NativeSessionTabStripNotice>,
     session_tab_position: NativeSessionTabPosition,
     session_tab_label_style: NativeSessionTabLabelStyle,
+    session_tab_display_policy: NativeSessionTabDisplayPolicy,
+    session_switcher: NativeSessionSwitcher,
     shell_integration: ShellIntegrationState,
     ime_composition: ImeComposition,
     metrics: CellMetrics,
@@ -3114,6 +3187,7 @@ impl TerminalWindowApp {
         background_image_fit: Option<RendererBackgroundImageFit>,
         session_tab_position: NativeSessionTabPosition,
         session_tab_label_style: NativeSessionTabLabelStyle,
+        session_tab_display_policy: NativeSessionTabDisplayPolicy,
         font_paths: Vec<PathBuf>,
         restore_state: Option<RestartSnapshotV1>,
     ) -> Result<Self> {
@@ -3213,6 +3287,8 @@ impl TerminalWindowApp {
             session_tab_notice: None,
             session_tab_position,
             session_tab_label_style,
+            session_tab_display_policy,
+            session_switcher: NativeSessionSwitcher::default(),
             shell_integration: ShellIntegrationState::default(),
             ime_composition: ImeComposition::default(),
             metrics,
@@ -3428,16 +3504,21 @@ impl TerminalWindowApp {
             self.size,
         );
         let session_tabs = self.profile_action_sessions.tab_rows();
-        apply_native_session_tab_strip_overlay(
-            &mut frame,
-            &session_tabs,
-            self.hovered_session_tab,
-            self.session_tab_notice,
-            self.session_tab_position,
-            self.session_tab_label_style,
-            self.metrics,
-            self.size,
-        );
+        if self
+            .session_tab_display_policy
+            .should_show(session_tabs.len())
+        {
+            apply_native_session_tab_strip_overlay(
+                &mut frame,
+                &session_tabs,
+                self.hovered_session_tab,
+                self.session_tab_notice,
+                self.session_tab_position,
+                self.session_tab_label_style,
+                self.metrics,
+                self.size,
+            );
+        }
         apply_empty_session_welcome_overlay(
             &mut frame,
             self.empty_session_welcome_visible(),
@@ -3478,6 +3559,14 @@ impl TerminalWindowApp {
             &self.command_palette,
             self.active_command_palette_ime_composition(),
             self.app.commands(),
+            self.metrics,
+            self.size,
+        );
+        apply_session_switcher_overlay(
+            &mut frame,
+            &self.session_switcher,
+            &session_tabs,
+            self.session_tab_label_style,
             self.metrics,
             self.size,
         );
@@ -3604,10 +3693,9 @@ impl TerminalWindowApp {
             return;
         }
         let target_size = background_image_target_size(event_loop, window_size);
-        if self
-            .background_image_target_size
-            .is_some_and(|size| size.width >= target_size.width && size.height >= target_size.height)
-        {
+        if self.background_image_target_size.is_some_and(|size| {
+            size.width >= target_size.width && size.height >= target_size.height
+        }) {
             return;
         }
         self.background_image_target_size = Some(target_size);
@@ -3761,7 +3849,10 @@ impl TerminalWindowApp {
         let image_width = result.image.as_ref().map(RendererBackgroundImage::width);
         let image_height = result.image.as_ref().map(RendererBackgroundImage::height);
         let loaded = result.image.is_some();
-        let visual_config = self.visual_config.clone().with_background_image(result.image);
+        let visual_config = self
+            .visual_config
+            .clone()
+            .with_background_image(result.image);
         self.visual_config = visual_config.clone();
         if self.report_startup {
             eprintln!(
@@ -4083,13 +4174,14 @@ impl TerminalWindowApp {
             }
             Err(err) => {
                 eprintln!("failed to start local shell from empty-session welcome: {err:#}");
-                self.empty_session_notice = Some(format!("New local shell failed: {err:#}"));
+                self.empty_session_notice = Some(format!("New session failed: {err:#}"));
                 self.rebuild_frame();
             }
         }
     }
 
     fn start_new_local_shell_command(&mut self) {
+        self.session_switcher.close();
         if self.empty_session_welcome_visible() {
             self.start_empty_session_local_shell();
         } else {
@@ -4404,7 +4496,9 @@ impl TerminalWindowApp {
     }
 
     fn text_input_target(&self) -> TextInputTarget {
-        if self.command_palette.is_open() {
+        if self.session_switcher.is_open() {
+            TextInputTarget::SessionSwitcher
+        } else if self.command_palette.is_open() {
             TextInputTarget::CommandPalette
         } else if self.terminal_search.is_open() {
             TextInputTarget::Search
@@ -4442,6 +4536,7 @@ impl TerminalWindowApp {
                 self.size,
             )
             .unwrap_or(terminal_cursor),
+            TextInputTarget::SessionSwitcher => terminal_cursor,
         }
     }
 
@@ -4468,6 +4563,7 @@ impl TerminalWindowApp {
                     self.command_palette.input_text(&text);
                     Ok(())
                 }
+                TextInputTarget::SessionSwitcher => Ok(()),
             };
             if let Err(err) = route_result {
                 let message = format!("\r\n[IME commit failed: {err:#}]\r\n");
@@ -4490,6 +4586,21 @@ impl TerminalWindowApp {
 
     fn handle_key(&mut self, event: &KeyEvent) {
         if event.state != ElementState::Pressed {
+            return;
+        }
+
+        if is_session_switcher_shortcut(&event.logical_key, self.modifiers) {
+            let direction = if self.modifiers.state().shift_key() {
+                -1
+            } else {
+                1
+            };
+            self.advance_session_switcher(direction);
+            return;
+        }
+
+        if self.session_switcher.is_open() {
+            self.handle_session_switcher_key(event);
             return;
         }
 
@@ -4567,6 +4678,7 @@ impl TerminalWindowApp {
 
     fn open_command_palette(&mut self) {
         self.ime_composition.clear_preedit();
+        self.session_switcher.close();
         self.terminal_search.close();
         self.command_block_action_menu.close();
         self.about_status_deadline = None;
@@ -4576,6 +4688,7 @@ impl TerminalWindowApp {
 
     fn open_search(&mut self) {
         self.ime_composition.clear_preedit();
+        self.session_switcher.close();
         self.command_palette.close();
         self.command_block_action_menu.close();
         self.about_status_deadline = None;
@@ -4589,6 +4702,7 @@ impl TerminalWindowApp {
 
     fn show_about_status(&mut self) {
         self.ime_composition.clear_preedit();
+        self.session_switcher.close();
         self.command_palette.close();
         self.command_block_action_menu.close();
         self.terminal_search.close();
@@ -4806,7 +4920,9 @@ impl TerminalWindowApp {
             current_monitor_name,
             current_monitor_size,
             current_monitor_scale_factor,
-        ) = window.map(fullscreen_window_debug_state).unwrap_or_default();
+        ) = window
+            .map(fullscreen_window_debug_state)
+            .unwrap_or_default();
 
         tracing::debug!(
             target: "witty_app::fullscreen",
@@ -4956,6 +5072,80 @@ impl TerminalWindowApp {
             self.terminal.feed(message.as_bytes());
             self.rebuild_frame();
         }
+    }
+
+    fn advance_session_switcher(&mut self, direction: i32) {
+        let rows = self.profile_action_sessions.tab_rows();
+        let changed = if self.session_switcher.is_open() {
+            self.session_switcher.move_selection(&rows, direction)
+        } else {
+            self.ime_composition.clear_preedit();
+            self.command_palette.close();
+            self.command_block_action_menu.close();
+            self.terminal_search.close();
+            self.about_status_deadline = None;
+            self.session_switcher.open(&rows, direction)
+        };
+
+        if changed {
+            self.hovered_session_tab = None;
+            self.rebuild_frame();
+        }
+    }
+
+    fn handle_session_switcher_key(&mut self, event: &KeyEvent) {
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.session_switcher.close();
+                self.rebuild_frame();
+            }
+            Key::Named(NamedKey::Enter) => {
+                self.confirm_session_switcher();
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                self.move_session_switcher_selection(-1);
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                self.move_session_switcher_selection(1);
+            }
+            Key::Named(NamedKey::Tab) => {
+                let direction = if self.modifiers.state().shift_key() {
+                    -1
+                } else {
+                    1
+                };
+                self.move_session_switcher_selection(direction);
+            }
+            _ => {}
+        }
+    }
+
+    fn move_session_switcher_selection(&mut self, direction: i32) {
+        let rows = self.profile_action_sessions.tab_rows();
+        if self.session_switcher.move_selection(&rows, direction) {
+            self.rebuild_frame();
+        }
+    }
+
+    fn confirm_session_switcher(&mut self) -> bool {
+        let selected = self.session_switcher.selected_session_id;
+        self.session_switcher.close();
+        let switched = selected
+            .map(|session_id| self.switch_profile_action_session_runtime(session_id))
+            .unwrap_or(false);
+        self.hovered_session_tab = None;
+        self.rebuild_frame();
+        switched || selected.is_some()
+    }
+
+    fn handle_modifiers_changed(&mut self, modifiers: Modifiers) -> bool {
+        let was_control = self.modifiers.state().control_key();
+        let has_control = modifiers.state().control_key();
+        self.modifiers = modifiers;
+        if was_control && !has_control && self.session_switcher.is_open() {
+            return self.confirm_session_switcher();
+        }
+        false
     }
 
     fn handle_command_palette_key(&mut self, event: &KeyEvent) {
@@ -5406,15 +5596,19 @@ impl TerminalWindowApp {
 
     fn set_hovered_session_tab_for_position(&mut self, position: PhysicalPosition<f64>) -> bool {
         let rows = self.profile_action_sessions.tab_rows();
-        let hovered = native_session_tab_strip_hit_for_position(
-            &rows,
-            self.session_tab_notice,
-            self.session_tab_position,
-            self.session_tab_label_style,
-            position,
-            self.metrics,
-            self.size,
-        );
+        let hovered = if self.session_tab_display_policy.should_show(rows.len()) {
+            native_session_tab_strip_hit_for_position(
+                &rows,
+                self.session_tab_notice,
+                self.session_tab_position,
+                self.session_tab_label_style,
+                position,
+                self.metrics,
+                self.size,
+            )
+        } else {
+            None
+        };
         if self.hovered_session_tab == hovered {
             return false;
         }
@@ -5512,6 +5706,9 @@ impl TerminalWindowApp {
             return false;
         };
         let rows = self.profile_action_sessions.tab_rows();
+        if !self.session_tab_display_policy.should_show(rows.len()) {
+            return false;
+        }
         let Some(hit) = native_session_tab_strip_hit_for_position(
             &rows,
             self.session_tab_notice,
@@ -6067,6 +6264,12 @@ impl TerminalWindowApp {
                 self.rebuild_frame();
                 true
             }
+            Some(NativeTitleBarHit::Button(NativeTitleBarButton::NewSession)) => {
+                self.titlebar_menu_open = false;
+                self.hovered_titlebar_hit = None;
+                self.start_new_local_shell_command();
+                true
+            }
             Some(NativeTitleBarHit::Button(NativeTitleBarButton::Minimize)) => {
                 self.titlebar_menu_open = false;
                 if let Some(window) = &self.window {
@@ -6196,7 +6399,7 @@ impl TerminalWindowApp {
 
     fn activate_titlebar_menu_item(&mut self, item: NativeTitleBarMenuItem) {
         match item {
-            NativeTitleBarMenuItem::NewLocalShell => self.start_new_local_shell_command(),
+            NativeTitleBarMenuItem::NewSession => self.start_new_local_shell_command(),
             NativeTitleBarMenuItem::CommandPalette => self.open_command_palette(),
             NativeTitleBarMenuItem::Search => {
                 if !self.empty_session_welcome_visible() {
@@ -6420,7 +6623,8 @@ impl TerminalWindowApp {
             titlebar_visibility_changed = true;
         }
 
-        let changed = content_hover_changed || titlebar_hover_changed || titlebar_visibility_changed;
+        let changed =
+            content_hover_changed || titlebar_hover_changed || titlebar_visibility_changed;
         if changed {
             self.rebuild_frame();
         }
@@ -6590,29 +6794,28 @@ impl ApplicationHandler<NativeWindowEvent> for TerminalWindowApp {
                 )
             );
         }
-        let renderer = match pollster::block_on(WgpuRectRenderer::new_with_font_config_data_and_visual(
-            window.clone(),
-            size.width,
-            size.height,
-            self.font_config.clone(),
-            self.font_data.clone(),
-            self.visual_config.clone(),
-        )) {
-            Ok(renderer) => renderer,
-            Err(err) => {
-                eprintln!("{}", native_renderer_startup_error_message(&err));
-                event_loop.exit();
-                return;
-            }
-        };
+        let renderer =
+            match pollster::block_on(WgpuRectRenderer::new_with_font_config_data_and_visual(
+                window.clone(),
+                size.width,
+                size.height,
+                self.font_config.clone(),
+                self.font_data.clone(),
+                self.visual_config.clone(),
+            )) {
+                Ok(renderer) => renderer,
+                Err(err) => {
+                    eprintln!("{}", native_renderer_startup_error_message(&err));
+                    event_loop.exit();
+                    return;
+                }
+            };
 
         self.renderer = Some(renderer);
         self.window = Some(window);
         self.resize_grid(size);
         self.ensure_background_image_load(event_loop, size);
-        self.sync_ime_cursor_area(self.active_ime_cursor(
-            self.terminal.snapshot().cursor.position,
-        ));
+        self.sync_ime_cursor_area(self.active_ime_cursor(self.terminal.snapshot().cursor.position));
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -6643,7 +6846,8 @@ impl ApplicationHandler<NativeWindowEvent> for TerminalWindowApp {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::ModifiersChanged(modifiers) => {
-                self.modifiers = modifiers;
+                let changed = self.handle_modifiers_changed(modifiers);
+                self.request_redraw_if_changed(changed);
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 self.handle_key(&event);
@@ -6688,7 +6892,14 @@ impl ApplicationHandler<NativeWindowEvent> for TerminalWindowApp {
                 self.request_redraw_if_changed(changed);
             }
             WindowEvent::Focused(focused) => {
-                self.log_fullscreen_debug(if focused { "focused-true" } else { "focused-false" }, None);
+                self.log_fullscreen_debug(
+                    if focused {
+                        "focused-true"
+                    } else {
+                        "focused-false"
+                    },
+                    None,
+                );
                 let focus_changed = self.handle_focus_event(focused);
                 let fullscreen_changed = self.sync_window_fullscreen_state_from_window();
                 if self.window_fullscreen {
@@ -6946,19 +7157,11 @@ fn clear_fullscreen_size_guard(window: &Window) {
     window.set_min_inner_size::<PhysicalSize<u32>>(None);
 }
 
-fn window_fullscreen_is_effective(
-    window: &Window,
-    target_size: Option<PhysicalSize<u32>>,
-) -> bool {
+fn window_fullscreen_is_effective(window: &Window, target_size: Option<PhysicalSize<u32>>) -> bool {
     let fullscreen = window.fullscreen().is_some();
-    let monitor_size = target_size.or_else(|| {
-        window.current_monitor().map(|monitor| monitor.size())
-    });
-    fullscreen_is_effective_for_size(
-        fullscreen,
-        window.inner_size(),
-        monitor_size,
-    )
+    let monitor_size =
+        target_size.or_else(|| window.current_monitor().map(|monitor| monitor.size()));
+    fullscreen_is_effective_for_size(fullscreen, window.inner_size(), monitor_size)
 }
 
 fn fullscreen_is_effective_for_size(
@@ -7143,8 +7346,8 @@ fn grid_size_for_window_with_reserved_height(
     reserved_height: f32,
 ) -> GridSize {
     let usable_width = (size.width as f32 - metrics.padding.x * 2.0).max(metrics.cell.width);
-    let usable_height = (size.height as f32 - reserved_height - metrics.padding.y * 2.0)
-        .max(metrics.cell.height);
+    let usable_height =
+        (size.height as f32 - reserved_height - metrics.padding.y * 2.0).max(metrics.cell.height);
     GridSize::new(
         (usable_height / metrics.cell.height)
             .floor()
@@ -7712,6 +7915,14 @@ fn is_new_local_tab_shortcut(logical_key: &Key, modifiers: Modifiers) -> bool {
     state.control_key()
         && state.shift_key()
         && matches!(logical_key, Key::Character(value) if value.eq_ignore_ascii_case("t"))
+}
+
+fn is_session_switcher_shortcut(logical_key: &Key, modifiers: Modifiers) -> bool {
+    let state = modifiers.state();
+    state.control_key()
+        && !state.alt_key()
+        && !state.super_key()
+        && matches!(logical_key, Key::Named(NamedKey::Tab))
 }
 
 fn is_frame_diagnostics_shortcut(logical_key: &Key) -> bool {
@@ -8701,7 +8912,7 @@ fn has_command(commands: &[CommandRegistration], command_id: &str) -> bool {
 fn native_window_command_registrations() -> Vec<CommandRegistration> {
     vec![CommandRegistration {
         id: WITTY_NEW_LOCAL_SHELL_COMMAND_ID.to_owned(),
-        title: "New Local Shell".to_owned(),
+        title: "New Session".to_owned(),
         source_plugin: "builtin".to_owned(),
     }]
 }
@@ -8885,7 +9096,7 @@ fn empty_session_welcome_button_spans(width: u16) -> Vec<NativeEmptySessionWelco
 
 fn empty_session_welcome_button_text(target: NativeEmptySessionWelcomeTarget) -> String {
     match target {
-        NativeEmptySessionWelcomeTarget::NewLocalShell => "[New Local Shell]".to_owned(),
+        NativeEmptySessionWelcomeTarget::NewLocalShell => "[New Session]".to_owned(),
         NativeEmptySessionWelcomeTarget::CommandPalette => "[Command Palette]".to_owned(),
     }
 }
@@ -9206,6 +9417,113 @@ fn apply_command_palette_overlay(
             row,
             1,
             &text,
+            Rgba::rgb(238, 242, 245),
+        );
+    }
+}
+
+fn apply_session_switcher_overlay(
+    frame: &mut FramePlan,
+    switcher: &NativeSessionSwitcher,
+    rows: &[NativeSessionTabRow],
+    label_style: NativeSessionTabLabelStyle,
+    metrics: CellMetrics,
+    grid_size: GridSize,
+) {
+    if !switcher.is_open() || rows.len() < 2 {
+        return;
+    }
+
+    let Some(panel) = session_switcher_panel(grid_size, rows.len()) else {
+        return;
+    };
+    let panel_origin = cell_origin(panel.start, metrics);
+    let panel_size = PixelSize {
+        width: f32::from(panel.cols) * metrics.cell.width,
+        height: f32::from(panel.rows) * metrics.cell.height,
+    };
+
+    frame
+        .glyphs
+        .retain(|glyph| !glyph_origin_inside(glyph, panel_origin, panel_size));
+    frame
+        .search_highlights
+        .retain(|rect| !rect_origin_inside(rect, panel_origin, panel_size));
+    frame
+        .hyperlink_hover
+        .retain(|rect| !rect_origin_inside(rect, panel_origin, panel_size));
+    frame
+        .hyperlink_underlines
+        .retain(|rect| !rect_origin_inside(rect, panel_origin, panel_size));
+    frame
+        .text_decorations
+        .retain(|rect| !rect_origin_inside(rect, panel_origin, panel_size));
+    frame
+        .ime_preedit
+        .retain(|rect| !rect_origin_inside(rect, panel_origin, panel_size));
+    frame.selection.clear();
+    frame.cursor = None;
+
+    frame.overlay_backgrounds.push(RectBatchItem {
+        origin: panel_origin,
+        size: panel_size,
+        color: Rgba::rgb(18, 22, 28),
+    });
+
+    push_palette_text(
+        frame,
+        panel,
+        metrics,
+        0,
+        1,
+        "Switch Session",
+        Rgba::rgb(220, 230, 235),
+    );
+
+    let selected_index = switcher
+        .selected_session_id
+        .and_then(|id| rows.iter().position(|row| row.session_id == id))
+        .or_else(|| rows.iter().position(|row| row.active))
+        .unwrap_or(0);
+    let visible_count = panel.item_rows.min(rows.len());
+    let start_index = selected_index
+        .saturating_add(1)
+        .saturating_sub(visible_count);
+
+    for (offset, row) in rows
+        .iter()
+        .enumerate()
+        .skip(start_index)
+        .take(visible_count)
+    {
+        let row_offset = (offset - start_index) as u16 + 1;
+        let selected = offset == selected_index;
+        if selected {
+            frame.overlay_backgrounds.push(RectBatchItem {
+                origin: cell_origin(
+                    CellPoint::new(panel.start.row + row_offset, panel.start.col),
+                    metrics,
+                ),
+                size: PixelSize {
+                    width: f32::from(panel.cols) * metrics.cell.width,
+                    height: metrics.cell.height,
+                },
+                color: Rgba::rgb(42, 76, 118),
+            });
+        }
+        push_palette_text(
+            frame,
+            panel,
+            metrics,
+            row_offset,
+            1,
+            &session_switcher_row_text(
+                row,
+                offset,
+                selected,
+                label_style,
+                panel.cols.saturating_sub(2),
+            ),
             Rgba::rgb(238, 242, 245),
         );
     }
@@ -9850,7 +10168,9 @@ fn draw_native_titlebar_button(
         (_, true) => Rgba::rgb(44, 55, 62),
         _ => Rgba::rgb(29, 37, 43),
     };
-    frame.overlay_backgrounds.push(rect_item(rect, button_color));
+    frame
+        .overlay_backgrounds
+        .push(rect_item(rect, button_color));
 
     if button == NativeTitleBarButton::Menu {
         draw_menu_button_icon(frame, rect, hovered, scale_factor);
@@ -9859,6 +10179,7 @@ fn draw_native_titlebar_button(
 
     let label = match button {
         NativeTitleBarButton::Menu => "",
+        NativeTitleBarButton::NewSession => "+",
         NativeTitleBarButton::Minimize => "-",
         NativeTitleBarButton::Maximize if overlay.maximized => "][",
         NativeTitleBarButton::Maximize => "[]",
@@ -9917,24 +10238,22 @@ fn draw_native_titlebar_title(
     metrics: CellMetrics,
 ) {
     let scale_factor = overlay.scale_factor;
-    let Some(menu_rect) = native_titlebar_button_rect(
-        NativeTitleBarButton::Menu,
+    let Some(new_session_rect) = native_titlebar_button_rect(
+        NativeTitleBarButton::NewSession,
         overlay.window_width,
         scale_factor,
-    )
-    else {
+    ) else {
         return;
     };
     let Some(minimize_rect) = native_titlebar_button_rect(
         NativeTitleBarButton::Minimize,
         overlay.window_width,
         scale_factor,
-    )
-    else {
+    ) else {
         return;
     };
     let title_margin = 12.0 * scale_factor;
-    let start_x = menu_rect.origin.x + menu_rect.size.width + title_margin;
+    let start_x = new_session_rect.origin.x + new_session_rect.size.width + title_margin;
     let end_x = (minimize_rect.origin.x - title_margin).max(start_x);
     let available_cells = ((end_x - start_x) / metrics.cell.width)
         .floor()
@@ -9969,7 +10288,9 @@ fn draw_native_titlebar_menu(
         },
         ..menu_rect
     };
-    frame.overlay_backgrounds.push(rect_item(menu_rect, Rgba::rgb(27, 35, 40)));
+    frame
+        .overlay_backgrounds
+        .push(rect_item(menu_rect, Rgba::rgb(27, 35, 40)));
     frame.overlay_backgrounds.push(RectBatchItem {
         origin: menu_rect.origin,
         size: PixelSize {
@@ -10022,9 +10343,10 @@ fn native_titlebar_rect(window_width: f32, scale_factor: f32) -> NativeOverlayRe
     }
 }
 
-fn native_titlebar_buttons() -> [NativeTitleBarButton; 4] {
+fn native_titlebar_buttons() -> [NativeTitleBarButton; 5] {
     [
         NativeTitleBarButton::Menu,
+        NativeTitleBarButton::NewSession,
         NativeTitleBarButton::Minimize,
         NativeTitleBarButton::Maximize,
         NativeTitleBarButton::Close,
@@ -10080,6 +10402,11 @@ fn native_titlebar_button_rect(
     let y = ((native_titlebar_height(scale_factor) - button_size) * 0.5).max(0.0);
     let x = match button {
         NativeTitleBarButton::Menu => native_titlebar_edge_padding(scale_factor),
+        NativeTitleBarButton::NewSession => {
+            native_titlebar_edge_padding(scale_factor)
+                + button_size
+                + native_titlebar_button_gap(scale_factor)
+        }
         NativeTitleBarButton::Close => {
             native_titlebar_right_button_x(window_width, 0, scale_factor)?
         }
@@ -10129,7 +10456,7 @@ fn native_titlebar_menu_rect(scale_factor: f32) -> NativeOverlayRect {
 
 fn native_titlebar_menu_items() -> [NativeTitleBarMenuItem; 4] {
     [
-        NativeTitleBarMenuItem::NewLocalShell,
+        NativeTitleBarMenuItem::NewSession,
         NativeTitleBarMenuItem::CommandPalette,
         NativeTitleBarMenuItem::Search,
         NativeTitleBarMenuItem::About,
@@ -10152,7 +10479,7 @@ fn native_titlebar_menu_item_for_point(
 
 fn native_titlebar_menu_item_label(item: NativeTitleBarMenuItem) -> &'static str {
     match item {
-        NativeTitleBarMenuItem::NewLocalShell => "New Local Shell",
+        NativeTitleBarMenuItem::NewSession => "New Session",
         NativeTitleBarMenuItem::CommandPalette => "Command Palette",
         NativeTitleBarMenuItem::Search => "Search",
         NativeTitleBarMenuItem::About => "About Witty",
@@ -11036,6 +11363,53 @@ fn palette_panel(grid_size: GridSize, filtered_count: usize) -> Option<PalettePa
     })
 }
 
+fn session_switcher_panel(grid_size: GridSize, row_count: usize) -> Option<PalettePanel> {
+    if grid_size.rows < 2 || grid_size.cols == 0 || row_count < 2 {
+        return None;
+    }
+
+    let cols = grid_size.cols;
+    let panel_cols = if cols > 80 {
+        64
+    } else {
+        cols.saturating_sub(4).max(1)
+    };
+    let start_col = cols.saturating_sub(panel_cols) / 2;
+    let max_item_rows = usize::from(grid_size.rows.saturating_sub(1)).min(8);
+    let item_rows = row_count.min(max_item_rows).max(1);
+    let panel_rows = u16::try_from(item_rows + 1)
+        .unwrap_or(u16::MAX)
+        .min(grid_size.rows);
+    let start_row = if grid_size.rows > panel_rows + 4 {
+        2
+    } else {
+        grid_size.rows.saturating_sub(panel_rows) / 2
+    };
+
+    Some(PalettePanel {
+        start: CellPoint::new(start_row, start_col),
+        cols: panel_cols,
+        rows: panel_rows,
+        item_rows,
+    })
+}
+
+fn session_switcher_row_text(
+    row: &NativeSessionTabRow,
+    row_index: usize,
+    selected: bool,
+    label_style: NativeSessionTabLabelStyle,
+    width: u16,
+) -> String {
+    let marker = if selected { ">" } else { " " };
+    let active = if row.active { "active" } else { "session" };
+    let label = native_session_tab_label(row, row_index, label_style);
+    truncate_cells(
+        &format!("{marker} {label}  {}  {active}", row.profile_id),
+        width,
+    )
+}
+
 fn profile_action_panel(grid_size: GridSize, row_count: usize) -> Option<PalettePanel> {
     if row_count == 0 || grid_size.rows < 2 || grid_size.cols == 0 {
         return None;
@@ -11206,6 +11580,49 @@ fn palette_display_query(query: &str, ime: Option<&ImeComposition>) -> String {
 
 fn ime_preedit_caret_cell_width(composition: &ImeComposition) -> u16 {
     composition.preedit_caret_cell_width()
+}
+
+fn glyph_row_containing_text(
+    glyphs: &[GlyphBatchItem],
+    metrics: CellMetrics,
+    needle: &str,
+) -> Option<u16> {
+    if needle.is_empty() {
+        return None;
+    }
+
+    let mut row_glyphs = glyphs
+        .iter()
+        .map(|glyph| {
+            (
+                ((glyph.origin.y - metrics.padding.y) / metrics.cell.height).floor() as u16,
+                glyph.origin.x,
+                glyph.text.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    row_glyphs.sort_by(|left, right| {
+        left.0.cmp(&right.0).then_with(|| {
+            left.1
+                .partial_cmp(&right.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    });
+
+    let mut current_row = None;
+    let mut current_text = String::new();
+    for (row, _, text) in row_glyphs {
+        if current_row.is_some_and(|current| current != row) {
+            if current_text.contains(needle) {
+                return current_row;
+            }
+            current_text.clear();
+        }
+        current_row = Some(row);
+        current_text.push_str(text);
+    }
+
+    current_row.filter(|_| current_text.contains(needle))
 }
 
 fn text_cell_width(text: &str) -> u16 {
@@ -12107,6 +12524,20 @@ mod tests {
         }
     }
 
+    fn test_session_tab_rows() -> Vec<NativeSessionTabRow> {
+        (0..3)
+            .map(|index| NativeSessionTabRow {
+                session_id: NativeSessionId((index + 1) as u64),
+                key: PendingProfileActionKey::profile_launch(index),
+                kind: NativeResolvedProfileActionKind::ProfileLaunch,
+                source_plugin: "profile-bridge".to_owned(),
+                profile_id: format!("local-{}", index + 1),
+                mode: NativeProfileActionStartMode::NewTab,
+                active: index == 0,
+            })
+            .collect()
+    }
+
     fn test_current_directory(path: &str) -> TerminalCurrentDirectory {
         TerminalCurrentDirectory {
             uri: format!("file://localhost{path}"),
@@ -12154,7 +12585,7 @@ mod tests {
 
         assert_eq!(
             native_titlebar_menu_item_for_point(first_row, scale_factor),
-            Some(NativeTitleBarMenuItem::NewLocalShell)
+            Some(NativeTitleBarMenuItem::NewSession)
         );
         assert_eq!(
             native_titlebar_menu_item_for_point(second_row, scale_factor),
@@ -12171,12 +12602,21 @@ mod tests {
         let scale_factor = 1.0;
         let menu =
             native_titlebar_button_rect(NativeTitleBarButton::Menu, 640.0, scale_factor).unwrap();
+        let new_session =
+            native_titlebar_button_rect(NativeTitleBarButton::NewSession, 640.0, scale_factor)
+                .unwrap();
         let close =
             native_titlebar_button_rect(NativeTitleBarButton::Close, 640.0, scale_factor).unwrap();
 
         assert_eq!(menu.origin.x, native_titlebar_edge_padding(scale_factor));
+        assert!(new_session.origin.x > menu.origin.x);
+        assert!(new_session.origin.x < close.origin.x);
         assert!(close.origin.x > menu.origin.x);
         assert_eq!(menu.size.width, native_titlebar_button_size(scale_factor));
+        assert_eq!(
+            new_session.size.width,
+            native_titlebar_button_size(scale_factor)
+        );
         assert_eq!(close.size.height, native_titlebar_button_size(scale_factor));
     }
 
@@ -12185,10 +12625,14 @@ mod tests {
         let scale_factor = 2.0;
         let menu =
             native_titlebar_button_rect(NativeTitleBarButton::Menu, 1280.0, scale_factor).unwrap();
+        let new_session =
+            native_titlebar_button_rect(NativeTitleBarButton::NewSession, 1280.0, scale_factor)
+                .unwrap();
         let menu_panel = native_titlebar_menu_rect(scale_factor);
 
         assert_eq!(native_titlebar_height(scale_factor), 68.0);
         assert_eq!(menu.origin.x, 12.0);
+        assert_eq!(new_session.origin.x, 76.0);
         assert_eq!(menu.size.width, 56.0);
         assert_eq!(menu_panel.origin.y, 68.0);
         assert_eq!(menu_panel.size.height, 240.0);
@@ -14548,6 +14992,7 @@ mod tests {
             None,
             NativeSessionTabPosition::Bottom,
             NativeSessionTabLabelStyle::Index,
+            NativeSessionTabDisplayPolicy::default(),
             Vec::new(),
             None,
         )
@@ -14602,6 +15047,7 @@ mod tests {
             None,
             NativeSessionTabPosition::Bottom,
             NativeSessionTabLabelStyle::Index,
+            NativeSessionTabDisplayPolicy::default(),
             Vec::new(),
             None,
         )
@@ -14622,6 +15068,88 @@ mod tests {
         assert!(!app.window_close_requested);
         assert!(!app.fallback_local_session_requested);
         assert!(app.profile_action_sessions.as_slice().is_empty());
+    }
+
+    #[test]
+    fn native_session_tab_display_policy_defaults_to_hidden() {
+        let policy = NativeSessionTabDisplayPolicy::default();
+
+        assert!(!policy.should_show(0));
+        assert!(!policy.should_show(1));
+        assert!(!policy.should_show(2));
+        assert!(NativeSessionTabDisplayPolicy {
+            show_single: true,
+            show_multiple: false,
+        }
+        .should_show(1));
+        assert!(NativeSessionTabDisplayPolicy {
+            show_single: false,
+            show_multiple: true,
+        }
+        .should_show(2));
+    }
+
+    #[test]
+    fn native_session_switcher_opens_next_and_wraps_selection() {
+        let rows = test_session_tab_rows();
+        let mut switcher = NativeSessionSwitcher::default();
+
+        assert!(switcher.open(&rows, 1));
+        assert_eq!(switcher.selected_session_id, Some(NativeSessionId(2)));
+        assert!(switcher.move_selection(&rows, 1));
+        assert_eq!(switcher.selected_session_id, Some(NativeSessionId(3)));
+        assert!(switcher.move_selection(&rows, 1));
+        assert_eq!(switcher.selected_session_id, Some(NativeSessionId(1)));
+        assert!(switcher.move_selection(&rows, -1));
+        assert_eq!(switcher.selected_session_id, Some(NativeSessionId(3)));
+    }
+
+    #[test]
+    fn session_switcher_overlay_hides_covered_terminal_frame_and_marks_selection() {
+        let metrics = CellMetrics::default();
+        let grid_size = GridSize::new(12, 80);
+        let rows = test_session_tab_rows();
+        let mut switcher = NativeSessionSwitcher::default();
+        assert!(switcher.open(&rows, 1));
+        let mut frame = FramePlan::default();
+        let panel = session_switcher_panel(grid_size, rows.len()).unwrap();
+        frame.cursor = Some(RectBatchItem {
+            origin: cell_origin(CellPoint::new(panel.start.row, panel.start.col), metrics),
+            size: metrics.cell,
+            color: Rgba::rgb(255, 255, 255),
+        });
+        frame.glyphs.push(GlyphBatchItem {
+            origin: cell_origin(
+                CellPoint::new(panel.start.row + 1, panel.start.col + 1),
+                metrics,
+            ),
+            text: "stale terminal text".to_owned(),
+            color: Rgba::rgb(255, 255, 255),
+            style_flags: CellFlags::default(),
+        });
+
+        apply_session_switcher_overlay(
+            &mut frame,
+            &switcher,
+            &rows,
+            NativeSessionTabLabelStyle::Index,
+            metrics,
+            grid_size,
+        );
+
+        assert!(frame.cursor.is_none());
+        assert!(!frame
+            .glyphs
+            .iter()
+            .any(|glyph| glyph.text.contains("stale terminal text")));
+        assert!(frame
+            .glyphs
+            .iter()
+            .any(|glyph| glyph.text.contains("Switch Session")));
+        assert!(frame
+            .glyphs
+            .iter()
+            .any(|glyph| glyph.text.contains("> 1  local-2  session")));
     }
 
     #[test]
@@ -14650,16 +15178,9 @@ mod tests {
                 active: true,
             },
         ];
-        let first_label_width = text_cell_width(&native_session_tab_label(
-            &rows[0],
-            0,
-            label_style,
-        ));
-        let first_width = text_cell_width(&native_session_tab_summary(
-            &rows[0],
-            0,
-            label_style,
-        ));
+        let first_label_width =
+            text_cell_width(&native_session_tab_label(&rows[0], 0, label_style));
+        let first_width = text_cell_width(&native_session_tab_summary(&rows[0], 0, label_style));
         let first_close_start = first_label_width.saturating_add(1);
         let second_start = first_width.saturating_add(2);
 
@@ -16687,11 +17208,9 @@ mod tests {
             DEFAULT_TERMINAL_FONT_SIZE
         );
 
-        let config = RendererFontConfig::with_font_size(
-            Some("JetBrainsMono Nerd Font".to_owned()),
-            18,
-        )
-        .with_terminal_padding(8.0);
+        let config =
+            RendererFontConfig::with_font_size(Some("JetBrainsMono Nerd Font".to_owned()), 18)
+                .with_terminal_padding(8.0);
         let next = runtime_font_config_after_action(&config, RuntimeFontSizeAction::Increase);
 
         assert_eq!(next.family(), Some("JetBrainsMono Nerd Font"));
@@ -16726,6 +17245,30 @@ mod tests {
         assert!(!is_new_local_tab_shortcut(
             &Key::Character("t".into()),
             Modifiers::from(ModifiersState::CONTROL)
+        ));
+    }
+
+    #[test]
+    fn session_switcher_shortcut_uses_control_tab() {
+        let control = Modifiers::from(ModifiersState::CONTROL);
+        let control_shift = Modifiers::from(ModifiersState::CONTROL | ModifiersState::SHIFT);
+        let control_alt = Modifiers::from(ModifiersState::CONTROL | ModifiersState::ALT);
+
+        assert!(is_session_switcher_shortcut(
+            &Key::Named(NamedKey::Tab),
+            control
+        ));
+        assert!(is_session_switcher_shortcut(
+            &Key::Named(NamedKey::Tab),
+            control_shift
+        ));
+        assert!(!is_session_switcher_shortcut(
+            &Key::Named(NamedKey::Tab),
+            control_alt
+        ));
+        assert!(!is_session_switcher_shortcut(
+            &Key::Named(NamedKey::Enter),
+            control
         ));
     }
 
@@ -18453,7 +18996,7 @@ mod tests {
         assert!(frame
             .glyphs
             .iter()
-            .any(|glyph| glyph.text.contains("[New Local Shell]")));
+            .any(|glyph| glyph.text.contains("[New Session]")));
         assert!(frame
             .glyphs
             .iter()
@@ -18528,24 +19071,25 @@ mod tests {
         apply_empty_session_welcome_overlay(
             &mut frame,
             true,
-            Some("New local shell failed:\npty unavailable"),
+            Some("New session failed:\npty unavailable"),
             None,
             metrics,
             GridSize::new(12, 80),
         );
 
-        assert!(frame.glyphs.iter().any(|glyph| glyph
-            .text
-            .contains("New local shell failed: pty unavailable")));
+        assert!(frame
+            .glyphs
+            .iter()
+            .any(|glyph| glyph.text.contains("New session failed: pty unavailable")));
     }
 
     #[test]
-    fn native_window_commands_include_new_local_shell() {
+    fn native_window_commands_include_new_session() {
         let commands = native_window_command_registrations();
 
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].id, WITTY_NEW_LOCAL_SHELL_COMMAND_ID);
-        assert_eq!(commands[0].title, "New Local Shell");
+        assert_eq!(commands[0].title, "New Session");
         assert_eq!(commands[0].source_plugin, "builtin");
     }
 

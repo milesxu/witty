@@ -122,10 +122,12 @@ cargo run -p witty-app -- --window --cwd ~/src --program tmux --arg new-session
 scripts/run-witty-native-opengl.sh --cwd ~/src/witty --env WITTY_SESSION=dev
 ```
 
-`Ctrl+Shift+T` opens a new local tab using the same launch defaults. Terminal
-OSC title updates replace the fallback title while the child process runs.
-Restart restore reuses these launch defaults and tab/profile metadata, but it
-does not preserve the live PTY process tree for ordinary local shells.
+`Ctrl+Shift+T` opens a New Session using the same launch defaults. `Ctrl+Tab`
+opens the session switcher, advances the selected session, and switches when
+Ctrl is released. Terminal OSC title updates replace the fallback title while
+the child process runs. Restart restore reuses these launch defaults and
+tab/profile metadata, but it does not preserve the live PTY process tree for
+ordinary local shells.
 
 The browser launcher can also create a token-protected local gateway:
 
@@ -149,6 +151,10 @@ terminal-padding = 0
 background-opacity = 1.0
 background-image = "null"
 background-image-fit = "cover"
+session-tab-position = "top"
+session-tab-label = "index"
+session-tab-show-single = false
+session-tab-show-multiple = false
 window-last-active-close = "close-window"
 ```
 
@@ -173,7 +179,7 @@ Witty window/program. Set `window-last-active-close = "block"` in `.wittyrc`
 or `window_last_active_close = "block"` in `window.v1.json` to keep Witty open
 after the last shell exits. In that non-closing mode, Witty replaces the
 exited terminal buffer with a compact empty-session screen that can start a
-new local shell or open the command palette for profile/plugin launch actions.
+New Session or open the command palette for profile/plugin launch actions.
 
 You can still set fonts through CLI flags, environment defaults, or
 `window.v1.json`:
@@ -202,6 +208,14 @@ with `background-opacity = 0.85` or `--background-opacity 0.85`. Set
 fall back to desktop transparency. Background images default to
 `background-image-fit = "cover"`, which scales the image to fill the window and
 center-crops any overflow. The CLI spelling is `--background-image-fit cover`.
+
+The session tab strip is hidden by default so it never covers shell output or a
+tmux status line. Set `session-tab-show-single = true` or
+`session-tab-show-multiple = true` to render it, and use
+`session-tab-position = "top"` or `"bottom"` to choose its row. The CLI
+spellings are `--session-tab-show-single true`,
+`--session-tab-show-multiple true`, `--session-tab-position top`, and
+`--session-tab-label index`.
 
 The compatible JSON config file is `window.v1.json` under the Witty config
 directory, normally `$XDG_CONFIG_HOME/witty/` or `~/.config/witty/` on Linux.
