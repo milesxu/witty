@@ -1,3 +1,5 @@
 font-family = "Maple Mono NF CN"
 terminal-padding = 0
+background-opacity = 1.0
+background-image = "null"
 window-last-active-close = "close-window"

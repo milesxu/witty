@@ -29,8 +29,8 @@ use witty_launcher::open_external_url;
 use witty_plugin_api::{CommandRegistration, PluginAction, PluginEvent};
 use witty_render_wgpu::{
     native_wgpu_backend_policy, CellMetrics, FramePlan, FramePlanner, FrameStats, GlyphBatchItem,
-    PixelPoint, PixelSize, RectBatchItem, RendererFontConfig, WgpuRectRenderer,
-    DEFAULT_TERMINAL_FONT_SIZE,
+    PixelPoint, PixelSize, RectBatchItem, RendererBackgroundImage, RendererFontConfig,
+    RendererVisualConfig, WgpuRectRenderer, DEFAULT_TERMINAL_FONT_SIZE,
 };
 use witty_ui::{
     apply_command_block_action_menu_overlay, apply_command_block_command,
@@ -2115,6 +2115,8 @@ pub fn run(
     font_family: Option<String>,
     font_size: Option<u16>,
     terminal_padding: Option<u16>,
+    background_opacity: Option<f32>,
+    background_image_path: Option<PathBuf>,
     font_paths: Vec<PathBuf>,
     restore_state: Option<RestartSnapshotV1>,
 ) -> anyhow::Result<()> {
@@ -2134,6 +2136,8 @@ pub fn run(
         font_family,
         font_size,
         terminal_padding,
+        background_opacity,
+        background_image_path,
         font_paths,
         restore_state,
     )?;
@@ -2168,6 +2172,30 @@ fn load_window_font_data(font_paths: &[PathBuf]) -> Result<Vec<Vec<u8>>> {
             Ok(data)
         })
         .collect()
+}
+
+fn load_window_background_image(path: Option<&Path>) -> Option<RendererBackgroundImage> {
+    let path = path?;
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!(
+                "background image unavailable; falling back to transparent desktop background: {}: {err}",
+                path.display()
+            );
+            return None;
+        }
+    };
+    match RendererBackgroundImage::decode(&bytes) {
+        Ok(image) => Some(image),
+        Err(err) => {
+            eprintln!(
+                "background image unsupported; falling back to transparent desktop background: {}: {err:#}",
+                path.display()
+            );
+            None
+        }
+    }
 }
 
 fn local_pty_config_for_launch(
@@ -2921,6 +2949,7 @@ struct TerminalWindowApp {
     cursor_blink: CursorBlinkState,
     text_blink: TextBlinkState,
     font_config: RendererFontConfig,
+    visual_config: RendererVisualConfig,
     font_data: Vec<Vec<u8>>,
     initial_window_size: Option<GridSize>,
     first_frame_reported: bool,
@@ -2943,6 +2972,8 @@ impl TerminalWindowApp {
         font_family: Option<String>,
         font_size: Option<u16>,
         terminal_padding: Option<u16>,
+        background_opacity: Option<f32>,
+        background_image_path: Option<PathBuf>,
         font_paths: Vec<PathBuf>,
         restore_state: Option<RestartSnapshotV1>,
     ) -> Result<Self> {
@@ -2993,6 +3024,12 @@ impl TerminalWindowApp {
             Some(padding) => font_config.with_terminal_padding(f32::from(padding)),
             None => font_config,
         };
+        let background_image = load_window_background_image(background_image_path.as_deref());
+        let visual_config = match background_opacity {
+            Some(opacity) => RendererVisualConfig::default().with_background_opacity(opacity),
+            None => RendererVisualConfig::default(),
+        }
+        .with_background_image(background_image);
         let metrics = font_config.cell_metrics();
         app.set_cell_metrics(metrics);
         let font_data = load_window_font_data(&font_paths)?;
@@ -3077,6 +3114,7 @@ impl TerminalWindowApp {
             cursor_blink: CursorBlinkState::default(),
             text_blink: TextBlinkState::default(),
             font_config,
+            visual_config,
             font_data,
             initial_window_size,
             first_frame_reported: false,
@@ -6022,6 +6060,7 @@ impl ApplicationHandler for TerminalWindowApp {
             Window::default_attributes()
                 .with_title(self.window_title.clone())
                 .with_decorations(false)
+                .with_transparent(self.visual_config.requires_window_transparency())
                 .with_inner_size(terminal_window_initial_inner_size(
                     self.initial_window_size,
                     self.metrics,
@@ -6047,16 +6086,18 @@ impl ApplicationHandler for TerminalWindowApp {
                     size,
                     self.active_session_close_fallback_policy,
                     &self.font_config,
+                    &self.visual_config,
                     self.font_data.len(),
                 )
             );
         }
-        let renderer = match pollster::block_on(WgpuRectRenderer::new_with_font_config_and_data(
+        let renderer = match pollster::block_on(WgpuRectRenderer::new_with_font_config_data_and_visual(
             window.clone(),
             size.width,
             size.height,
             self.font_config.clone(),
             self.font_data.clone(),
+            self.visual_config.clone(),
         )) {
             Ok(renderer) => renderer,
             Err(err) => {
@@ -6223,6 +6264,7 @@ impl ApplicationHandler for TerminalWindowApp {
                                 size,
                                 self.frame.stats,
                                 &self.font_config,
+                                &self.visual_config,
                                 self.font_data.len(),
                             )
                         );
@@ -6425,12 +6467,14 @@ fn native_window_startup_report_line(
     size: PhysicalSize<u32>,
     active_session_close_fallback_policy: NativeActiveSessionCloseFallbackPolicy,
     font_config: &RendererFontConfig,
+    visual_config: &RendererVisualConfig,
     font_source_count: usize,
 ) -> String {
     serde_json::to_string(&native_window_startup_report_json(
         size,
         active_session_close_fallback_policy,
         font_config,
+        visual_config,
         font_source_count,
     ))
     .unwrap_or_else(|err| {
@@ -6445,6 +6489,7 @@ fn native_window_startup_report_json(
     size: PhysicalSize<u32>,
     active_session_close_fallback_policy: NativeActiveSessionCloseFallbackPolicy,
     font_config: &RendererFontConfig,
+    visual_config: &RendererVisualConfig,
     font_source_count: usize,
 ) -> serde_json::Value {
     let policy = native_wgpu_backend_policy();
@@ -6462,6 +6507,9 @@ fn native_window_startup_report_json(
         "font_scale_factor": font_config.font_scale_factor(),
         "terminal_padding": font_config.terminal_padding(),
         "effective_font_size": font_config.effective_font_size(),
+        "background_opacity": visual_config.background_opacity(),
+        "background_image": visual_config.has_background_image(),
+        "transparent_window": visual_config.requires_window_transparency(),
         "font_source_count": font_source_count,
         "will_request_adapter": true,
         "vulkan_enabled_by_witty": false,
@@ -6473,12 +6521,14 @@ fn native_window_first_frame_report_line(
     size: PhysicalSize<u32>,
     stats: FrameStats,
     font_config: &RendererFontConfig,
+    visual_config: &RendererVisualConfig,
     font_source_count: usize,
 ) -> String {
     serde_json::to_string(&native_window_first_frame_report_json(
         size,
         stats,
         font_config,
+        visual_config,
         font_source_count,
     ))
     .unwrap_or_else(|err| {
@@ -6493,6 +6543,7 @@ fn native_window_first_frame_report_json(
     size: PhysicalSize<u32>,
     stats: FrameStats,
     font_config: &RendererFontConfig,
+    visual_config: &RendererVisualConfig,
     font_source_count: usize,
 ) -> serde_json::Value {
     let policy = native_wgpu_backend_policy();
@@ -6509,6 +6560,9 @@ fn native_window_first_frame_report_json(
         "font_scale_factor": font_config.font_scale_factor(),
         "terminal_padding": font_config.terminal_padding(),
         "effective_font_size": font_config.effective_font_size(),
+        "background_opacity": visual_config.background_opacity(),
+        "background_image": visual_config.has_background_image(),
+        "transparent_window": visual_config.requires_window_transparency(),
         "font_source_count": font_source_count,
         "visible_rows": stats.visible_rows,
         "visible_cols": stats.visible_cols,
@@ -11074,6 +11128,7 @@ mod tests {
             PhysicalSize::new(960, 540),
             NativeActiveSessionCloseFallbackPolicy::Block,
             &RendererFontConfig::default(),
+            &RendererVisualConfig::default(),
             0,
         );
 
@@ -11085,6 +11140,9 @@ mod tests {
         assert!(report["font_family"].is_null());
         assert_eq!(report["font_size"], 14);
         assert_eq!(report["terminal_padding"], 0.0);
+        assert_eq!(report["background_opacity"], 1.0);
+        assert_eq!(report["background_image"], false);
+        assert_eq!(report["transparent_window"], false);
         assert_eq!(report["font_source_count"], 0);
         assert_eq!(report["will_request_adapter"], true);
         assert_eq!(report["vulkan_enabled_by_witty"], false);
@@ -11115,6 +11173,7 @@ mod tests {
                 ..FrameStats::default()
             },
             &font_config,
+            &RendererVisualConfig::default(),
             2,
         );
 
@@ -11125,6 +11184,9 @@ mod tests {
         assert_eq!(report["font_family"], "JetBrainsMono Nerd Font");
         assert_eq!(report["font_size"], 18);
         assert_eq!(report["terminal_padding"], 0.0);
+        assert_eq!(report["background_opacity"], 1.0);
+        assert_eq!(report["background_image"], false);
+        assert_eq!(report["transparent_window"], false);
         assert_eq!(report["font_source_count"], 2);
         assert_eq!(report["visible_rows"], 24);
         assert_eq!(report["visible_cols"], 80);
@@ -11150,12 +11212,14 @@ mod tests {
             PhysicalSize::new(960, 540),
             NativeActiveSessionCloseFallbackPolicy::FallbackLocalSession,
             &RendererFontConfig::default(),
+            &RendererVisualConfig::default(),
             0,
         );
         let line = native_window_startup_report_line(
             PhysicalSize::new(960, 540),
             NativeActiveSessionCloseFallbackPolicy::FallbackLocalSession,
             &RendererFontConfig::default(),
+            &RendererVisualConfig::default(),
             0,
         );
 
@@ -11188,6 +11252,7 @@ mod tests {
                 PhysicalSize::new(960, 540),
                 policy,
                 &RendererFontConfig::default(),
+                &RendererVisualConfig::default(),
                 0,
             );
 
@@ -11203,16 +11268,20 @@ mod tests {
         let font_config =
             RendererFontConfig::with_font_size(Some("Symbols Nerd Font Mono".to_owned()), 18)
                 .with_terminal_padding(4.0);
+        let visual_config = RendererVisualConfig::default().with_background_opacity(0.72);
         let report = native_window_startup_report_json(
             PhysicalSize::new(960, 540),
             NativeActiveSessionCloseFallbackPolicy::Block,
             &font_config,
+            &visual_config,
             2,
         );
 
         assert_eq!(report["font_family"], "Symbols Nerd Font Mono");
         assert_eq!(report["font_size"], 18);
         assert_eq!(report["terminal_padding"], 4.0);
+        assert!((report["background_opacity"].as_f64().unwrap() - 0.72).abs() < 0.001);
+        assert_eq!(report["transparent_window"], true);
         assert_eq!(report["font_source_count"], 2);
     }
 
@@ -13367,6 +13436,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
             Vec::new(),
             None,
         )
@@ -13412,6 +13483,8 @@ mod tests {
             MouseSelectionOverridePolicy::default(),
             Osc52ClipboardPolicy::Disabled,
             1000,
+            None,
+            None,
             None,
             None,
             None,

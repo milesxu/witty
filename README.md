@@ -146,6 +146,8 @@ with a bundled template:
 ```toml
 font-family = "Maple Mono NF CN"
 terminal-padding = 0
+background-opacity = 1.0
+background-image = "null"
 window-last-active-close = "close-window"
 ```
 
@@ -181,6 +183,8 @@ cargo run -p witty-app -- --window \
   --font-family "Maple Mono NF CN" \
   --font-size 16 \
   --terminal-padding 0 \
+  --background-opacity 0.85 \
+  --background-image /path/to/background.png \
   --font-path /path/to/SymbolsNerdFontMono-Regular.ttf
 WITTY_FONT_FAMILY="Maple Mono NF CN" witty --window
 ```
@@ -190,7 +194,10 @@ name into `--font-family`, `WITTY_FONT_FAMILY`, or config. `--font-path` is
 repeatable and accepts `.ttf`, `.otf`, and `.ttc` files. `WITTY_FONT_PATHS`
 uses the platform path-list separator, `:` on Linux. Terminal padding defaults
 to `0`; set `terminal-padding = 8` in `.wittyrc` or pass `--terminal-padding 8`
-to restore the earlier inset.
+to restore the earlier inset. Background opacity defaults to `1.0`; lower it
+with `background-opacity = 0.85` or `--background-opacity 0.85`. Set
+`background-image` to a path for an image-backed background, or to `"null"` to
+fall back to desktop transparency.
 
 The compatible JSON config file is `window.v1.json` under the Witty config
 directory, normally `$XDG_CONFIG_HOME/witty/` or `~/.config/witty/` on Linux.

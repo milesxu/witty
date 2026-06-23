@@ -1180,6 +1180,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -4181,6 +4183,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "glyphon",
+ "image",
  "unicode-width",
  "web-sys",
  "wgpu",

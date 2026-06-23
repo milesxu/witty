@@ -31,7 +31,7 @@ use witty_plugin_api::{
 use witty_plugin_wasm::WasmPluginRuntime;
 use witty_render_wgpu::{
     available_font_families, native_wgpu_backend_policy, CellMetrics, FramePlanner, FrameStats,
-    RendererFontConfig, RetainedFramePlanner,
+    RendererFontConfig, RendererVisualConfig, RetainedFramePlanner,
 };
 use witty_transport::{
     apply_openssh_import_preview, default_profile_store_path, edit_profile_store,
@@ -56,6 +56,8 @@ const MIN_TERMINAL_FONT_SIZE: u16 = 6;
 const MAX_TERMINAL_FONT_SIZE: u16 = 96;
 const MIN_TERMINAL_PADDING: u16 = 0;
 const MAX_TERMINAL_PADDING: u16 = 64;
+const MIN_BACKGROUND_OPACITY: f32 = 0.0;
+const MAX_BACKGROUND_OPACITY: f32 = 1.0;
 const DEFAULT_WINDOW_ROWS: u16 = 24;
 const DEFAULT_WINDOW_COLS: u16 = 80;
 const MIN_WINDOW_ROWS: u16 = 5;
@@ -202,6 +204,8 @@ fn main() -> anyhow::Result<()> {
             options.font_family,
             options.font_size,
             options.terminal_padding,
+            options.background_opacity,
+            options.background_image.clone(),
             options.font_paths,
             restore_state,
         );
@@ -276,7 +280,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct AppOptions {
     mode: AppMode,
     wasm_plugins: Vec<PathBuf>,
@@ -292,6 +296,8 @@ struct AppOptions {
     font_family: Option<String>,
     font_size: Option<u16>,
     terminal_padding: Option<u16>,
+    background_opacity: Option<f32>,
+    background_image: Option<PathBuf>,
     font_paths: Vec<PathBuf>,
     restore_state_path: Option<PathBuf>,
     wittyrc_path: Option<PathBuf>,
@@ -318,6 +324,8 @@ struct AppOptionsExplicit {
     font_family: bool,
     font_size: bool,
     terminal_padding: bool,
+    background_opacity: bool,
+    background_image: bool,
     font_paths: bool,
     cwd: bool,
     window_cols: bool,
@@ -350,6 +358,8 @@ impl AppOptions {
         let mut font_family = None;
         let mut font_size = None;
         let mut terminal_padding = None;
+        let mut background_opacity = None;
+        let mut background_image = None;
         let mut font_paths = Vec::new();
         let mut restore_state_path = None;
         let mut wittyrc_path = None;
@@ -633,6 +643,29 @@ impl AppOptions {
                     }
                     terminal_padding = Some(parse_terminal_padding(&value, "--terminal-padding")?);
                     explicit.terminal_padding = true;
+                    window_only_args_seen = true;
+                }
+                "--background-opacity" => {
+                    let Some(value) = args.next() else {
+                        bail!("--background-opacity requires a value");
+                    };
+                    if background_opacity.is_some() {
+                        bail!("only one --background-opacity value is allowed");
+                    }
+                    background_opacity =
+                        Some(parse_background_opacity(&value, "--background-opacity")?);
+                    explicit.background_opacity = true;
+                    window_only_args_seen = true;
+                }
+                "--background-image" => {
+                    let Some(value) = args.next() else {
+                        bail!("--background-image requires a value");
+                    };
+                    if explicit.background_image {
+                        bail!("only one --background-image value is allowed");
+                    }
+                    background_image = parse_background_image_value(&value, "--background-image")?;
+                    explicit.background_image = true;
                     window_only_args_seen = true;
                 }
                 "--font-path" => {
@@ -1081,6 +1114,8 @@ impl AppOptions {
             font_family,
             font_size,
             terminal_padding,
+            background_opacity,
+            background_image,
             font_paths,
             restore_state_path,
             wittyrc_path,
@@ -1222,6 +1257,18 @@ impl AppOptions {
                     Some(validate_terminal_padding(value, "terminal_padding")?);
             }
         }
+        if !self.explicit.background_opacity && self.background_opacity.is_none() {
+            if let Some(value) = config.background_opacity {
+                self.background_opacity =
+                    Some(validate_background_opacity(value, "background_opacity")?);
+            }
+        }
+        if !self.explicit.background_image && self.background_image.is_none() {
+            if let Some(path) = config.background_image {
+                self.background_image =
+                    Some(validate_background_image_path(path, "background_image")?);
+            }
+        }
         if !self.explicit.font_paths && self.font_paths.is_empty() && !config.font_paths.is_empty()
         {
             self.font_paths = config
@@ -1322,6 +1369,19 @@ impl AppOptions {
                 self.terminal_padding =
                     Some(validate_terminal_padding(value, "terminal-padding")?);
                 self.explicit.terminal_padding = true;
+            }
+        }
+        if !self.explicit.background_opacity && self.background_opacity.is_none() {
+            if let Some(value) = config.background_opacity {
+                self.background_opacity =
+                    Some(validate_background_opacity(value, "background-opacity")?);
+                self.explicit.background_opacity = true;
+            }
+        }
+        if !self.explicit.background_image && self.background_image.is_none() {
+            if let Some(value) = config.background_image {
+                self.background_image = parse_background_image_value(&value, "background-image")?;
+                self.explicit.background_image = true;
             }
         }
         if !self.explicit.window_last_active_close_policy {
@@ -1436,7 +1496,7 @@ impl WittyrcConfigLoadStatus {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct NativeWindowConfig {
     #[serde(default)]
@@ -1453,6 +1513,10 @@ struct NativeWindowConfig {
     font_size: Option<u16>,
     #[serde(default)]
     terminal_padding: Option<u16>,
+    #[serde(default)]
+    background_opacity: Option<f32>,
+    #[serde(default)]
+    background_image: Option<PathBuf>,
     #[serde(default)]
     font_paths: Vec<PathBuf>,
     #[serde(default)]
@@ -1471,13 +1535,17 @@ struct NativeWindowConfig {
     window_rows: Option<u16>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct WittyrcConfig {
     #[serde(default, rename = "font-family")]
     font_family: Option<String>,
     #[serde(default, rename = "terminal-padding")]
     terminal_padding: Option<u16>,
+    #[serde(default, rename = "background-opacity")]
+    background_opacity: Option<f32>,
+    #[serde(default, rename = "background-image")]
+    background_image: Option<String>,
     #[serde(default, rename = "window-last-active-close")]
     window_last_active_close: Option<String>,
 }
@@ -1555,6 +1623,8 @@ fn native_window_config_template() -> String {
         "font_family": RECOMMENDED_TERMINAL_FONT_FAMILY,
         "font_size": 16,
         "terminal_padding": 0,
+        "background_opacity": 1.0,
+        "background_image": null,
         "window_title": "Witty",
         "program": null,
         "args": [],
@@ -1734,6 +1804,7 @@ fn native_window_effective_config_summary(
     wittyrc_load: &WittyrcConfigLoadReport,
 ) -> Result<String> {
     let font_config = renderer_font_config_for_options(options);
+    let visual_config = renderer_visual_config_for_options(options, None);
     let grid = options
         .window_smoke
         .initial_size
@@ -1786,6 +1857,11 @@ fn native_window_effective_config_summary(
         "font_family": font_config.family(),
         "font_size": font_config.font_size(),
         "terminal_padding": font_config.terminal_padding(),
+        "background_opacity": visual_config.background_opacity(),
+        "background_image": options
+            .background_image
+            .as_ref()
+            .map(|path| path.display().to_string()),
         "font_source_count": options.font_paths.len(),
         "window_cols": grid.cols,
         "window_rows": grid.rows,
@@ -1806,6 +1882,7 @@ fn wittyrc_effective_config_summary(
     window_config_load: &NativeWindowConfigLoadReport,
 ) -> Result<String> {
     let font_config = renderer_font_config_for_options(options);
+    let visual_config = renderer_visual_config_for_options(options, None);
     let value = serde_json::json!({
         "event": "witty.wittyrc_effective",
         "opens_window": false,
@@ -1830,6 +1907,11 @@ fn wittyrc_effective_config_summary(
         "font_family": font_config.family(),
         "font_size": font_config.font_size(),
         "terminal_padding": font_config.terminal_padding(),
+        "background_opacity": visual_config.background_opacity(),
+        "background_image": options
+            .background_image
+            .as_ref()
+            .map(|path| path.display().to_string()),
         "font_source_count": options.font_paths.len(),
         "window_last_active_close": options.window_smoke.last_active_close_policy.as_config_value(),
     });
@@ -1850,6 +1932,17 @@ fn renderer_font_config_for_options(options: &AppOptions) -> RendererFontConfig 
         Some(padding) => config.with_terminal_padding(f32::from(padding)),
         None => config,
     }
+}
+
+fn renderer_visual_config_for_options(
+    options: &AppOptions,
+    background_image: Option<witty_render_wgpu::RendererBackgroundImage>,
+) -> RendererVisualConfig {
+    let config = match options.background_opacity {
+        Some(opacity) => RendererVisualConfig::default().with_background_opacity(opacity),
+        None => RendererVisualConfig::default(),
+    };
+    config.with_background_image(background_image)
 }
 
 fn set_profile_store_command(
@@ -2189,6 +2282,42 @@ fn validate_terminal_padding(padding: u16, name: &str) -> Result<u16> {
         bail!("{name} must be between {MIN_TERMINAL_PADDING} and {MAX_TERMINAL_PADDING}");
     }
     Ok(padding)
+}
+
+fn parse_background_opacity(value: &str, name: &str) -> Result<f32> {
+    let opacity = value
+        .parse::<f32>()
+        .with_context(|| format!("{name} must be a number between 0.0 and 1.0"))?;
+    validate_background_opacity(opacity, name)
+}
+
+fn validate_background_opacity(opacity: f32, name: &str) -> Result<f32> {
+    if !opacity.is_finite() || !(MIN_BACKGROUND_OPACITY..=MAX_BACKGROUND_OPACITY).contains(&opacity)
+    {
+        bail!("{name} must be between {MIN_BACKGROUND_OPACITY} and {MAX_BACKGROUND_OPACITY}");
+    }
+    Ok(opacity)
+}
+
+fn parse_background_image_value(value: &str, name: &str) -> Result<Option<PathBuf>> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("{name} cannot be empty");
+    }
+    if value.eq_ignore_ascii_case("null") || value.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    Ok(Some(validate_background_image_path(
+        PathBuf::from(value),
+        name,
+    )?))
+}
+
+fn validate_background_image_path(path: PathBuf, name: &str) -> Result<PathBuf> {
+    if path.as_os_str().is_empty() || path.to_string_lossy().trim().is_empty() {
+        bail!("{name} cannot be empty");
+    }
+    expand_cwd_home_path(path, name, || env::var_os("HOME"))
 }
 
 fn parse_window_cols(value: &str, name: &str) -> Result<u16> {
@@ -3137,6 +3266,8 @@ mod tests {
         assert_eq!(options.font_family, None);
         assert_eq!(options.font_size, None);
         assert_eq!(options.terminal_padding, None);
+        assert_eq!(options.background_opacity, None);
+        assert_eq!(options.background_image, None);
         assert!(options.font_paths.is_empty());
         assert!(options.launcher_args.is_empty());
         assert_eq!(
@@ -3447,6 +3578,10 @@ mod tests {
             "16".to_owned(),
             "--terminal-padding".to_owned(),
             "8".to_owned(),
+            "--background-opacity".to_owned(),
+            "0.82".to_owned(),
+            "--background-image".to_owned(),
+            "~/Pictures/witty.png".to_owned(),
             "--font-path".to_owned(),
             "/fonts/JetBrainsMonoNerdFont-Regular.ttf".to_owned(),
             "--font-path".to_owned(),
@@ -3467,6 +3602,14 @@ mod tests {
         );
         assert_eq!(options.font_size, Some(16));
         assert_eq!(options.terminal_padding, Some(8));
+        assert_eq!(options.background_opacity, Some(0.82));
+        assert_eq!(
+            options.background_image,
+            Some(PathBuf::from(
+                env::var_os("HOME").expect("HOME should be set for background image test")
+            )
+            .join("Pictures/witty.png"))
+        );
         assert_eq!(
             options.font_paths,
             vec![
@@ -3503,6 +3646,8 @@ mod tests {
             font_family: Some("  Hack Nerd Font  ".to_owned()),
             font_size: Some(18),
             terminal_padding: Some(6),
+            background_opacity: Some(0.75),
+            background_image: Some(PathBuf::from("/images/witty.png")),
             font_paths: vec![
                 PathBuf::from("/fonts/HackNerdFont-Regular.ttf"),
                 PathBuf::from("/fonts/SymbolsNerdFontMono-Regular.ttf"),
@@ -3537,6 +3682,11 @@ mod tests {
         assert_eq!(options.font_family.as_deref(), Some("Hack Nerd Font"));
         assert_eq!(options.font_size, Some(18));
         assert_eq!(options.terminal_padding, Some(6));
+        assert_eq!(options.background_opacity, Some(0.75));
+        assert_eq!(
+            options.background_image.as_deref(),
+            Some(Path::new("/images/witty.png"))
+        );
         assert_eq!(
             options.font_paths,
             vec![
@@ -3587,6 +3737,10 @@ mod tests {
                 "16",
                 "--terminal-padding",
                 "2",
+                "--background-opacity",
+                "0.9",
+                "--background-image",
+                "null",
                 "--cwd",
                 "/cli/project",
                 "--env",
@@ -3616,6 +3770,8 @@ mod tests {
             font_family: Some("Hack Nerd Font".to_owned()),
             font_size: Some(18),
             terminal_padding: Some(8),
+            background_opacity: Some(0.7),
+            background_image: Some(PathBuf::from("/config/background.png")),
             font_paths: vec![PathBuf::from("/config/Hack.ttf")],
             cwd: Some(PathBuf::from("/config/project")),
             scrollback_lines: Some(50000),
@@ -3653,6 +3809,8 @@ mod tests {
         assert_eq!(options.cwd.as_deref(), Some(Path::new("/cli/project")));
         assert_eq!(options.font_size, Some(16));
         assert_eq!(options.terminal_padding, Some(2));
+        assert_eq!(options.background_opacity, Some(0.9));
+        assert_eq!(options.background_image, None);
         assert_eq!(
             options.mouse_selection_override,
             MouseSelectionOverridePolicy::ShiftSelect
@@ -3686,6 +3844,8 @@ mod tests {
         assert_eq!(options.font_family, None);
         assert_eq!(options.font_size, None);
         assert_eq!(options.terminal_padding, None);
+        assert_eq!(options.background_opacity, None);
+        assert_eq!(options.background_image, None);
         assert!(options.font_paths.is_empty());
         assert_eq!(options.cwd, None);
         assert_eq!(options.window_title, None);
@@ -3710,8 +3870,12 @@ mod tests {
             Some("close-window")
         );
         assert_eq!(config.terminal_padding, Some(0));
+        assert_eq!(config.background_opacity, Some(1.0));
+        assert_eq!(config.background_image.as_deref(), Some("null"));
         assert!(template.contains("font-family = \"Maple Mono NF CN\""));
         assert!(template.contains("terminal-padding = 0"));
+        assert!(template.contains("background-opacity = 1.0"));
+        assert!(template.contains("background-image = \"null\""));
         assert!(template.contains("window-last-active-close = \"close-window\""));
         assert!(template.ends_with('\n'));
     }
@@ -3737,7 +3901,9 @@ mod tests {
         std::fs::write(
             &config_path,
             r#"font-family = "Maple Mono NF CN"
-terminal-padding = 4"#,
+terminal-padding = 4
+background-opacity = 0.8
+background-image = "/images/witty.png""#,
         )
         .unwrap();
         std::fs::write(&unknown_path, r#"font_family = "Maple Mono NF CN""#).unwrap();
@@ -3748,6 +3914,8 @@ terminal-padding = 4"#,
             Some(RECOMMENDED_TERMINAL_FONT_FAMILY)
         );
         assert_eq!(config.terminal_padding, Some(4));
+        assert_eq!(config.background_opacity, Some(0.8));
+        assert_eq!(config.background_image.as_deref(), Some("/images/witty.png"));
         assert_eq!(config.window_last_active_close, None);
         assert!(read_wittyrc_config(&root.join("missing.wittyrc"))
             .unwrap()
@@ -3779,6 +3947,8 @@ terminal-padding = 4"#,
                     Ok(Some(WittyrcConfig {
                         font_family: Some("Maple Mono NF CN".to_owned()),
                         terminal_padding: Some(4),
+                        background_opacity: Some(0.6),
+                        background_image: Some("/wittyrc/background.png".to_owned()),
                         window_last_active_close: Some("block".to_owned()),
                     }))
                 },
@@ -3794,6 +3964,8 @@ terminal-padding = 4"#,
                         font_family: Some("Hack Nerd Font".to_owned()),
                         font_size: Some(18),
                         terminal_padding: Some(8),
+                        background_opacity: Some(0.8),
+                        background_image: Some(PathBuf::from("/window/background.png")),
                         window_last_active_close: Some("close-window".to_owned()),
                         ..NativeWindowConfig::default()
                     }))
@@ -3809,6 +3981,11 @@ terminal-padding = 4"#,
         );
         assert_eq!(options.font_size, Some(18));
         assert_eq!(options.terminal_padding, Some(4));
+        assert_eq!(options.background_opacity, Some(0.6));
+        assert_eq!(
+            options.background_image.as_deref(),
+            Some(Path::new("/wittyrc/background.png"))
+        );
         assert_eq!(
             options.window_smoke.last_active_close_policy,
             WindowLastActiveClosePolicy::Block
@@ -3829,6 +4006,8 @@ terminal-padding = 4"#,
                     Ok(Some(WittyrcConfig {
                         font_family: Some("Maple Mono NF CN".to_owned()),
                         terminal_padding: Some(5),
+                        background_opacity: Some(0.7),
+                        background_image: Some("none".to_owned()),
                         ..WittyrcConfig::default()
                     }))
                 },
@@ -3840,6 +4019,8 @@ terminal-padding = 4"#,
             Some("JetBrainsMono Nerd Font")
         );
         assert_eq!(env_options.terminal_padding, Some(5));
+        assert_eq!(env_options.background_opacity, Some(0.7));
+        assert_eq!(env_options.background_image, None);
     }
 
     #[test]
@@ -3973,6 +4154,8 @@ terminal-padding = 4"#,
                 "/configs/window.v1.json",
                 "--font-size",
                 "18",
+                "--background-opacity",
+                "0.65",
             ],
             vec![],
         )
@@ -3998,6 +4181,8 @@ terminal-padding = 4"#,
                         font_family: Some("Hack Nerd Font".to_owned()),
                         font_size: Some(16),
                         terminal_padding: Some(3),
+                        background_opacity: Some(0.9),
+                        background_image: Some(PathBuf::from("/window/background.png")),
                         ..NativeWindowConfig::default()
                     }))
                 },
@@ -4021,6 +4206,8 @@ terminal-padding = 4"#,
         assert_eq!(json["font_family"], RECOMMENDED_TERMINAL_FONT_FAMILY);
         assert_eq!(json["font_size"], 18);
         assert_eq!(json["terminal_padding"], 7.0);
+        assert!((json["background_opacity"].as_f64().unwrap() - 0.65).abs() < 0.001);
+        assert_eq!(json["background_image"], "/window/background.png");
     }
 
     #[test]
@@ -4037,6 +4224,8 @@ terminal-padding = 4"#,
         );
         assert_eq!(options.font_size, Some(16));
         assert_eq!(options.terminal_padding, Some(0));
+        assert_eq!(options.background_opacity, Some(1.0));
+        assert_eq!(options.background_image, None);
         assert_eq!(options.window_title.as_deref(), Some("Witty"));
         assert_eq!(options.program, None);
         assert!(options.args.is_empty());
@@ -4182,6 +4371,8 @@ terminal-padding = 4"#,
                     font_family: Some("JetBrainsMono Nerd Font".to_owned()),
                     font_size: Some(16),
                     terminal_padding: Some(8),
+                    background_opacity: Some(0.85),
+                    background_image: Some(PathBuf::from("/candidate/background.png")),
                     font_paths: vec![PathBuf::from("/missing/SymbolsNerdFontMono.ttf")],
                     cwd: Some(PathBuf::from("/work/project")),
                     scrollback_lines: Some(20000),
@@ -4233,6 +4424,8 @@ terminal-padding = 4"#,
                 "/configs/window.v1.json",
                 "--font-size",
                 "18",
+                "--background-image",
+                "/cli/background.png",
                 "--env",
                 "TOKEN=secret-token",
                 "--cwd",
@@ -4262,6 +4455,8 @@ terminal-padding = 4"#,
                         font_family: Some("Config Font".to_owned()),
                         font_size: Some(16),
                         terminal_padding: Some(8),
+                        background_opacity: Some(0.78),
+                        background_image: Some(PathBuf::from("/config/background.png")),
                         font_paths: vec![PathBuf::from("/fonts/Symbols.ttf")],
                         cwd: Some(PathBuf::from("/config/project")),
                         scrollback_lines: Some(20000),
@@ -4302,6 +4497,8 @@ terminal-padding = 4"#,
         assert_eq!(json["font_family"], "JetBrainsMono Nerd Font");
         assert_eq!(json["font_size"], 18);
         assert_eq!(json["terminal_padding"], 8.0);
+        assert!((json["background_opacity"].as_f64().unwrap() - 0.78).abs() < 0.001);
+        assert_eq!(json["background_image"], "/cli/background.png");
         assert_eq!(json["font_source_count"], 1);
         assert_eq!(json["window_cols"], 100);
         assert_eq!(json["window_rows"], 36);
@@ -4427,6 +4624,10 @@ terminal-padding = 4"#,
                 terminal_padding: Some(MAX_TERMINAL_PADDING + 1),
                 ..NativeWindowConfig::default()
             },
+            NativeWindowConfig {
+                background_opacity: Some(1.1),
+                ..NativeWindowConfig::default()
+            },
         ] {
             let mut options = AppOptions::parse([
                 "--window".to_owned(),
@@ -4502,6 +4703,8 @@ terminal-padding = 4"#,
                 "font_family": "Hack Nerd Font",
                 "font_size": 18,
                 "terminal_padding": 4,
+                "background_opacity": 0.84,
+                "background_image": "/images/background.png",
                 "font_paths": ["/fonts/Hack.ttf"],
                 "cwd": "/work/project",
                 "scrollback_lines": 12000,
@@ -4529,6 +4732,11 @@ terminal-padding = 4"#,
         assert_eq!(config.font_family.as_deref(), Some("Hack Nerd Font"));
         assert_eq!(config.font_size, Some(18));
         assert_eq!(config.terminal_padding, Some(4));
+        assert_eq!(config.background_opacity, Some(0.84));
+        assert_eq!(
+            config.background_image.as_deref(),
+            Some(Path::new("/images/background.png"))
+        );
         assert_eq!(config.font_paths, vec![PathBuf::from("/fonts/Hack.ttf")]);
         assert_eq!(config.cwd.as_deref(), Some(Path::new("/work/project")));
         assert_eq!(config.scrollback_lines, Some(12000));
@@ -6144,6 +6352,8 @@ Host prod
         assert!(AppOptions::parse(["--font-family".to_owned()]).is_err());
         assert!(AppOptions::parse(["--font-size".to_owned()]).is_err());
         assert!(AppOptions::parse(["--terminal-padding".to_owned()]).is_err());
+        assert!(AppOptions::parse(["--background-opacity".to_owned()]).is_err());
+        assert!(AppOptions::parse(["--background-image".to_owned()]).is_err());
         assert!(AppOptions::parse(["--font-path".to_owned()]).is_err());
         assert!(AppOptions::parse(["--window-cols".to_owned()]).is_err());
         assert!(AppOptions::parse(["--window-rows".to_owned()]).is_err());
@@ -6161,6 +6371,12 @@ Host prod
         );
         assert!(AppOptions::parse(["--font-size".to_owned(), "16".to_owned()]).is_err());
         assert!(AppOptions::parse(["--terminal-padding".to_owned(), "8".to_owned()]).is_err());
+        assert!(AppOptions::parse(["--background-opacity".to_owned(), "0.8".to_owned()]).is_err());
+        assert!(AppOptions::parse([
+            "--background-image".to_owned(),
+            "/images/witty.png".to_owned()
+        ])
+        .is_err());
         assert!(
             AppOptions::parse(["--font-path".to_owned(), "/fonts/Hack.ttf".to_owned()]).is_err()
         );
@@ -6214,6 +6430,40 @@ Host prod
             "4".to_owned(),
             "--terminal-padding".to_owned(),
             "8".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--window".to_owned(),
+            "--background-opacity".to_owned(),
+            "clear".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--window".to_owned(),
+            "--background-opacity".to_owned(),
+            "1.2".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--window".to_owned(),
+            "--background-opacity".to_owned(),
+            "0.6".to_owned(),
+            "--background-opacity".to_owned(),
+            "0.8".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--window".to_owned(),
+            "--background-image".to_owned(),
+            "   ".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--window".to_owned(),
+            "--background-image".to_owned(),
+            "/images/one.png".to_owned(),
+            "--background-image".to_owned(),
+            "/images/two.png".to_owned(),
         ])
         .is_err());
         assert!(AppOptions::parse([

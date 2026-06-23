@@ -19,6 +19,8 @@ const DEFAULT_TERMINAL_LINE_HEIGHT: f32 = 18.0;
 const DEFAULT_TERMINAL_CELL_WIDTH: f32 = 9.0;
 const DEFAULT_TERMINAL_PADDING: PixelPoint = PixelPoint { x: 0.0, y: 0.0 };
 const DEFAULT_SURFACE_CLEAR_COLOR: Rgba = Rgba::BLACK;
+const TRANSPARENT_SURFACE_CLEAR_COLOR: Rgba = Rgba::with_alpha(0, 0, 0, 0);
+const DEFAULT_BACKGROUND_OPACITY: f32 = 1.0;
 const BASELINE_SHIFT_FONT_SCALE: f32 = 0.72;
 const MAX_GLYPHON_TEXT_AREA_CHARS: usize = 120;
 const MAX_GLYPHON_RENDERER_CHARS: usize = 120;
@@ -1253,14 +1255,44 @@ impl Vertex {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct ImageVertex {
+    position: [f32; 2],
+    tex_coord: [f32; 2],
+}
+
+impl ImageVertex {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 2] =
+        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2];
+
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Self::ATTRIBUTES,
+        }
+    }
+}
+
+struct BackgroundImageTexture {
+    bind_group: wgpu::BindGroup,
+    width: u32,
+    height: u32,
+}
+
 pub struct WgpuRectRenderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    background_image_pipeline: wgpu::RenderPipeline,
+    background_image_texture: Option<BackgroundImageTexture>,
+    background_image_vertex_buffer: Option<wgpu::Buffer>,
     font_system: FontSystem,
     font_config: RendererFontConfig,
+    visual_config: RendererVisualConfig,
     swash_cache: SwashCache,
     text_atlas: TextAtlas,
     text_renderers: Vec<TextRenderer>,
@@ -1342,6 +1374,90 @@ impl RendererFontConfig {
 impl Default for RendererFontConfig {
     fn default() -> Self {
         Self::new(None)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RendererBackgroundImage {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+}
+
+impl RendererBackgroundImage {
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        let rgba = image::load_from_memory(bytes)
+            .context("decode renderer background image")?
+            .to_rgba8();
+        let (width, height) = rgba.dimensions();
+        Ok(Self {
+            width,
+            height,
+            rgba: rgba.into_raw(),
+        })
+    }
+
+    pub fn from_rgba8(width: u32, height: u32, rgba: Vec<u8>) -> Result<Self> {
+        let expected_len = width as usize * height as usize * 4;
+        if width == 0 || height == 0 || rgba.len() != expected_len {
+            anyhow::bail!("background image rgba buffer size does not match dimensions");
+        }
+        Ok(Self {
+            width,
+            height,
+            rgba,
+        })
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RendererVisualConfig {
+    background_opacity: f32,
+    background_image: Option<RendererBackgroundImage>,
+}
+
+impl RendererVisualConfig {
+    pub fn new() -> Self {
+        Self {
+            background_opacity: DEFAULT_BACKGROUND_OPACITY,
+            background_image: None,
+        }
+    }
+
+    pub fn with_background_opacity(mut self, opacity: f32) -> Self {
+        self.background_opacity = sane_background_opacity(opacity);
+        self
+    }
+
+    pub fn with_background_image(mut self, image: Option<RendererBackgroundImage>) -> Self {
+        self.background_image = image;
+        self
+    }
+
+    pub fn background_opacity(&self) -> f32 {
+        self.background_opacity
+    }
+
+    pub fn has_background_image(&self) -> bool {
+        self.background_image.is_some()
+    }
+
+    pub fn requires_window_transparency(&self) -> bool {
+        self.background_opacity < 1.0 && self.background_image.is_none()
+    }
+}
+
+impl Default for RendererVisualConfig {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1437,6 +1553,31 @@ impl WgpuRectRenderer {
         font_config: RendererFontConfig,
         font_data: Vec<Vec<u8>>,
     ) -> Result<Self> {
+        Self::new_with_font_config_data_and_visual(
+            surface_target,
+            width,
+            height,
+            font_config,
+            font_data,
+            RendererVisualConfig::default(),
+        )
+        .await
+    }
+
+    pub async fn new_with_font_config_data_and_visual(
+        surface_target: impl Into<wgpu::SurfaceTarget<'static>>
+            + wgpu::rwh::HasDisplayHandle
+            + Debug
+            + Send
+            + Sync
+            + Clone
+            + 'static,
+        width: u32,
+        height: u32,
+        font_config: RendererFontConfig,
+        font_data: Vec<Vec<u8>>,
+        visual_config: RendererVisualConfig,
+    ) -> Result<Self> {
         let mut instance_descriptor =
             wgpu::InstanceDescriptor::new_with_display_handle(Box::new(surface_target.clone()));
         instance_descriptor.backends = native_wgpu_backends();
@@ -1447,6 +1588,7 @@ impl WgpuRectRenderer {
             height,
             font_sources_from_data(font_data),
             font_config,
+            visual_config,
         )
         .await
     }
@@ -1457,11 +1599,14 @@ impl WgpuRectRenderer {
         width: u32,
         height: u32,
     ) -> Result<Self> {
-        Self::from_surface_target(
+        Self::from_surface_target_with_fonts(
             wasm_instance_descriptor(),
             wgpu::SurfaceTarget::Canvas(canvas),
             width,
             height,
+            Vec::new(),
+            RendererFontConfig::default(),
+            RendererVisualConfig::default(),
         )
         .await
     }
@@ -1480,6 +1625,7 @@ impl WgpuRectRenderer {
             height,
             font_sources_from_data(vec![font_data]),
             RendererFontConfig::default(),
+            RendererVisualConfig::default(),
         )
         .await
     }
@@ -1491,6 +1637,7 @@ impl WgpuRectRenderer {
         height: u32,
         font_sources: Vec<fontdb::Source>,
         font_config: RendererFontConfig,
+        visual_config: RendererVisualConfig,
     ) -> Result<Self> {
         let instance = wgpu::Instance::new(instance_descriptor);
         let surface = instance
@@ -1518,12 +1665,31 @@ impl WgpuRectRenderer {
             .await
             .context("failed to create wgpu device")?;
 
-        let config = surface
+        let mut config = surface
             .get_default_config(&adapter, width.max(1), height.max(1))
             .context("failed to create default surface config")?;
+        if visual_config.requires_window_transparency() {
+            let capabilities = surface.get_capabilities(&adapter);
+            config.alpha_mode = transparent_surface_alpha_mode(&capabilities.alpha_modes);
+        }
         surface.configure(&device, &config);
 
         let pipeline = create_pipeline(&device, config.format);
+        let background_image_bind_group_layout =
+            create_background_image_bind_group_layout(&device);
+        let background_image_pipeline =
+            create_background_image_pipeline(&device, config.format, &background_image_bind_group_layout);
+        let background_image_sampler = create_background_image_sampler(&device);
+        let background_image_texture = match visual_config.background_image.as_ref() {
+            Some(image) => Some(create_background_image_texture(
+                &device,
+                &queue,
+                &background_image_bind_group_layout,
+                &background_image_sampler,
+                image,
+            )),
+            None => None,
+        };
         let text_cache = Cache::new(&device);
         let viewport = Viewport::new(&device, &text_cache);
         let mut text_atlas = TextAtlas::new(&device, &queue, &text_cache, config.format);
@@ -1540,8 +1706,12 @@ impl WgpuRectRenderer {
             queue,
             config,
             pipeline,
+            background_image_pipeline,
+            background_image_texture,
+            background_image_vertex_buffer: None,
             font_system: font_system_with_sources(font_sources),
             font_config,
+            visual_config,
             swash_cache: SwashCache::new(),
             text_atlas,
             text_renderers: vec![text_renderer],
@@ -1642,6 +1812,8 @@ impl WgpuRectRenderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let rect_vertex_sync_timer = RenderTimer::start();
+        let background_image_vertices = self.background_image_vertices();
+        self.sync_background_image_vertex_buffer(&background_image_vertices);
         let vertices = self.vertices_for_frame(frame);
         self.sync_rect_vertex_buffer(&vertices);
         let rect_vertex_sync_us = rect_vertex_sync_timer.elapsed_us();
@@ -1655,6 +1827,7 @@ impl WgpuRectRenderer {
             });
 
         {
+            let clear_color = surface_clear_color_for_visual(&self.visual_config);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Witty static render pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1662,12 +1835,22 @@ impl WgpuRectRenderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu_clear_color(DEFAULT_SURFACE_CLEAR_COLOR)),
+                        load: wgpu::LoadOp::Clear(wgpu_clear_color(clear_color)),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
                 ..Default::default()
             });
+
+            if let (Some(image), Some(vertex_buffer)) = (
+                self.background_image_texture.as_ref(),
+                self.background_image_vertex_buffer.as_ref(),
+            ) {
+                pass.set_pipeline(&self.background_image_pipeline);
+                pass.set_bind_group(0, &image.bind_group, &[]);
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                pass.draw(0..background_image_vertices.len() as u32, 0..1);
+            }
 
             if !vertices.is_empty() {
                 let vertex_buffer = self
@@ -1704,10 +1887,21 @@ impl WgpuRectRenderer {
 
     fn vertices_for_frame(&self, frame: &FramePlan) -> Vec<Vertex> {
         let mut vertices = Vec::new();
+        for rect in frame.backgrounds.iter() {
+            push_rect_vertices(
+                &mut vertices,
+                rect.origin.x,
+                rect.origin.y,
+                rect.size.width,
+                rect.size.height,
+                color_with_opacity(rect.color, self.visual_config.background_opacity),
+                self.config.width as f32,
+                self.config.height as f32,
+            );
+        }
         for rect in frame
-            .backgrounds
+            .search_highlights
             .iter()
-            .chain(frame.search_highlights.iter())
             .chain(frame.selection.iter())
             .chain(frame.hyperlink_hover.iter())
             .chain(frame.hyperlink_underlines.iter())
@@ -1727,6 +1921,40 @@ impl WgpuRectRenderer {
             );
         }
         vertices
+    }
+
+    fn background_image_vertices(&self) -> Vec<ImageVertex> {
+        let Some(image) = self.background_image_texture.as_ref() else {
+            return Vec::new();
+        };
+        background_image_cover_vertices(
+            self.config.width as f32,
+            self.config.height as f32,
+            image.width as f32,
+            image.height as f32,
+        )
+        .to_vec()
+    }
+
+    fn sync_background_image_vertex_buffer(&mut self, vertices: &[ImageVertex]) {
+        if vertices.is_empty() {
+            return;
+        }
+
+        if self.background_image_vertex_buffer.is_none() {
+            self.background_image_vertex_buffer =
+                Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Witty background image vertex cache"),
+                    size: (IMAGE_VERTICES * std::mem::size_of::<ImageVertex>()) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+        }
+
+        if let Some(buffer) = &self.background_image_vertex_buffer {
+            self.queue
+                .write_buffer(buffer, 0, bytemuck::cast_slice(vertices));
+        }
     }
 
     fn sync_rect_vertex_buffer(&mut self, vertices: &[Vertex]) {
@@ -1834,6 +2062,14 @@ fn sane_terminal_padding(padding: f32) -> f32 {
         padding
     } else {
         DEFAULT_TERMINAL_PADDING.x
+    }
+}
+
+fn sane_background_opacity(opacity: f32) -> f32 {
+    if opacity.is_finite() {
+        opacity.clamp(0.0, 1.0)
+    } else {
+        DEFAULT_BACKGROUND_OPACITY
     }
 }
 
@@ -2151,6 +2387,144 @@ fn create_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::
     })
 }
 
+fn create_background_image_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Witty background image bind group layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
+}
+
+fn create_background_image_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    bind_group_layout: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Witty background image shader"),
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("background_image.wgsl"))),
+    });
+
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Witty background image pipeline layout"),
+        bind_group_layouts: &[Some(bind_group_layout)],
+        immediate_size: 0,
+    });
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Witty background image pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[ImageVertex::desc()],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::all(),
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn create_background_image_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("Witty background image sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    })
+}
+
+fn create_background_image_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    bind_group_layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    image: &RendererBackgroundImage,
+) -> BackgroundImageTexture {
+    let size = wgpu::Extent3d {
+        width: image.width,
+        height: image.height,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Witty background image texture"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &image.rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(image.width * 4),
+            rows_per_image: Some(image.height),
+        },
+        size,
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Witty background image bind group"),
+        layout: bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    });
+
+    BackgroundImageTexture {
+        bind_group,
+        width: image.width,
+        height: image.height,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_rect_vertices(
     vertices: &mut Vec<Vertex>,
@@ -2202,6 +2576,67 @@ fn rect_vertex_capacity_for_len(required: usize) -> usize {
     required.max(RECT_VERTICES).next_power_of_two()
 }
 
+const IMAGE_VERTICES: usize = 6;
+
+fn background_image_cover_vertices(
+    surface_width: f32,
+    surface_height: f32,
+    image_width: f32,
+    image_height: f32,
+) -> [ImageVertex; IMAGE_VERTICES] {
+    let (u0, v0, u1, v1) =
+        background_image_cover_uv(surface_width, surface_height, image_width, image_height);
+    [
+        ImageVertex {
+            position: [-1.0, 1.0],
+            tex_coord: [u0, v0],
+        },
+        ImageVertex {
+            position: [-1.0, -1.0],
+            tex_coord: [u0, v1],
+        },
+        ImageVertex {
+            position: [1.0, -1.0],
+            tex_coord: [u1, v1],
+        },
+        ImageVertex {
+            position: [-1.0, 1.0],
+            tex_coord: [u0, v0],
+        },
+        ImageVertex {
+            position: [1.0, -1.0],
+            tex_coord: [u1, v1],
+        },
+        ImageVertex {
+            position: [1.0, 1.0],
+            tex_coord: [u1, v0],
+        },
+    ]
+}
+
+fn background_image_cover_uv(
+    surface_width: f32,
+    surface_height: f32,
+    image_width: f32,
+    image_height: f32,
+) -> (f32, f32, f32, f32) {
+    if surface_width <= 0.0 || surface_height <= 0.0 || image_width <= 0.0 || image_height <= 0.0 {
+        return (0.0, 0.0, 1.0, 1.0);
+    }
+
+    let surface_aspect = surface_width / surface_height;
+    let image_aspect = image_width / image_height;
+    if image_aspect > surface_aspect {
+        let visible_width = surface_aspect / image_aspect;
+        let u0 = (1.0 - visible_width) * 0.5;
+        (u0, 0.0, 1.0 - u0, 1.0)
+    } else {
+        let visible_height = image_aspect / surface_aspect;
+        let v0 = (1.0 - visible_height) * 0.5;
+        (0.0, v0, 1.0, 1.0 - v0)
+    }
+}
+
 fn pixel_x_to_ndc(x: f32, surface_width: f32) -> f32 {
     (x / surface_width) * 2.0 - 1.0
 }
@@ -2219,6 +2654,19 @@ fn rgba_to_linear(color: Rgba) -> [f32; 4] {
     ]
 }
 
+fn color_with_opacity(color: Rgba, opacity: f32) -> Rgba {
+    let alpha = (f32::from(color.a) * sane_background_opacity(opacity)).round() as u8;
+    Rgba { a: alpha, ..color }
+}
+
+fn surface_clear_color_for_visual(config: &RendererVisualConfig) -> Rgba {
+    if config.background_opacity < 1.0 || config.background_image.is_some() {
+        TRANSPARENT_SURFACE_CLEAR_COLOR
+    } else {
+        DEFAULT_SURFACE_CLEAR_COLOR
+    }
+}
+
 fn wgpu_clear_color(color: Rgba) -> wgpu::Color {
     let [r, g, b, a] = rgba_to_linear(color);
     wgpu::Color {
@@ -2227,6 +2675,19 @@ fn wgpu_clear_color(color: Rgba) -> wgpu::Color {
         b: f64::from(b),
         a: f64::from(a),
     }
+}
+
+fn transparent_surface_alpha_mode(modes: &[wgpu::CompositeAlphaMode]) -> wgpu::CompositeAlphaMode {
+    [
+        wgpu::CompositeAlphaMode::PostMultiplied,
+        wgpu::CompositeAlphaMode::PreMultiplied,
+        wgpu::CompositeAlphaMode::Inherit,
+        wgpu::CompositeAlphaMode::Auto,
+        wgpu::CompositeAlphaMode::Opaque,
+    ]
+    .into_iter()
+    .find(|mode| modes.contains(mode))
+    .unwrap_or(wgpu::CompositeAlphaMode::Auto)
 }
 
 fn glyphon_color(color: Rgba) -> Color {
@@ -2266,13 +2727,77 @@ mod tests {
 
     #[test]
     fn surface_clear_color_matches_default_terminal_background() {
-        let clear = wgpu_clear_color(DEFAULT_SURFACE_CLEAR_COLOR);
+        let clear = wgpu_clear_color(surface_clear_color_for_visual(
+            &RendererVisualConfig::default(),
+        ));
 
         assert_eq!(DEFAULT_SURFACE_CLEAR_COLOR, CellStyle::default().background);
         assert_eq!(clear.r, 0.0);
         assert_eq!(clear.g, 0.0);
         assert_eq!(clear.b, 0.0);
         assert_eq!(clear.a, 1.0);
+    }
+
+    #[test]
+    fn transparent_visual_config_uses_transparent_surface_clear() {
+        let config = RendererVisualConfig::default().with_background_opacity(0.75);
+        let clear = surface_clear_color_for_visual(&config);
+
+        assert_eq!(clear, Rgba::with_alpha(0, 0, 0, 0));
+        assert!(config.requires_window_transparency());
+    }
+
+    #[test]
+    fn background_image_visual_config_does_not_require_desktop_transparency() {
+        let image = RendererBackgroundImage::from_rgba8(1, 1, vec![255, 0, 0, 255]).unwrap();
+        let config = RendererVisualConfig::default()
+            .with_background_opacity(0.75)
+            .with_background_image(Some(image));
+
+        assert!(config.has_background_image());
+        assert!(!config.requires_window_transparency());
+    }
+
+    #[test]
+    fn background_opacity_scales_rect_alpha() {
+        assert_eq!(
+            color_with_opacity(Rgba::with_alpha(10, 20, 30, 200), 0.5),
+            Rgba::with_alpha(10, 20, 30, 100)
+        );
+        assert_eq!(
+            color_with_opacity(Rgba::with_alpha(10, 20, 30, 200), 2.0),
+            Rgba::with_alpha(10, 20, 30, 200)
+        );
+    }
+
+    #[test]
+    fn background_image_cover_uv_crops_wider_or_taller_images() {
+        let wide = background_image_cover_uv(100.0, 100.0, 200.0, 100.0);
+        assert!((wide.0 - 0.25).abs() < 0.001);
+        assert_eq!(wide.1, 0.0);
+        assert!((wide.2 - 0.75).abs() < 0.001);
+        assert_eq!(wide.3, 1.0);
+
+        let tall = background_image_cover_uv(100.0, 100.0, 100.0, 200.0);
+        assert_eq!(tall.0, 0.0);
+        assert!((tall.1 - 0.25).abs() < 0.001);
+        assert_eq!(tall.2, 1.0);
+        assert!((tall.3 - 0.75).abs() < 0.001);
+    }
+
+    #[test]
+    fn transparent_surface_alpha_mode_prefers_postmultiplied_alpha() {
+        let mode = transparent_surface_alpha_mode(&[
+            wgpu::CompositeAlphaMode::Opaque,
+            wgpu::CompositeAlphaMode::PostMultiplied,
+            wgpu::CompositeAlphaMode::PreMultiplied,
+        ]);
+
+        assert_eq!(mode, wgpu::CompositeAlphaMode::PostMultiplied);
+        assert_eq!(
+            transparent_surface_alpha_mode(&[wgpu::CompositeAlphaMode::Opaque]),
+            wgpu::CompositeAlphaMode::Opaque
+        );
     }
 
     #[test]
@@ -2556,7 +3081,7 @@ mod tests {
         assert_eq!(frame.text_decorations.len(), 1);
         assert_eq!(
             frame.text_decorations[0].origin,
-            PixelPoint { x: 8.0, y: 25.0 }
+            PixelPoint { x: 0.0, y: 17.0 }
         );
         assert_eq!(
             frame.text_decorations[0].size,

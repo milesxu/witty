@@ -41,6 +41,7 @@ bytemuck = { version = "1.24", features = ["derive"] }
 console_error_panic_hook = "0.1"
 glyphon = "0.11"
 getrandom = "0.3"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 pollster = "0.4"
 portable-pty = "0.9"
 regex = "1.10"
