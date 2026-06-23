@@ -2,7 +2,10 @@ use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
     process,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -13,7 +16,7 @@ use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{
     ElementState, Ime, KeyEvent, Modifiers, MouseButton, MouseScrollDelta, WindowEvent,
 };
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, KeyLocation, ModifiersState, NamedKey, PhysicalKey};
 use winit::monitor::MonitorHandle;
 use winit::window::{Fullscreen, ImePurpose, Window, WindowAttributes, WindowId};
@@ -29,8 +32,8 @@ use witty_launcher::open_external_url;
 use witty_plugin_api::{CommandRegistration, PluginAction, PluginEvent};
 use witty_render_wgpu::{
     native_wgpu_backend_policy, CellMetrics, FramePlan, FramePlanner, FrameStats, GlyphBatchItem,
-    PixelPoint, PixelSize, RectBatchItem, RendererBackgroundImage, RendererFontConfig,
-    RendererVisualConfig, WgpuRectRenderer, DEFAULT_TERMINAL_FONT_SIZE,
+    PixelPoint, PixelSize, RectBatchItem, RendererBackgroundImage, RendererBackgroundImageFit,
+    RendererFontConfig, RendererVisualConfig, WgpuRectRenderer, DEFAULT_TERMINAL_FONT_SIZE,
 };
 use witty_ui::{
     apply_command_block_action_menu_overlay, apply_command_block_command,
@@ -103,6 +106,20 @@ pub struct WindowSmokeOptions {
     pub exit_after: Option<Duration>,
     pub last_active_close_policy: WindowLastActiveClosePolicy,
     pub initial_size: Option<GridSize>,
+}
+
+#[derive(Debug)]
+enum NativeWindowEvent {
+    BackgroundImageReady,
+}
+
+#[derive(Debug)]
+struct BackgroundImageLoadResult {
+    generation: u64,
+    path: PathBuf,
+    target_size: PhysicalSize<u32>,
+    image: Option<RendererBackgroundImage>,
+    elapsed: Duration,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2117,12 +2134,15 @@ pub fn run(
     terminal_padding: Option<u16>,
     background_opacity: Option<f32>,
     background_image_path: Option<PathBuf>,
+    background_image_fit: Option<RendererBackgroundImageFit>,
     font_paths: Vec<PathBuf>,
     restore_state: Option<RestartSnapshotV1>,
 ) -> anyhow::Result<()> {
     start_smoke_exit_timer(smoke.exit_after)?;
-    let event_loop = EventLoop::new()?;
+    let event_loop = EventLoop::<NativeWindowEvent>::with_user_event().build()?;
+    let event_loop_proxy = event_loop.create_proxy();
     let mut app = TerminalWindowApp::new(
+        Some(event_loop_proxy),
         wasm_plugins,
         smoke,
         default_window_title,
@@ -2138,6 +2158,7 @@ pub fn run(
         terminal_padding,
         background_opacity,
         background_image_path,
+        background_image_fit,
         font_paths,
         restore_state,
     )?;
@@ -2174,8 +2195,10 @@ fn load_window_font_data(font_paths: &[PathBuf]) -> Result<Vec<Vec<u8>>> {
         .collect()
 }
 
-fn load_window_background_image(path: Option<&Path>) -> Option<RendererBackgroundImage> {
-    let path = path?;
+fn load_window_background_image(
+    path: &Path,
+    target_size: PhysicalSize<u32>,
+) -> Option<RendererBackgroundImage> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(err) => {
@@ -2186,7 +2209,7 @@ fn load_window_background_image(path: Option<&Path>) -> Option<RendererBackgroun
             return None;
         }
     };
-    match RendererBackgroundImage::decode(&bytes) {
+    match RendererBackgroundImage::decode_cover_limited(&bytes, target_size.width, target_size.height) {
         Ok(image) => Some(image),
         Err(err) => {
             eprintln!(
@@ -2196,6 +2219,20 @@ fn load_window_background_image(path: Option<&Path>) -> Option<RendererBackgroun
             None
         }
     }
+}
+
+fn background_image_target_size(
+    event_loop: &ActiveEventLoop,
+    window_size: PhysicalSize<u32>,
+) -> PhysicalSize<u32> {
+    let mut width = window_size.width.max(1);
+    let mut height = window_size.height.max(1);
+    for monitor in event_loop.available_monitors() {
+        let size = monitor.size();
+        width = width.max(size.width);
+        height = height.max(size.height);
+    }
+    PhysicalSize::new(width, height)
 }
 
 fn local_pty_config_for_launch(
@@ -2886,6 +2923,7 @@ struct NativeEmptySessionWelcomeButtonSpan {
 }
 
 struct TerminalWindowApp {
+    event_loop_proxy: Option<EventLoopProxy<NativeWindowEvent>>,
     window: Option<Arc<Window>>,
     renderer: Option<WgpuRectRenderer>,
     app: TerminalApp<LocalPtyTransport>,
@@ -2950,6 +2988,13 @@ struct TerminalWindowApp {
     text_blink: TextBlinkState,
     font_config: RendererFontConfig,
     visual_config: RendererVisualConfig,
+    background_image_path: Option<PathBuf>,
+    background_image_target_size: Option<PhysicalSize<u32>>,
+    background_image_generation: u64,
+    background_image_load_pending: bool,
+    background_image_poll_reported: bool,
+    background_image_result_ready: Arc<AtomicBool>,
+    background_image_results: Arc<Mutex<Vec<BackgroundImageLoadResult>>>,
     font_data: Vec<Vec<u8>>,
     initial_window_size: Option<GridSize>,
     first_frame_reported: bool,
@@ -2959,6 +3004,7 @@ struct TerminalWindowApp {
 
 impl TerminalWindowApp {
     fn new(
+        event_loop_proxy: Option<EventLoopProxy<NativeWindowEvent>>,
         wasm_plugins: Vec<PathBuf>,
         smoke: WindowSmokeOptions,
         default_window_title: Option<String>,
@@ -2974,6 +3020,7 @@ impl TerminalWindowApp {
         terminal_padding: Option<u16>,
         background_opacity: Option<f32>,
         background_image_path: Option<PathBuf>,
+        background_image_fit: Option<RendererBackgroundImageFit>,
         font_paths: Vec<PathBuf>,
         restore_state: Option<RestartSnapshotV1>,
     ) -> Result<Self> {
@@ -3024,12 +3071,14 @@ impl TerminalWindowApp {
             Some(padding) => font_config.with_terminal_padding(f32::from(padding)),
             None => font_config,
         };
-        let background_image = load_window_background_image(background_image_path.as_deref());
         let visual_config = match background_opacity {
             Some(opacity) => RendererVisualConfig::default().with_background_opacity(opacity),
             None => RendererVisualConfig::default(),
-        }
-        .with_background_image(background_image);
+        };
+        let visual_config = match background_image_fit {
+            Some(fit) => visual_config.with_background_image_fit(fit),
+            None => visual_config,
+        };
         let metrics = font_config.cell_metrics();
         app.set_cell_metrics(metrics);
         let font_data = load_window_font_data(&font_paths)?;
@@ -3051,6 +3100,7 @@ impl TerminalWindowApp {
         update_monitor.schedule_next(started);
 
         let mut window_app = Self {
+            event_loop_proxy,
             window: None,
             renderer: None,
             app,
@@ -3115,6 +3165,13 @@ impl TerminalWindowApp {
             text_blink: TextBlinkState::default(),
             font_config,
             visual_config,
+            background_image_path,
+            background_image_target_size: None,
+            background_image_generation: 0,
+            background_image_load_pending: false,
+            background_image_poll_reported: false,
+            background_image_result_ready: Arc::new(AtomicBool::new(false)),
+            background_image_results: Arc::new(Mutex::new(Vec::new())),
             font_data,
             initial_window_size,
             first_frame_reported: false,
@@ -3426,6 +3483,212 @@ impl TerminalWindowApp {
         if changed {
             self.request_redraw();
         }
+    }
+
+    fn ensure_background_image_load(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_size: PhysicalSize<u32>,
+    ) {
+        if self.background_image_path.is_none() {
+            return;
+        }
+        let target_size = background_image_target_size(event_loop, window_size);
+        if self
+            .background_image_target_size
+            .is_some_and(|size| size.width >= target_size.width && size.height >= target_size.height)
+        {
+            return;
+        }
+        self.background_image_target_size = Some(target_size);
+        self.background_image_generation = self.background_image_generation.saturating_add(1);
+        let generation = self.background_image_generation;
+        let Some(path) = self.background_image_path.clone() else {
+            return;
+        };
+        let results = Arc::clone(&self.background_image_results);
+        let result_ready = Arc::clone(&self.background_image_result_ready);
+        let event_loop_proxy = self.event_loop_proxy.clone();
+        let window = self.window.as_ref().cloned();
+        self.background_image_load_pending = true;
+        self.background_image_poll_reported = false;
+        event_loop.set_control_flow(ControlFlow::Poll);
+        if self.report_startup {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "witty.background_image_load_started",
+                    "path": path.display().to_string(),
+                    "target_width": target_size.width,
+                    "target_height": target_size.height,
+                })
+            );
+        }
+        let report_startup = self.report_startup;
+
+        thread::spawn(move || {
+            let started = Instant::now();
+            let image = load_window_background_image(&path, target_size);
+            if report_startup {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "event": "witty.background_image_decoded",
+                        "path": path.display().to_string(),
+                        "loaded": image.is_some(),
+                        "target_width": target_size.width,
+                        "target_height": target_size.height,
+                        "image_width": image.as_ref().map(RendererBackgroundImage::width),
+                        "image_height": image.as_ref().map(RendererBackgroundImage::height),
+                        "elapsed_ms": started.elapsed().as_millis(),
+                    })
+                );
+            }
+            let result = BackgroundImageLoadResult {
+                generation,
+                path,
+                target_size,
+                image,
+                elapsed: started.elapsed(),
+            };
+            match results.lock() {
+                Ok(mut results) => {
+                    results.push(result);
+                    result_ready.store(true, Ordering::Release);
+                    if report_startup {
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({
+                                "event": "witty.background_image_result_stored",
+                            })
+                        );
+                    }
+                    if let Some(proxy) = event_loop_proxy {
+                        if let Err(err) = proxy.send_event(NativeWindowEvent::BackgroundImageReady)
+                        {
+                            if report_startup {
+                                eprintln!(
+                                    "{}",
+                                    serde_json::json!({
+                                        "event": "witty.background_image_ready_dispatch_failed",
+                                        "error": format!("{err:?}"),
+                                    })
+                                );
+                            }
+                        } else if report_startup {
+                            eprintln!(
+                                "{}",
+                                serde_json::json!({
+                                    "event": "witty.background_image_ready_dispatched",
+                                })
+                            );
+                        }
+                    }
+                }
+                Err(err) if report_startup => {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "event": "witty.background_image_result_store_failed",
+                            "error": err.to_string(),
+                        })
+                    );
+                }
+                Err(_) => {}
+            }
+            if let Some(window) = window {
+                window.request_redraw();
+            }
+        });
+    }
+
+    fn apply_background_image_results(&mut self) -> bool {
+        if !self
+            .background_image_result_ready
+            .swap(false, Ordering::Acquire)
+        {
+            return false;
+        }
+        let results = match self.background_image_results.lock() {
+            Ok(mut results) => results.drain(..).collect::<Vec<_>>(),
+            Err(err) => {
+                eprintln!("failed to lock background image results: {err}");
+                Vec::new()
+            }
+        };
+        let mut changed = false;
+        for result in results {
+            if result.generation == self.background_image_generation {
+                self.background_image_load_pending = false;
+            }
+            changed |= self.apply_background_image_loaded(result);
+        }
+        changed
+    }
+
+    fn schedule_background_image_result_poll(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.background_image_load_pending {
+            return;
+        }
+        if self.report_startup && !self.background_image_poll_reported {
+            self.background_image_poll_reported = true;
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "witty.background_image_poll_active",
+                    "generation": self.background_image_generation,
+                })
+            );
+        }
+        event_loop.set_control_flow(ControlFlow::Poll);
+    }
+
+    fn apply_background_image_loaded(&mut self, result: BackgroundImageLoadResult) -> bool {
+        if result.generation != self.background_image_generation {
+            return false;
+        }
+
+        let image_width = result.image.as_ref().map(RendererBackgroundImage::width);
+        let image_height = result.image.as_ref().map(RendererBackgroundImage::height);
+        let loaded = result.image.is_some();
+        let visual_config = self.visual_config.clone().with_background_image(result.image);
+        self.visual_config = visual_config.clone();
+        if self.report_startup {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "witty.background_image_apply_started",
+                    "path": result.path.display().to_string(),
+                    "loaded": loaded,
+                    "target_width": result.target_size.width,
+                    "target_height": result.target_size.height,
+                    "image_width": image_width,
+                    "image_height": image_height,
+                })
+            );
+        }
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_visual_config(visual_config);
+        }
+        if self.report_startup {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "witty.background_image_loaded",
+                    "path": result.path.display().to_string(),
+                    "loaded": loaded,
+                    "target_width": result.target_size.width,
+                    "target_height": result.target_size.height,
+                    "image_width": image_width,
+                    "image_height": image_height,
+                    "background_opacity": self.visual_config.background_opacity(),
+                    "background_image_fit": self.visual_config.background_image_fit().as_config_value(),
+                    "elapsed_ms": result.elapsed.as_millis(),
+                })
+            );
+        }
+        self.request_redraw();
+        true
     }
 
     fn refresh_pending_profile_actions(&mut self) -> Option<NativeProfileActionBridgeEvent> {
@@ -6050,7 +6313,7 @@ impl TerminalWindowApp {
     }
 }
 
-impl ApplicationHandler for TerminalWindowApp {
+impl ApplicationHandler<NativeWindowEvent> for TerminalWindowApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -6110,11 +6373,20 @@ impl ApplicationHandler for TerminalWindowApp {
         self.renderer = Some(renderer);
         self.window = Some(window);
         self.resize_grid(size);
+        self.ensure_background_image_load(event_loop, size);
         self.sync_ime_cursor_area(self.active_ime_cursor(
             self.terminal.snapshot().cursor.position,
         ));
         if let Some(window) = &self.window {
             window.request_redraw();
+        }
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: NativeWindowEvent) {
+        match event {
+            NativeWindowEvent::BackgroundImageReady => {
+                let _ = self.apply_background_image_results();
+            }
         }
     }
 
@@ -6202,6 +6474,7 @@ impl ApplicationHandler for TerminalWindowApp {
                     renderer.resize(size.width, size.height);
                 }
                 self.resize_grid(size);
+                self.ensure_background_image_load(event_loop, size);
                 if scale_changed {
                     let _ = self.refresh_titlebar_hover_for_current_pointer();
                     let _ = self.refresh_session_tab_hover_for_current_pointer();
@@ -6235,6 +6508,7 @@ impl ApplicationHandler for TerminalWindowApp {
                     renderer.resize(size.width, size.height);
                 }
                 self.resize_grid(size);
+                self.ensure_background_image_load(event_loop, size);
                 if scale_changed {
                     self.refresh_search_after_terminal_change();
                     let _ = self.refresh_titlebar_hover_for_current_pointer();
@@ -6249,6 +6523,7 @@ impl ApplicationHandler for TerminalWindowApp {
                 self.request_redraw();
             }
             WindowEvent::RedrawRequested => {
+                let _ = self.apply_background_image_results();
                 if let Some(renderer) = &mut self.renderer {
                     if let Err(err) = renderer.render(&self.frame) {
                         eprintln!("render failed: {err:#}");
@@ -6271,13 +6546,22 @@ impl ApplicationHandler for TerminalWindowApp {
                         self.first_frame_reported = true;
                     }
                 }
+                if self.background_image_load_pending {
+                    self.request_redraw();
+                }
             }
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let changed = self.poll_transport();
+        let background_image_changed = self.apply_background_image_results();
+        if background_image_changed && !self.background_image_load_pending {
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
+        let mut changed = background_image_changed;
+        self.schedule_background_image_result_poll(event_loop);
+        changed |= self.poll_transport();
         if self.take_window_close_request() {
             event_loop.exit();
             return;
@@ -6299,6 +6583,7 @@ impl ApplicationHandler for TerminalWindowApp {
         }
 
         if self.apply_fullscreen_reaffirm_timeout(event_loop) {
+            self.schedule_background_image_result_poll(event_loop);
             return;
         }
 
@@ -6307,23 +6592,29 @@ impl ApplicationHandler for TerminalWindowApp {
                 if let Some(deadline) = Instant::now().checked_add(FULLSCREEN_REAFFIRM_INTERVAL) {
                     event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
                 }
+                self.schedule_background_image_result_poll(event_loop);
                 return;
             }
         }
 
         if self.apply_synchronized_output_timeout(event_loop) {
+            self.schedule_background_image_result_poll(event_loop);
             return;
         }
         if self.synchronized_output_deadline.is_some() {
+            self.schedule_background_image_result_poll(event_loop);
             return;
         }
         if self.apply_installed_update_check_timeout(event_loop) {
+            self.schedule_background_image_result_poll(event_loop);
             return;
         }
         if self.apply_fullscreen_titlebar_hide_timeout(event_loop) {
+            self.schedule_background_image_result_poll(event_loop);
             return;
         }
         self.apply_blink_timeouts(event_loop);
+        self.schedule_background_image_result_poll(event_loop);
     }
 }
 
@@ -6509,6 +6800,7 @@ fn native_window_startup_report_json(
         "effective_font_size": font_config.effective_font_size(),
         "background_opacity": visual_config.background_opacity(),
         "background_image": visual_config.has_background_image(),
+        "background_image_fit": visual_config.background_image_fit().as_config_value(),
         "transparent_window": visual_config.requires_window_transparency(),
         "font_source_count": font_source_count,
         "will_request_adapter": true,
@@ -6562,6 +6854,7 @@ fn native_window_first_frame_report_json(
         "effective_font_size": font_config.effective_font_size(),
         "background_opacity": visual_config.background_opacity(),
         "background_image": visual_config.has_background_image(),
+        "background_image_fit": visual_config.background_image_fit().as_config_value(),
         "transparent_window": visual_config.requires_window_transparency(),
         "font_source_count": font_source_count,
         "visible_rows": stats.visible_rows,
@@ -11142,6 +11435,7 @@ mod tests {
         assert_eq!(report["terminal_padding"], 0.0);
         assert_eq!(report["background_opacity"], 1.0);
         assert_eq!(report["background_image"], false);
+        assert_eq!(report["background_image_fit"], "cover");
         assert_eq!(report["transparent_window"], false);
         assert_eq!(report["font_source_count"], 0);
         assert_eq!(report["will_request_adapter"], true);
@@ -11186,6 +11480,7 @@ mod tests {
         assert_eq!(report["terminal_padding"], 0.0);
         assert_eq!(report["background_opacity"], 1.0);
         assert_eq!(report["background_image"], false);
+        assert_eq!(report["background_image_fit"], "cover");
         assert_eq!(report["transparent_window"], false);
         assert_eq!(report["font_source_count"], 2);
         assert_eq!(report["visible_rows"], 24);
@@ -11281,6 +11576,7 @@ mod tests {
         assert_eq!(report["font_size"], 18);
         assert_eq!(report["terminal_padding"], 4.0);
         assert!((report["background_opacity"].as_f64().unwrap() - 0.72).abs() < 0.001);
+        assert_eq!(report["background_image_fit"], "cover");
         assert_eq!(report["transparent_window"], true);
         assert_eq!(report["font_source_count"], 2);
     }
@@ -13423,6 +13719,7 @@ mod tests {
     #[test]
     fn local_pty_child_exit_poll_requests_window_close_by_default() {
         let mut app = TerminalWindowApp::new(
+            None,
             Vec::new(),
             WindowSmokeOptions::default(),
             None,
@@ -13433,6 +13730,7 @@ mod tests {
             MouseSelectionOverridePolicy::default(),
             Osc52ClipboardPolicy::Disabled,
             1000,
+            None,
             None,
             None,
             None,
@@ -13473,6 +13771,7 @@ mod tests {
         let mut smoke = WindowSmokeOptions::default();
         smoke.last_active_close_policy = WindowLastActiveClosePolicy::Block;
         let mut app = TerminalWindowApp::new(
+            None,
             Vec::new(),
             smoke,
             None,
@@ -13483,6 +13782,7 @@ mod tests {
             MouseSelectionOverridePolicy::default(),
             Osc52ClipboardPolicy::Disabled,
             1000,
+            None,
             None,
             None,
             None,

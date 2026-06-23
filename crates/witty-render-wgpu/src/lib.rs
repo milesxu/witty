@@ -7,12 +7,15 @@ use glyphon::{
     fontdb, Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, Style,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
 };
+use image::GenericImageView;
 use unicode_width::UnicodeWidthStr;
 use witty_core::{
     BaselineShift, CellFlags, CellPoint, CellRange, CursorShape, CursorState, DamageRegion,
     GridSize, HyperlinkId, RenderCell, RenderRow, RenderSnapshot, Rgba, SearchHighlight,
     UnderlineStyle,
 };
+use zune_core::{bytestream::ZCursor, colorspace::ColorSpace};
+use zune_jpeg::JpegDecoder;
 
 pub const DEFAULT_TERMINAL_FONT_SIZE: u16 = 14;
 const DEFAULT_TERMINAL_LINE_HEIGHT: f32 = 18.0;
@@ -1287,6 +1290,8 @@ pub struct WgpuRectRenderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    background_image_bind_group_layout: wgpu::BindGroupLayout,
+    background_image_sampler: wgpu::Sampler,
     background_image_pipeline: wgpu::RenderPipeline,
     background_image_texture: Option<BackgroundImageTexture>,
     background_image_vertex_buffer: Option<wgpu::Buffer>,
@@ -1397,6 +1402,81 @@ impl RendererBackgroundImage {
         })
     }
 
+    pub fn decode_cover_limited(bytes: &[u8], target_width: u32, target_height: u32) -> Result<Self> {
+        if image::guess_format(bytes).is_ok_and(|format| format == image::ImageFormat::Jpeg) {
+            if let Ok(image) = Self::decode_jpeg_cover_limited(bytes, target_width, target_height) {
+                return Ok(image);
+            }
+        }
+
+        let image = image::load_from_memory(bytes).context("decode renderer background image")?;
+        let (width, height) = image.dimensions();
+        let (target_width, target_height) =
+            cover_limited_dimensions(width, height, target_width, target_height);
+        let rgba = if target_width == width && target_height == height {
+            image.to_rgba8()
+        } else {
+            image
+                .resize_exact(
+                    target_width,
+                    target_height,
+                    image::imageops::FilterType::Triangle,
+                )
+                .to_rgba8()
+        };
+        let (width, height) = rgba.dimensions();
+        Ok(Self {
+            width,
+            height,
+            rgba: rgba.into_raw(),
+        })
+    }
+
+    fn decode_jpeg_cover_limited(
+        bytes: &[u8],
+        target_width: u32,
+        target_height: u32,
+    ) -> Result<Self> {
+        let options = zune_core::options::DecoderOptions::new_fast()
+            .set_strict_mode(false)
+            .set_max_width(usize::MAX)
+            .set_max_height(usize::MAX)
+            .jpeg_set_out_colorspace(ColorSpace::RGB);
+        let mut decoder = JpegDecoder::new_with_options(ZCursor::new(bytes), options);
+        decoder
+            .decode_headers()
+            .context("decode JPEG renderer background image headers")?;
+        let (width, height) = decoder
+            .dimensions()
+            .context("read JPEG renderer background image dimensions")?;
+        let width = u32::try_from(width).context("JPEG background image width exceeds u32")?;
+        let height = u32::try_from(height).context("JPEG background image height exceeds u32")?;
+        let rgb = decoder
+            .decode()
+            .context("decode JPEG renderer background image pixels")?;
+        let image = image::RgbImage::from_raw(width, height, rgb)
+            .context("decoded JPEG background image dimensions do not match pixel buffer")?;
+        let (target_width, target_height) =
+            cover_limited_dimensions(width, height, target_width, target_height);
+        let rgba = if target_width == width && target_height == height {
+            image::DynamicImage::ImageRgb8(image).to_rgba8()
+        } else {
+            image::DynamicImage::ImageRgb8(image)
+                .resize_exact(
+                    target_width,
+                    target_height,
+                    image::imageops::FilterType::Triangle,
+                )
+                .to_rgba8()
+        };
+        let (width, height) = rgba.dimensions();
+        Ok(Self {
+            width,
+            height,
+            rgba: rgba.into_raw(),
+        })
+    }
+
     pub fn from_rgba8(width: u32, height: u32, rgba: Vec<u8>) -> Result<Self> {
         let expected_len = width as usize * height as usize * 4;
         if width == 0 || height == 0 || rgba.len() != expected_len {
@@ -1418,10 +1498,29 @@ impl RendererBackgroundImage {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RendererBackgroundImageFit {
+    #[default]
+    Cover,
+}
+
+impl RendererBackgroundImageFit {
+    pub const fn as_config_value(self) -> &'static str {
+        match self {
+            Self::Cover => "cover",
+        }
+    }
+
+    pub const fn config_values() -> &'static [&'static str] {
+        &["cover"]
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RendererVisualConfig {
     background_opacity: f32,
     background_image: Option<RendererBackgroundImage>,
+    background_image_fit: RendererBackgroundImageFit,
 }
 
 impl RendererVisualConfig {
@@ -1429,6 +1528,7 @@ impl RendererVisualConfig {
         Self {
             background_opacity: DEFAULT_BACKGROUND_OPACITY,
             background_image: None,
+            background_image_fit: RendererBackgroundImageFit::default(),
         }
     }
 
@@ -1442,8 +1542,17 @@ impl RendererVisualConfig {
         self
     }
 
+    pub fn with_background_image_fit(mut self, fit: RendererBackgroundImageFit) -> Self {
+        self.background_image_fit = fit;
+        self
+    }
+
     pub fn background_opacity(&self) -> f32 {
         self.background_opacity
+    }
+
+    pub fn background_image_fit(&self) -> RendererBackgroundImageFit {
+        self.background_image_fit
     }
 
     pub fn has_background_image(&self) -> bool {
@@ -1706,6 +1815,8 @@ impl WgpuRectRenderer {
             queue,
             config,
             pipeline,
+            background_image_bind_group_layout,
+            background_image_sampler,
             background_image_pipeline,
             background_image_texture,
             background_image_vertex_buffer: None,
@@ -1731,6 +1842,19 @@ impl WgpuRectRenderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+    }
+
+    pub fn set_visual_config(&mut self, visual_config: RendererVisualConfig) {
+        self.background_image_texture = visual_config.background_image.as_ref().map(|image| {
+            create_background_image_texture(
+                &self.device,
+                &self.queue,
+                &self.background_image_bind_group_layout,
+                &self.background_image_sampler,
+                image,
+            )
+        });
+        self.visual_config = visual_config;
     }
 
     pub fn cache_stats(&self) -> RendererCacheStats {
@@ -1927,13 +2051,15 @@ impl WgpuRectRenderer {
         let Some(image) = self.background_image_texture.as_ref() else {
             return Vec::new();
         };
-        background_image_cover_vertices(
-            self.config.width as f32,
-            self.config.height as f32,
-            image.width as f32,
-            image.height as f32,
-        )
-        .to_vec()
+        match self.visual_config.background_image_fit {
+            RendererBackgroundImageFit::Cover => background_image_cover_vertices(
+                self.config.width as f32,
+                self.config.height as f32,
+                image.width as f32,
+                image.height as f32,
+            )
+            .to_vec(),
+        }
     }
 
     fn sync_background_image_vertex_buffer(&mut self, vertices: &[ImageVertex]) {
@@ -2071,6 +2197,23 @@ fn sane_background_opacity(opacity: f32) -> f32 {
     } else {
         DEFAULT_BACKGROUND_OPACITY
     }
+}
+
+fn cover_limited_dimensions(
+    image_width: u32,
+    image_height: u32,
+    target_width: u32,
+    target_height: u32,
+) -> (u32, u32) {
+    if image_width == 0 || image_height == 0 || target_width == 0 || target_height == 0 {
+        return (image_width, image_height);
+    }
+    let scale = (f64::from(target_width) / f64::from(image_width))
+        .max(f64::from(target_height) / f64::from(image_height))
+        .min(1.0);
+    let width = ((f64::from(image_width) * scale).ceil() as u32).clamp(1, image_width);
+    let height = ((f64::from(image_height) * scale).ceil() as u32).clamp(1, image_height);
+    (width, height)
 }
 
 #[derive(Default)]
@@ -2783,6 +2926,13 @@ mod tests {
         assert!((tall.1 - 0.25).abs() < 0.001);
         assert_eq!(tall.2, 1.0);
         assert!((tall.3 - 0.75).abs() < 0.001);
+    }
+
+    #[test]
+    fn cover_limited_dimensions_downscales_only_as_needed_to_cover_target() {
+        assert_eq!(cover_limited_dimensions(5944, 3963, 960, 540), (960, 641));
+        assert_eq!(cover_limited_dimensions(5944, 3963, 3840, 2160), (3840, 2561));
+        assert_eq!(cover_limited_dimensions(800, 600, 1920, 1080), (800, 600));
     }
 
     #[test]

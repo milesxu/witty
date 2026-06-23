@@ -16,6 +16,8 @@ image.workspace = true
 witty-core.workspace = true
 unicode-width.workspace = true
 wgpu.workspace = true
+zune-core.workspace = true
+zune-jpeg.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys = { workspace = true, features = ["HtmlCanvasElement", "Performance", "Window"] }

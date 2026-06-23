@@ -61,3 +61,14 @@ wasm-bindgen-futures = "0.4"
 wasmtime = { version = "45.0.0", default-features = false, features = ["anyhow", "component-model", "cranelift", "runtime", "std"] }
 web-sys = "0.3"
 wit-parser = { version = "0.251", default-features = false, features = ["std"] }
+zune-core = "0.5"
+zune-jpeg = "0.5"
+
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.zune-core]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3

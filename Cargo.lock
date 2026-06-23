@@ -4188,6 +4188,8 @@ dependencies = [
  "web-sys",
  "wgpu",
  "witty-core",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

@@ -31,7 +31,7 @@ use witty_plugin_api::{
 use witty_plugin_wasm::WasmPluginRuntime;
 use witty_render_wgpu::{
     available_font_families, native_wgpu_backend_policy, CellMetrics, FramePlanner, FrameStats,
-    RendererFontConfig, RendererVisualConfig, RetainedFramePlanner,
+    RendererBackgroundImageFit, RendererFontConfig, RendererVisualConfig, RetainedFramePlanner,
 };
 use witty_transport::{
     apply_openssh_import_preview, default_profile_store_path, edit_profile_store,
@@ -206,6 +206,7 @@ fn main() -> anyhow::Result<()> {
             options.terminal_padding,
             options.background_opacity,
             options.background_image.clone(),
+            options.background_image_fit,
             options.font_paths,
             restore_state,
         );
@@ -298,6 +299,7 @@ struct AppOptions {
     terminal_padding: Option<u16>,
     background_opacity: Option<f32>,
     background_image: Option<PathBuf>,
+    background_image_fit: Option<RendererBackgroundImageFit>,
     font_paths: Vec<PathBuf>,
     restore_state_path: Option<PathBuf>,
     wittyrc_path: Option<PathBuf>,
@@ -326,6 +328,7 @@ struct AppOptionsExplicit {
     terminal_padding: bool,
     background_opacity: bool,
     background_image: bool,
+    background_image_fit: bool,
     font_paths: bool,
     cwd: bool,
     window_cols: bool,
@@ -360,6 +363,7 @@ impl AppOptions {
         let mut terminal_padding = None;
         let mut background_opacity = None;
         let mut background_image = None;
+        let mut background_image_fit = None;
         let mut font_paths = Vec::new();
         let mut restore_state_path = None;
         let mut wittyrc_path = None;
@@ -666,6 +670,18 @@ impl AppOptions {
                     }
                     background_image = parse_background_image_value(&value, "--background-image")?;
                     explicit.background_image = true;
+                    window_only_args_seen = true;
+                }
+                "--background-image-fit" => {
+                    let Some(value) = args.next() else {
+                        bail!("--background-image-fit requires a value");
+                    };
+                    if background_image_fit.is_some() {
+                        bail!("only one --background-image-fit value is allowed");
+                    }
+                    background_image_fit =
+                        Some(parse_background_image_fit(&value, "--background-image-fit")?);
+                    explicit.background_image_fit = true;
                     window_only_args_seen = true;
                 }
                 "--font-path" => {
@@ -1116,6 +1132,7 @@ impl AppOptions {
             terminal_padding,
             background_opacity,
             background_image,
+            background_image_fit,
             font_paths,
             restore_state_path,
             wittyrc_path,
@@ -1269,6 +1286,12 @@ impl AppOptions {
                     Some(validate_background_image_path(path, "background_image")?);
             }
         }
+        if !self.explicit.background_image_fit && self.background_image_fit.is_none() {
+            if let Some(value) = config.background_image_fit {
+                self.background_image_fit =
+                    Some(parse_background_image_fit(&value, "background_image_fit")?);
+            }
+        }
         if !self.explicit.font_paths && self.font_paths.is_empty() && !config.font_paths.is_empty()
         {
             self.font_paths = config
@@ -1382,6 +1405,13 @@ impl AppOptions {
             if let Some(value) = config.background_image {
                 self.background_image = parse_background_image_value(&value, "background-image")?;
                 self.explicit.background_image = true;
+            }
+        }
+        if !self.explicit.background_image_fit && self.background_image_fit.is_none() {
+            if let Some(value) = config.background_image_fit {
+                self.background_image_fit =
+                    Some(parse_background_image_fit(&value, "background-image-fit")?);
+                self.explicit.background_image_fit = true;
             }
         }
         if !self.explicit.window_last_active_close_policy {
@@ -1518,6 +1548,8 @@ struct NativeWindowConfig {
     #[serde(default)]
     background_image: Option<PathBuf>,
     #[serde(default)]
+    background_image_fit: Option<String>,
+    #[serde(default)]
     font_paths: Vec<PathBuf>,
     #[serde(default)]
     cwd: Option<PathBuf>,
@@ -1546,6 +1578,8 @@ struct WittyrcConfig {
     background_opacity: Option<f32>,
     #[serde(default, rename = "background-image")]
     background_image: Option<String>,
+    #[serde(default, rename = "background-image-fit")]
+    background_image_fit: Option<String>,
     #[serde(default, rename = "window-last-active-close")]
     window_last_active_close: Option<String>,
 }
@@ -1625,6 +1659,7 @@ fn native_window_config_template() -> String {
         "terminal_padding": 0,
         "background_opacity": 1.0,
         "background_image": null,
+        "background_image_fit": "cover",
         "window_title": "Witty",
         "program": null,
         "args": [],
@@ -1862,6 +1897,7 @@ fn native_window_effective_config_summary(
             .background_image
             .as_ref()
             .map(|path| path.display().to_string()),
+        "background_image_fit": visual_config.background_image_fit().as_config_value(),
         "font_source_count": options.font_paths.len(),
         "window_cols": grid.cols,
         "window_rows": grid.rows,
@@ -1912,6 +1948,7 @@ fn wittyrc_effective_config_summary(
             .background_image
             .as_ref()
             .map(|path| path.display().to_string()),
+        "background_image_fit": visual_config.background_image_fit().as_config_value(),
         "font_source_count": options.font_paths.len(),
         "window_last_active_close": options.window_smoke.last_active_close_policy.as_config_value(),
     });
@@ -1941,6 +1978,10 @@ fn renderer_visual_config_for_options(
     let config = match options.background_opacity {
         Some(opacity) => RendererVisualConfig::default().with_background_opacity(opacity),
         None => RendererVisualConfig::default(),
+    };
+    let config = match options.background_image_fit {
+        Some(fit) => config.with_background_image_fit(fit),
+        None => config,
     };
     config.with_background_image(background_image)
 }
@@ -2318,6 +2359,17 @@ fn validate_background_image_path(path: PathBuf, name: &str) -> Result<PathBuf> 
         bail!("{name} cannot be empty");
     }
     expand_cwd_home_path(path, name, || env::var_os("HOME"))
+}
+
+fn parse_background_image_fit(value: &str, name: &str) -> Result<RendererBackgroundImageFit> {
+    let value = value.trim();
+    match value {
+        "cover" | "scale-crop" | "scale-and-crop" => Ok(RendererBackgroundImageFit::Cover),
+        _ => bail!(
+            "{name} must be one of: {}",
+            RendererBackgroundImageFit::config_values().join(", ")
+        ),
+    }
 }
 
 fn parse_window_cols(value: &str, name: &str) -> Result<u16> {
@@ -3268,6 +3320,7 @@ mod tests {
         assert_eq!(options.terminal_padding, None);
         assert_eq!(options.background_opacity, None);
         assert_eq!(options.background_image, None);
+        assert_eq!(options.background_image_fit, None);
         assert!(options.font_paths.is_empty());
         assert!(options.launcher_args.is_empty());
         assert_eq!(
@@ -3582,6 +3635,8 @@ mod tests {
             "0.82".to_owned(),
             "--background-image".to_owned(),
             "~/Pictures/witty.png".to_owned(),
+            "--background-image-fit".to_owned(),
+            "scale-crop".to_owned(),
             "--font-path".to_owned(),
             "/fonts/JetBrainsMonoNerdFont-Regular.ttf".to_owned(),
             "--font-path".to_owned(),
@@ -3609,6 +3664,10 @@ mod tests {
                 env::var_os("HOME").expect("HOME should be set for background image test")
             )
             .join("Pictures/witty.png"))
+        );
+        assert_eq!(
+            options.background_image_fit,
+            Some(RendererBackgroundImageFit::Cover)
         );
         assert_eq!(
             options.font_paths,
@@ -3648,6 +3707,7 @@ mod tests {
             terminal_padding: Some(6),
             background_opacity: Some(0.75),
             background_image: Some(PathBuf::from("/images/witty.png")),
+            background_image_fit: Some("cover".to_owned()),
             font_paths: vec![
                 PathBuf::from("/fonts/HackNerdFont-Regular.ttf"),
                 PathBuf::from("/fonts/SymbolsNerdFontMono-Regular.ttf"),
@@ -3686,6 +3746,10 @@ mod tests {
         assert_eq!(
             options.background_image.as_deref(),
             Some(Path::new("/images/witty.png"))
+        );
+        assert_eq!(
+            options.background_image_fit,
+            Some(RendererBackgroundImageFit::Cover)
         );
         assert_eq!(
             options.font_paths,
@@ -3772,6 +3836,7 @@ mod tests {
             terminal_padding: Some(8),
             background_opacity: Some(0.7),
             background_image: Some(PathBuf::from("/config/background.png")),
+            background_image_fit: Some("cover".to_owned()),
             font_paths: vec![PathBuf::from("/config/Hack.ttf")],
             cwd: Some(PathBuf::from("/config/project")),
             scrollback_lines: Some(50000),
@@ -3812,6 +3877,10 @@ mod tests {
         assert_eq!(options.background_opacity, Some(0.9));
         assert_eq!(options.background_image, None);
         assert_eq!(
+            options.background_image_fit,
+            Some(RendererBackgroundImageFit::Cover)
+        );
+        assert_eq!(
             options.mouse_selection_override,
             MouseSelectionOverridePolicy::ShiftSelect
         );
@@ -3846,6 +3915,7 @@ mod tests {
         assert_eq!(options.terminal_padding, None);
         assert_eq!(options.background_opacity, None);
         assert_eq!(options.background_image, None);
+        assert_eq!(options.background_image_fit, None);
         assert!(options.font_paths.is_empty());
         assert_eq!(options.cwd, None);
         assert_eq!(options.window_title, None);
@@ -3872,10 +3942,12 @@ mod tests {
         assert_eq!(config.terminal_padding, Some(0));
         assert_eq!(config.background_opacity, Some(1.0));
         assert_eq!(config.background_image.as_deref(), Some("null"));
+        assert_eq!(config.background_image_fit.as_deref(), Some("cover"));
         assert!(template.contains("font-family = \"Maple Mono NF CN\""));
         assert!(template.contains("terminal-padding = 0"));
         assert!(template.contains("background-opacity = 1.0"));
         assert!(template.contains("background-image = \"null\""));
+        assert!(template.contains("background-image-fit = \"cover\""));
         assert!(template.contains("window-last-active-close = \"close-window\""));
         assert!(template.ends_with('\n'));
     }
@@ -3903,7 +3975,8 @@ mod tests {
             r#"font-family = "Maple Mono NF CN"
 terminal-padding = 4
 background-opacity = 0.8
-background-image = "/images/witty.png""#,
+background-image = "/images/witty.png"
+background-image-fit = "scale-and-crop""#,
         )
         .unwrap();
         std::fs::write(&unknown_path, r#"font_family = "Maple Mono NF CN""#).unwrap();
@@ -3916,6 +3989,7 @@ background-image = "/images/witty.png""#,
         assert_eq!(config.terminal_padding, Some(4));
         assert_eq!(config.background_opacity, Some(0.8));
         assert_eq!(config.background_image.as_deref(), Some("/images/witty.png"));
+        assert_eq!(config.background_image_fit.as_deref(), Some("scale-and-crop"));
         assert_eq!(config.window_last_active_close, None);
         assert!(read_wittyrc_config(&root.join("missing.wittyrc"))
             .unwrap()
@@ -3949,6 +4023,7 @@ background-image = "/images/witty.png""#,
                         terminal_padding: Some(4),
                         background_opacity: Some(0.6),
                         background_image: Some("/wittyrc/background.png".to_owned()),
+                        background_image_fit: Some("cover".to_owned()),
                         window_last_active_close: Some("block".to_owned()),
                     }))
                 },
@@ -3987,6 +4062,10 @@ background-image = "/images/witty.png""#,
             Some(Path::new("/wittyrc/background.png"))
         );
         assert_eq!(
+            options.background_image_fit,
+            Some(RendererBackgroundImageFit::Cover)
+        );
+        assert_eq!(
             options.window_smoke.last_active_close_policy,
             WindowLastActiveClosePolicy::Block
         );
@@ -4008,6 +4087,7 @@ background-image = "/images/witty.png""#,
                         terminal_padding: Some(5),
                         background_opacity: Some(0.7),
                         background_image: Some("none".to_owned()),
+                        background_image_fit: Some("cover".to_owned()),
                         ..WittyrcConfig::default()
                     }))
                 },
@@ -4021,6 +4101,10 @@ background-image = "/images/witty.png""#,
         assert_eq!(env_options.terminal_padding, Some(5));
         assert_eq!(env_options.background_opacity, Some(0.7));
         assert_eq!(env_options.background_image, None);
+        assert_eq!(
+            env_options.background_image_fit,
+            Some(RendererBackgroundImageFit::Cover)
+        );
     }
 
     #[test]
@@ -4183,6 +4267,7 @@ background-image = "/images/witty.png""#,
                         terminal_padding: Some(3),
                         background_opacity: Some(0.9),
                         background_image: Some(PathBuf::from("/window/background.png")),
+                        background_image_fit: Some("cover".to_owned()),
                         ..NativeWindowConfig::default()
                     }))
                 },
@@ -4208,6 +4293,7 @@ background-image = "/images/witty.png""#,
         assert_eq!(json["terminal_padding"], 7.0);
         assert!((json["background_opacity"].as_f64().unwrap() - 0.65).abs() < 0.001);
         assert_eq!(json["background_image"], "/window/background.png");
+        assert_eq!(json["background_image_fit"], "cover");
     }
 
     #[test]
@@ -4226,6 +4312,10 @@ background-image = "/images/witty.png""#,
         assert_eq!(options.terminal_padding, Some(0));
         assert_eq!(options.background_opacity, Some(1.0));
         assert_eq!(options.background_image, None);
+        assert_eq!(
+            options.background_image_fit,
+            Some(RendererBackgroundImageFit::Cover)
+        );
         assert_eq!(options.window_title.as_deref(), Some("Witty"));
         assert_eq!(options.program, None);
         assert!(options.args.is_empty());
@@ -4373,6 +4463,7 @@ background-image = "/images/witty.png""#,
                     terminal_padding: Some(8),
                     background_opacity: Some(0.85),
                     background_image: Some(PathBuf::from("/candidate/background.png")),
+                    background_image_fit: Some("cover".to_owned()),
                     font_paths: vec![PathBuf::from("/missing/SymbolsNerdFontMono.ttf")],
                     cwd: Some(PathBuf::from("/work/project")),
                     scrollback_lines: Some(20000),
@@ -4457,6 +4548,7 @@ background-image = "/images/witty.png""#,
                         terminal_padding: Some(8),
                         background_opacity: Some(0.78),
                         background_image: Some(PathBuf::from("/config/background.png")),
+                        background_image_fit: Some("cover".to_owned()),
                         font_paths: vec![PathBuf::from("/fonts/Symbols.ttf")],
                         cwd: Some(PathBuf::from("/config/project")),
                         scrollback_lines: Some(20000),
@@ -4499,6 +4591,7 @@ background-image = "/images/witty.png""#,
         assert_eq!(json["terminal_padding"], 8.0);
         assert!((json["background_opacity"].as_f64().unwrap() - 0.78).abs() < 0.001);
         assert_eq!(json["background_image"], "/cli/background.png");
+        assert_eq!(json["background_image_fit"], "cover");
         assert_eq!(json["font_source_count"], 1);
         assert_eq!(json["window_cols"], 100);
         assert_eq!(json["window_rows"], 36);
@@ -4705,6 +4798,7 @@ background-image = "/images/witty.png""#,
                 "terminal_padding": 4,
                 "background_opacity": 0.84,
                 "background_image": "/images/background.png",
+                "background_image_fit": "cover",
                 "font_paths": ["/fonts/Hack.ttf"],
                 "cwd": "/work/project",
                 "scrollback_lines": 12000,
@@ -4737,6 +4831,7 @@ background-image = "/images/witty.png""#,
             config.background_image.as_deref(),
             Some(Path::new("/images/background.png"))
         );
+        assert_eq!(config.background_image_fit.as_deref(), Some("cover"));
         assert_eq!(config.font_paths, vec![PathBuf::from("/fonts/Hack.ttf")]);
         assert_eq!(config.cwd.as_deref(), Some(Path::new("/work/project")));
         assert_eq!(config.scrollback_lines, Some(12000));
@@ -6354,6 +6449,7 @@ Host prod
         assert!(AppOptions::parse(["--terminal-padding".to_owned()]).is_err());
         assert!(AppOptions::parse(["--background-opacity".to_owned()]).is_err());
         assert!(AppOptions::parse(["--background-image".to_owned()]).is_err());
+        assert!(AppOptions::parse(["--background-image-fit".to_owned()]).is_err());
         assert!(AppOptions::parse(["--font-path".to_owned()]).is_err());
         assert!(AppOptions::parse(["--window-cols".to_owned()]).is_err());
         assert!(AppOptions::parse(["--window-rows".to_owned()]).is_err());
@@ -6375,6 +6471,11 @@ Host prod
         assert!(AppOptions::parse([
             "--background-image".to_owned(),
             "/images/witty.png".to_owned()
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--background-image-fit".to_owned(),
+            "cover".to_owned()
         ])
         .is_err());
         assert!(
@@ -6464,6 +6565,20 @@ Host prod
             "/images/one.png".to_owned(),
             "--background-image".to_owned(),
             "/images/two.png".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--window".to_owned(),
+            "--background-image-fit".to_owned(),
+            "contain".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--window".to_owned(),
+            "--background-image-fit".to_owned(),
+            "cover".to_owned(),
+            "--background-image-fit".to_owned(),
+            "scale-crop".to_owned(),
         ])
         .is_err());
         assert!(AppOptions::parse([

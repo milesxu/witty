@@ -148,6 +148,7 @@ font-family = "Maple Mono NF CN"
 terminal-padding = 0
 background-opacity = 1.0
 background-image = "null"
+background-image-fit = "cover"
 window-last-active-close = "close-window"
 ```
 
@@ -185,6 +186,7 @@ cargo run -p witty-app -- --window \
   --terminal-padding 0 \
   --background-opacity 0.85 \
   --background-image /path/to/background.png \
+  --background-image-fit cover \
   --font-path /path/to/SymbolsNerdFontMono-Regular.ttf
 WITTY_FONT_FAMILY="Maple Mono NF CN" witty --window
 ```
@@ -197,7 +199,9 @@ to `0`; set `terminal-padding = 8` in `.wittyrc` or pass `--terminal-padding 8`
 to restore the earlier inset. Background opacity defaults to `1.0`; lower it
 with `background-opacity = 0.85` or `--background-opacity 0.85`. Set
 `background-image` to a path for an image-backed background, or to `"null"` to
-fall back to desktop transparency.
+fall back to desktop transparency. Background images default to
+`background-image-fit = "cover"`, which scales the image to fill the window and
+center-crops any overflow. The CLI spelling is `--background-image-fit cover`.
 
 The compatible JSON config file is `window.v1.json` under the Witty config
 directory, normally `$XDG_CONFIG_HOME/witty/` or `~/.config/witty/` on Linux.
