@@ -7,10 +7,10 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{
@@ -4672,7 +4672,7 @@ impl TerminalWindowApp {
             .unwrap_or_else(|| fullscreen_target_scale_factor(target_monitor.as_ref(), window));
 
         self.log_fullscreen_debug("repair-before", Some(window));
-        apply_borderless_fullscreen(window, target_monitor.clone());
+        force_borderless_fullscreen(window, target_monitor.clone());
         if let Some(size) = target_size {
             let _ = window.request_inner_size(size);
         }
@@ -6937,6 +6937,11 @@ fn apply_borderless_fullscreen(window: &Window, monitor: Option<MonitorHandle>) 
     window.set_fullscreen(Some(Fullscreen::Borderless(monitor)));
 }
 
+fn force_borderless_fullscreen(window: &Window, monitor: Option<MonitorHandle>) {
+    window.set_fullscreen(None);
+    apply_borderless_fullscreen(window, monitor);
+}
+
 fn clear_fullscreen_size_guard(window: &Window) {
     window.set_min_inner_size::<PhysicalSize<u32>>(None);
 }
@@ -7895,9 +7900,26 @@ enum ClipboardSelection {
     Primary,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ClipboardImage {
+    width: usize,
+    height: usize,
+    rgba: Vec<u8>,
+}
+
 trait ClipboardSink {
     fn set_text(&mut self, selection: ClipboardSelection, text: &str) -> Result<()>;
     fn get_text(&mut self, selection: ClipboardSelection) -> Result<String>;
+    fn get_image(&mut self, _selection: ClipboardSelection) -> Result<Option<ClipboardImage>> {
+        Ok(None)
+    }
+    fn save_image_as_png(&mut self, selection: ClipboardSelection, path: &Path) -> Result<bool> {
+        let Some(image) = self.get_image(selection)? else {
+            return Ok(false);
+        };
+        write_clipboard_image_png(&image, path)?;
+        Ok(true)
+    }
 }
 
 struct SystemClipboardSink {
@@ -7942,13 +7964,373 @@ impl ClipboardSink for SystemClipboardSink {
     fn get_text(&mut self, selection: ClipboardSelection) -> Result<String> {
         let clipboard = self.clipboard_mut()?;
         match selection {
-            ClipboardSelection::Clipboard => clipboard
-                .get_text()
-                .context("failed to read text from system clipboard"),
+            ClipboardSelection::Clipboard => read_system_clipboard_text(clipboard),
             ClipboardSelection::Primary => get_system_primary_text(clipboard),
         }
     }
+
+    fn get_image(&mut self, selection: ClipboardSelection) -> Result<Option<ClipboardImage>> {
+        let clipboard = self.clipboard_mut()?;
+        match selection {
+            ClipboardSelection::Clipboard => read_arboard_clipboard_image(clipboard),
+            ClipboardSelection::Primary => Ok(None),
+        }
+    }
+
+    fn save_image_as_png(&mut self, selection: ClipboardSelection, path: &Path) -> Result<bool> {
+        match selection {
+            ClipboardSelection::Clipboard => match &mut self.clipboard {
+                Some(clipboard) => save_system_clipboard_image_as_png(clipboard, path),
+                None => {
+                    let init_error = self.init_error.as_deref().unwrap_or("unknown init error");
+                    tracing::info!(
+                        target: "witty_app::clipboard",
+                        init_error,
+                        "arboard clipboard is unavailable; trying GTK/GDK image path"
+                    );
+                    save_preferred_gtk_clipboard_image_as_png(path).map_err(|fallback_err| {
+                        anyhow!(
+                            "system clipboard unavailable: {init_error}; \
+                             GTK/GDK image fallback failed: {fallback_err:#}"
+                        )
+                    })
+                }
+            },
+            ClipboardSelection::Primary => Ok(false),
+        }
+    }
 }
+
+fn read_arboard_clipboard_image(
+    clipboard: &mut arboard::Clipboard,
+) -> Result<Option<ClipboardImage>> {
+    match clipboard.get_image() {
+        Ok(image) => Ok(Some(ClipboardImage {
+            width: image.width,
+            height: image.height,
+            rgba: image.bytes.into_owned(),
+        })),
+        Err(arboard::Error::ContentNotAvailable) => Ok(None),
+        Err(err) => Err(err).context("failed to read image from system clipboard"),
+    }
+}
+
+fn read_system_clipboard_text(clipboard: &mut arboard::Clipboard) -> Result<String> {
+    if should_prefer_gtk_clipboard() {
+        return read_preferred_gtk_clipboard_text();
+    }
+
+    clipboard
+        .get_text()
+        .context("failed to read text from system clipboard")
+}
+
+fn read_preferred_gtk_clipboard_text() -> Result<String> {
+    match read_gtk_clipboard_text()? {
+        Some(text) => {
+            tracing::info!(
+                target: "witty_app::clipboard",
+                bytes = text.len(),
+                "read clipboard text with preferred GTK/GDK Wayland path"
+            );
+            Ok(text)
+        }
+        None => {
+            tracing::info!(
+                target: "witty_app::clipboard",
+                "preferred GTK/GDK Wayland path found no clipboard text"
+            );
+            bail!("clipboard does not contain text");
+        }
+    }
+}
+
+fn save_system_clipboard_image_as_png(
+    clipboard: &mut arboard::Clipboard,
+    path: &Path,
+) -> Result<bool> {
+    if should_prefer_gtk_clipboard() {
+        return save_preferred_gtk_clipboard_image_as_png(path);
+    }
+
+    match read_arboard_clipboard_image(clipboard) {
+        Ok(Some(image)) => {
+            write_clipboard_image_png(&image, path)?;
+            tracing::info!(
+                target: "witty_app::clipboard",
+                path = %path.display(),
+                "saved clipboard image with arboard"
+            );
+            Ok(true)
+        }
+        Ok(None) => try_save_gtk_clipboard_image_after_arboard_miss(path),
+        Err(arboard_err) => match save_gtk_clipboard_image_as_png(path) {
+            Ok(true) => {
+                tracing::info!(
+                    target: "witty_app::clipboard",
+                    arboard_error = %arboard_err,
+                    path = %path.display(),
+                    "used GTK/GDK clipboard image fallback after arboard failed"
+                );
+                Ok(true)
+            }
+            Ok(false) => Err(anyhow!(
+                "{arboard_err:#}; GTK/GDK image fallback found no image in the clipboard"
+            )),
+            Err(fallback_err) => Err(anyhow!(
+                "{arboard_err:#}; GTK/GDK image fallback failed: {fallback_err:#}"
+            )),
+        },
+    }
+}
+
+fn save_preferred_gtk_clipboard_image_as_png(path: &Path) -> Result<bool> {
+    match save_gtk_clipboard_image_as_png(path) {
+        Ok(true) => {
+            tracing::info!(
+                target: "witty_app::clipboard",
+                path = %path.display(),
+                "saved clipboard image with preferred GTK/GDK Wayland path"
+            );
+            Ok(true)
+        }
+        Ok(false) => {
+            tracing::info!(
+                target: "witty_app::clipboard",
+                "preferred GTK/GDK Wayland path found no clipboard image"
+            );
+            Ok(false)
+        }
+        Err(err) => {
+            tracing::warn!(
+                target: "witty_app::clipboard",
+                error = %err,
+                "preferred GTK/GDK Wayland clipboard image path failed"
+            );
+            Err(err)
+        }
+    }
+}
+
+fn try_save_gtk_clipboard_image_after_arboard_miss(path: &Path) -> Result<bool> {
+    match save_gtk_clipboard_image_as_png(path) {
+        Ok(true) => {
+            tracing::info!(
+                target: "witty_app::clipboard",
+                path = %path.display(),
+                "saved clipboard image with GTK/GDK fallback after arboard reported no image"
+            );
+            Ok(true)
+        }
+        Ok(false) => Ok(false),
+        Err(err) => {
+            tracing::info!(
+                target: "witty_app::clipboard",
+                error = %err,
+                "GTK/GDK clipboard image fallback failed after arboard reported no image"
+            );
+            Ok(false)
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn should_prefer_gtk_clipboard() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn should_prefer_gtk_clipboard() -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn read_gtk_clipboard_text() -> Result<Option<String>> {
+    let output = process::Command::new("/usr/bin/python3")
+        .arg("-c")
+        .arg(GTK_CLIPBOARD_TEXT_HELPER)
+        .stdin(process::Stdio::null())
+        .output()
+        .context("run GTK/GDK clipboard text helper")?;
+
+    match output.status.code() {
+        Some(0) => String::from_utf8(output.stdout)
+            .context("GTK/GDK clipboard text helper returned non-UTF-8 text")
+            .map(Some),
+        Some(2) => Ok(None),
+        code => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            let detail = if stderr.is_empty() { stdout } else { stderr };
+            let status = code
+                .map(|code| format!("exit status {code}"))
+                .unwrap_or_else(|| "terminated by signal".to_owned());
+            if detail.is_empty() {
+                bail!("GTK/GDK clipboard text helper failed with {status}");
+            }
+            bail!("GTK/GDK clipboard text helper failed with {status}: {detail}");
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_gtk_clipboard_text() -> Result<Option<String>> {
+    Ok(None)
+}
+
+#[cfg(target_os = "linux")]
+fn save_gtk_clipboard_image_as_png(path: &Path) -> Result<bool> {
+    let output = process::Command::new("/usr/bin/python3")
+        .arg("-c")
+        .arg(GTK_CLIPBOARD_IMAGE_HELPER)
+        .arg(path)
+        .stdin(process::Stdio::null())
+        .output()
+        .context("run GTK/GDK clipboard image helper")?;
+
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(2) => Ok(false),
+        code => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            let detail = if stderr.is_empty() { stdout } else { stderr };
+            let status = code
+                .map(|code| format!("exit status {code}"))
+                .unwrap_or_else(|| "terminated by signal".to_owned());
+            if detail.is_empty() {
+                bail!("GTK/GDK clipboard image helper failed with {status}");
+            }
+            bail!("GTK/GDK clipboard image helper failed with {status}: {detail}");
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn save_gtk_clipboard_image_as_png(_path: &Path) -> Result<bool> {
+    Ok(false)
+}
+
+#[cfg(target_os = "linux")]
+const GTK_CLIPBOARD_TEXT_HELPER: &str = r#"
+import sys
+
+import gi
+
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gdk, GLib
+
+display = Gdk.Display.get_default()
+if display is None:
+    print("no GDK display available", file=sys.stderr)
+    sys.exit(3)
+
+clipboard = display.get_clipboard()
+loop = GLib.MainLoop()
+state = {"status": 3, "error": "clipboard text unavailable", "text": ""}
+
+def done(clipboard, result):
+    try:
+        text = clipboard.read_text_finish(result)
+        if text is None:
+            state["status"] = 2
+            state["error"] = "clipboard does not contain text"
+        else:
+            state["status"] = 0
+            state["text"] = text
+            state["error"] = ""
+    except Exception as exc:
+        message = str(exc)
+        state["error"] = message
+        lowered = message.lower()
+        if (
+            "no compatible" in lowered
+            or "not contain" in lowered
+            or "not available" in lowered
+            or "contents" in lowered
+        ):
+            state["status"] = 2
+        else:
+            state["status"] = 3
+    finally:
+        loop.quit()
+
+def timeout():
+    state["status"] = 3
+    state["error"] = "GDK clipboard text read timed out"
+    loop.quit()
+    return False
+
+GLib.timeout_add(3000, timeout)
+clipboard.read_text_async(None, done)
+loop.run()
+
+if state["status"] == 0:
+    print(state["text"], end="")
+else:
+    print(state["error"], file=sys.stderr)
+sys.exit(state["status"])
+"#;
+
+#[cfg(target_os = "linux")]
+const GTK_CLIPBOARD_IMAGE_HELPER: &str = r#"
+import sys
+
+import gi
+
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gdk, GLib
+
+path = sys.argv[1]
+display = Gdk.Display.get_default()
+if display is None:
+    print("no GDK display available", file=sys.stderr)
+    sys.exit(3)
+
+clipboard = display.get_clipboard()
+loop = GLib.MainLoop()
+state = {"status": 3, "error": "clipboard image unavailable"}
+
+def done(clipboard, result):
+    try:
+        texture = clipboard.read_texture_finish(result)
+        if texture is None:
+            state["status"] = 2
+            state["error"] = "clipboard does not contain an image"
+        else:
+            texture.save_to_png(path)
+            state["status"] = 0
+            state["error"] = ""
+    except Exception as exc:
+        message = str(exc)
+        state["error"] = message
+        lowered = message.lower()
+        if (
+            "no compatible" in lowered
+            or "not contain" in lowered
+            or "not available" in lowered
+            or "contents" in lowered
+        ):
+            state["status"] = 2
+        else:
+            state["status"] = 3
+    finally:
+        loop.quit()
+
+def timeout():
+    state["status"] = 3
+    state["error"] = "GDK clipboard image read timed out"
+    loop.quit()
+    return False
+
+GLib.timeout_add(3000, timeout)
+clipboard.read_texture_async(None, done)
+loop.run()
+
+if state["status"] != 0:
+    print(state["error"], file=sys.stderr)
+sys.exit(state["status"])
+"#;
 
 impl SystemClipboardSink {
     fn clipboard_mut(&mut self) -> Result<&mut arboard::Clipboard> {
@@ -8177,8 +8559,20 @@ fn paste_clipboard_to_input(
     bracketed_paste: bool,
     mut write_input: impl FnMut(&[u8]) -> Result<()>,
 ) -> Result<bool> {
-    let Some(text) = clipboard_paste_text(clipboard)? else {
-        return Ok(false);
+    let text = match clipboard_paste_text(clipboard) {
+        Ok(Some(text)) => text,
+        Ok(None) => return Ok(false),
+        Err(text_err) => {
+            tracing::info!(
+                target: "witty_app::clipboard",
+                error = %text_err,
+                "clipboard text paste failed; trying clipboard image paste"
+            );
+            let Some(path) = save_clipboard_image_to_temp_file(clipboard)? else {
+                return Err(text_err);
+            };
+            path.to_string_lossy().into_owned()
+        }
     };
 
     paste_text_to_input(&text, bracketed_paste, &mut write_input)
@@ -8205,6 +8599,53 @@ fn paste_text_to_input(
     let payload = paste_payload(text, bracketed_paste);
     write_input(&payload).context("failed to write clipboard text to terminal")?;
     Ok(true)
+}
+
+fn save_clipboard_image_to_temp_file(clipboard: &mut dyn ClipboardSink) -> Result<Option<PathBuf>> {
+    let path = clipboard_image_temp_path();
+    if !clipboard.save_image_as_png(ClipboardSelection::Clipboard, &path)? {
+        return Ok(None);
+    }
+    Ok(Some(path))
+}
+
+fn clipboard_image_temp_path() -> PathBuf {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!(
+        "witty-clipboard-image-{}-{now_ms}.png",
+        process::id()
+    ))
+}
+
+fn write_clipboard_image_png(image: &ClipboardImage, path: &Path) -> Result<()> {
+    let expected_len = image
+        .width
+        .checked_mul(image.height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .context("clipboard image dimensions overflow")?;
+    if image.rgba.len() != expected_len {
+        bail!(
+            "clipboard image RGBA payload has {} bytes, expected {} for {}x{}",
+            image.rgba.len(),
+            expected_len,
+            image.width,
+            image.height
+        );
+    }
+    let width = u32::try_from(image.width).context("clipboard image width is too large")?;
+    let height = u32::try_from(image.height).context("clipboard image height is too large")?;
+    image::save_buffer_with_format(
+        path,
+        &image.rgba,
+        width,
+        height,
+        image::ColorType::Rgba8,
+        image::ImageFormat::Png,
+    )
+    .with_context(|| format!("write clipboard image PNG {}", path.display()))
 }
 
 fn apply_native_ime_event(composition: &mut ImeComposition, event: Ime) -> NativeImeEventResult {
@@ -11198,6 +11639,8 @@ mod tests {
     struct RecordingClipboard {
         clipboard_read: String,
         primary_read: String,
+        clipboard_text_error: Option<String>,
+        clipboard_image: Option<ClipboardImage>,
         writes: Vec<(ClipboardSelection, String)>,
     }
 
@@ -11208,9 +11651,21 @@ mod tests {
         }
 
         fn get_text(&mut self, selection: ClipboardSelection) -> Result<String> {
+            if selection == ClipboardSelection::Clipboard {
+                if let Some(error) = &self.clipboard_text_error {
+                    bail!("{error}");
+                }
+            }
             Ok(match selection {
                 ClipboardSelection::Clipboard => self.clipboard_read.clone(),
                 ClipboardSelection::Primary => self.primary_read.clone(),
+            })
+        }
+
+        fn get_image(&mut self, selection: ClipboardSelection) -> Result<Option<ClipboardImage>> {
+            Ok(match selection {
+                ClipboardSelection::Clipboard => self.clipboard_image.clone(),
+                ClipboardSelection::Primary => None,
             })
         }
     }
@@ -16563,6 +17018,34 @@ mod tests {
 
         assert!(pasted);
         assert_eq!(input, b"echo ok\n");
+    }
+
+    #[test]
+    fn paste_clipboard_to_input_saves_image_and_writes_png_path_when_text_is_unavailable() {
+        let mut clipboard = RecordingClipboard {
+            clipboard_text_error: Some("clipboard does not contain text".to_owned()),
+            clipboard_image: Some(ClipboardImage {
+                width: 1,
+                height: 1,
+                rgba: vec![0xff, 0x00, 0x00, 0xff],
+            }),
+            ..RecordingClipboard::default()
+        };
+        let mut input = Vec::new();
+
+        let pasted = paste_clipboard_to_input(&mut clipboard, false, |bytes| {
+            input.extend_from_slice(bytes);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(pasted);
+        let path = std::str::from_utf8(&input).unwrap();
+        assert!(path.contains("witty-clipboard-image-"), "{path}");
+        assert!(path.ends_with(".png"), "{path}");
+        let png = std::fs::read(path).unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

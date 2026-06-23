@@ -1484,6 +1484,13 @@ impl AppOptions {
                 self.explicit.session_tab_label_style = true;
             }
         }
+        if !self.explicit.osc52_clipboard_policy {
+            if let Some(value) = config.osc52_clipboard {
+                self.osc52_clipboard_policy =
+                    parse_osc52_clipboard_policy_value(&value, "osc52-clipboard")?;
+                self.explicit.osc52_clipboard_policy = true;
+            }
+        }
         Ok(())
     }
 }
@@ -1650,6 +1657,8 @@ struct WittyrcConfig {
     session_tab_position: Option<String>,
     #[serde(default, rename = "session-tab-label")]
     session_tab_label: Option<String>,
+    #[serde(default, rename = "osc52-clipboard")]
+    osc52_clipboard: Option<String>,
 }
 
 fn default_native_window_config_path() -> Result<PathBuf> {
@@ -4061,6 +4070,7 @@ mod tests {
         assert_eq!(config.background_image_fit.as_deref(), Some("cover"));
         assert_eq!(config.session_tab_position.as_deref(), Some("bottom"));
         assert_eq!(config.session_tab_label.as_deref(), Some("index"));
+        assert_eq!(config.osc52_clipboard.as_deref(), Some("allow"));
         assert!(template.contains("font-family = \"Maple Mono NF CN\""));
         assert!(template.contains("terminal-padding = 0"));
         assert!(template.contains("background-opacity = 1.0"));
@@ -4068,6 +4078,7 @@ mod tests {
         assert!(template.contains("background-image-fit = \"cover\""));
         assert!(template.contains("session-tab-position = \"bottom\""));
         assert!(template.contains("session-tab-label = \"index\""));
+        assert!(template.contains("osc52-clipboard = \"allow\""));
         assert!(template.contains("window-last-active-close = \"close-window\""));
         assert!(template.ends_with('\n'));
     }
@@ -4096,7 +4107,8 @@ mod tests {
 terminal-padding = 4
 background-opacity = 0.8
 background-image = "/images/witty.png"
-background-image-fit = "scale-and-crop""#,
+background-image-fit = "scale-and-crop"
+osc52-clipboard = "allow""#,
         )
         .unwrap();
         std::fs::write(&unknown_path, r#"font_family = "Maple Mono NF CN""#).unwrap();
@@ -4110,6 +4122,7 @@ background-image-fit = "scale-and-crop""#,
         assert_eq!(config.background_opacity, Some(0.8));
         assert_eq!(config.background_image.as_deref(), Some("/images/witty.png"));
         assert_eq!(config.background_image_fit.as_deref(), Some("scale-and-crop"));
+        assert_eq!(config.osc52_clipboard.as_deref(), Some("allow"));
         assert_eq!(config.window_last_active_close, None);
         assert!(read_wittyrc_config(&root.join("missing.wittyrc"))
             .unwrap()
@@ -4147,6 +4160,7 @@ background-image-fit = "scale-and-crop""#,
                         window_last_active_close: Some("block".to_owned()),
                         session_tab_position: Some("bottom".to_owned()),
                         session_tab_label: Some("index".to_owned()),
+                        osc52_clipboard: Some("allow".to_owned()),
                     }))
                 },
             )
@@ -4191,6 +4205,7 @@ background-image-fit = "scale-and-crop""#,
             options.window_smoke.last_active_close_policy,
             WindowLastActiveClosePolicy::Block
         );
+        assert_eq!(options.osc52_clipboard_policy, Osc52ClipboardPolicy::Allow);
 
         let mut env_options = app_options_parse_with_env(
             ["--window", "--wittyrc", "/configs/.wittyrc"],
