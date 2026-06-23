@@ -2321,7 +2321,9 @@ pub fn run(
         font_paths,
         restore_state,
     )?;
-    event_loop.run_app(&mut app)?;
+    event_loop
+        .run_app(&mut app)
+        .context("run Witty native window event loop")?;
     Ok(())
 }
 
@@ -3142,6 +3144,7 @@ struct TerminalWindowApp {
     size: GridSize,
     modifiers: Modifiers,
     pointer_position: Option<PhysicalPosition<f64>>,
+    native_cursor_icon: Option<CursorIcon>,
     window_fullscreen: bool,
     fullscreen_target_monitor: Option<MonitorHandle>,
     fullscreen_target_size: Option<PhysicalSize<u32>>,
@@ -3333,6 +3336,7 @@ impl TerminalWindowApp {
             size: startup.size,
             modifiers: Modifiers::default(),
             pointer_position: None,
+            native_cursor_icon: None,
             window_fullscreen: false,
             fullscreen_target_monitor: None,
             fullscreen_target_size: None,
@@ -6424,15 +6428,24 @@ impl TerminalWindowApp {
         }
     }
 
-    fn sync_resize_cursor_for_position(&self, position: PhysicalPosition<f64>) {
+    fn set_native_cursor_icon(&mut self, cursor: CursorIcon) {
+        if self.native_cursor_icon == Some(cursor) {
+            return;
+        }
         let Some(window) = &self.window else {
+            self.native_cursor_icon = None;
             return;
         };
+        window.set_cursor(cursor);
+        self.native_cursor_icon = Some(cursor);
+    }
+
+    fn sync_resize_cursor_for_position(&mut self, position: PhysicalPosition<f64>) {
         let cursor = self
             .resize_direction_for_position(position)
             .map(CursorIcon::from)
             .unwrap_or(CursorIcon::Default);
-        window.set_cursor(cursor);
+        self.set_native_cursor_icon(cursor);
     }
 
     fn activate_titlebar_menu_item(&mut self, item: NativeTitleBarMenuItem) {
@@ -6644,9 +6657,7 @@ impl TerminalWindowApp {
 
     fn handle_cursor_left(&mut self) -> bool {
         self.pointer_position = None;
-        if let Some(window) = &self.window {
-            window.set_cursor(CursorIcon::Default);
-        }
+        self.set_native_cursor_icon(CursorIcon::Default);
         let content_hover_changed = self.clear_content_hover_state();
         let titlebar_hover_changed = self.hovered_titlebar_hit.is_some();
         self.hovered_titlebar_hit = None;

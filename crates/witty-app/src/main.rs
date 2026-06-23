@@ -218,11 +218,16 @@ fn main() -> anyhow::Result<()> {
         );
         match &result {
             Ok(()) => tracing::info!(target: "witty_app::window", "Witty native window exited"),
-            Err(err) => tracing::error!(
-                target: "witty_app::window",
-                error = ?err,
-                "Witty native window exited with error"
-            ),
+            Err(err) => {
+                let error_chain = format!("{err:#}");
+                tracing::error!(
+                    target: "witty_app::window",
+                    error = %err,
+                    error_debug = ?err,
+                    error_chain = %error_chain,
+                    "Witty native window exited with error"
+                );
+            }
         }
         return result;
     }
@@ -1519,6 +1524,11 @@ impl AppOptions {
                 self.font_family = Some(parse_wittyrc_font_family(&value)?);
             }
         }
+        if !self.explicit.font_size && self.font_size.is_none() {
+            if let Some(value) = config.font_size {
+                self.font_size = Some(validate_font_size(value, "font-size")?);
+            }
+        }
         if !self.explicit.terminal_padding && self.terminal_padding.is_none() {
             if let Some(value) = config.terminal_padding {
                 self.terminal_padding = Some(validate_terminal_padding(value, "terminal-padding")?);
@@ -1760,6 +1770,8 @@ struct NativeWindowConfig {
 struct WittyrcConfig {
     #[serde(default, rename = "font-family")]
     font_family: Option<String>,
+    #[serde(default, rename = "font-size")]
+    font_size: Option<u16>,
     #[serde(default, rename = "terminal-padding")]
     terminal_padding: Option<u16>,
     #[serde(default, rename = "background-opacity")]
@@ -4264,6 +4276,10 @@ mod tests {
             config.window_last_active_close.as_deref(),
             Some("close-window")
         );
+        assert_eq!(
+            config.font_size,
+            Some(witty_render_wgpu::DEFAULT_TERMINAL_FONT_SIZE)
+        );
         assert_eq!(config.terminal_padding, Some(0));
         assert_eq!(config.background_opacity, Some(1.0));
         assert_eq!(config.background_image.as_deref(), Some("null"));
@@ -4276,6 +4292,7 @@ mod tests {
         assert_eq!(config.session_tab_show_multiple, Some(false));
         assert_eq!(config.osc52_clipboard.as_deref(), Some("allow"));
         assert!(template.contains("font-family = \"Maple Mono NF CN\""));
+        assert!(template.contains("font-size = 14"));
         assert!(template.contains("terminal-padding = 0"));
         assert!(template.contains("background-opacity = 1.0"));
         assert!(template.contains("background-image = \"null\""));
@@ -4312,6 +4329,7 @@ mod tests {
         std::fs::write(
             &config_path,
             r#"font-family = "Maple Mono NF CN"
+font-size = 15
 terminal-padding = 4
 background-opacity = 0.8
 background-image = "/images/witty.png"
@@ -4328,6 +4346,7 @@ osc52-clipboard = "allow""#,
             config.font_family.as_deref(),
             Some(RECOMMENDED_TERMINAL_FONT_FAMILY)
         );
+        assert_eq!(config.font_size, Some(15));
         assert_eq!(config.terminal_padding, Some(4));
         assert_eq!(config.background_opacity, Some(0.8));
         assert_eq!(
@@ -4371,6 +4390,7 @@ osc52-clipboard = "allow""#,
                     assert_eq!(path, Path::new("/configs/.wittyrc"));
                     Ok(Some(WittyrcConfig {
                         font_family: Some("Maple Mono NF CN".to_owned()),
+                        font_size: Some(15),
                         terminal_padding: Some(4),
                         background_opacity: Some(0.6),
                         background_image: Some("/wittyrc/background.png".to_owned()),
@@ -4412,7 +4432,7 @@ osc52-clipboard = "allow""#,
             options.font_family.as_deref(),
             Some(RECOMMENDED_TERMINAL_FONT_FAMILY)
         );
-        assert_eq!(options.font_size, Some(18));
+        assert_eq!(options.font_size, Some(15));
         assert_eq!(options.terminal_padding, Some(4));
         assert_eq!(options.background_opacity, Some(0.6));
         assert_eq!(
@@ -4445,6 +4465,7 @@ osc52-clipboard = "allow""#,
                 |_| {
                     Ok(Some(WittyrcConfig {
                         font_family: Some("Maple Mono NF CN".to_owned()),
+                        font_size: Some(15),
                         terminal_padding: Some(5),
                         background_opacity: Some(0.7),
                         background_image: Some("none".to_owned()),
@@ -4459,6 +4480,7 @@ osc52-clipboard = "allow""#,
             env_options.font_family.as_deref(),
             Some("JetBrainsMono Nerd Font")
         );
+        assert_eq!(env_options.font_size, Some(15));
         assert_eq!(env_options.terminal_padding, Some(5));
         assert_eq!(env_options.background_opacity, Some(0.7));
         assert_eq!(env_options.background_image, None);
