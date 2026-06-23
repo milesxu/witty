@@ -25,7 +25,6 @@ const DEFAULT_SURFACE_CLEAR_COLOR: Rgba = Rgba::BLACK;
 const TRANSPARENT_SURFACE_CLEAR_COLOR: Rgba = Rgba::with_alpha(0, 0, 0, 0);
 const DEFAULT_BACKGROUND_OPACITY: f32 = 1.0;
 const BASELINE_SHIFT_FONT_SCALE: f32 = 0.72;
-const MAX_GLYPHON_TEXT_AREA_CHARS: usize = 120;
 const MAX_GLYPHON_RENDERER_CHARS: usize = 120;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -260,17 +259,15 @@ impl FramePlanner {
     fn plan_row(&self, row: &RenderRow) -> PlannedRow {
         let mut planned = PlannedRow::default();
         let mut background_run = None;
-        let mut glyph_run = None;
         let mut decoration_runs = TextDecorationRuns::default();
 
         for cell in &row.cells {
             self.extend_background_run(&mut planned, &mut background_run, cell);
-            self.extend_glyph_run(&mut planned, &mut glyph_run, cell);
+            self.append_cell_glyph(&mut planned, cell);
             self.extend_text_decoration_runs(&mut planned, &mut decoration_runs, cell);
         }
 
         self.flush_background_run(&mut planned, background_run);
-        self.flush_glyph_run(&mut planned, glyph_run);
         self.flush_text_decoration_runs(&mut planned, decoration_runs);
         planned
     }
@@ -384,61 +381,19 @@ impl FramePlanner {
         });
     }
 
-    fn extend_glyph_run(
-        &self,
-        planned: &mut PlannedRow,
-        current: &mut Option<GlyphRunBuilder>,
-        cell: &RenderCell,
-    ) {
+    fn append_cell_glyph(&self, planned: &mut PlannedRow, cell: &RenderCell) {
         if cell.style.flags.conceal
             || (cell.style.flags.blink && !self.blink_visible)
             || cell.text.trim().is_empty()
         {
-            let old = current.take();
-            self.flush_glyph_run(planned, old);
             return;
         }
-
-        let cell_chars = cell.text.chars().count().max(1);
-        let foreground = effective_foreground(cell);
-        match current {
-            Some(run)
-                if run.foreground == foreground
-                    && run.flags == cell.style.flags
-                    && run.row == cell.point.row
-                    && run.next_col == cell.point.col
-                    && run.char_count.saturating_add(cell_chars) <= MAX_GLYPHON_TEXT_AREA_CHARS =>
-            {
-                run.text.push_str(&cell.text);
-                run.char_count += cell_chars;
-                run.next_col = run.next_col.saturating_add(u16::from(cell.width));
-            }
-            _ => {
-                let old = current.take();
-                self.flush_glyph_run(planned, old);
-                *current = Some(GlyphRunBuilder {
-                    row: cell.point.row,
-                    start_col: cell.point.col,
-                    next_col: cell.point.col.saturating_add(u16::from(cell.width)),
-                    text: cell.text.clone(),
-                    char_count: cell_chars,
-                    foreground,
-                    flags: cell.style.flags,
-                });
-            }
-        }
-    }
-
-    fn flush_glyph_run(&self, planned: &mut PlannedRow, run: Option<GlyphRunBuilder>) {
-        let Some(run) = run else {
-            return;
-        };
 
         planned.glyphs.push(GlyphBatchItem {
-            origin: self.glyph_origin(CellPoint::new(run.row, run.start_col), run.flags),
-            text: run.text,
-            color: run.foreground,
-            style_flags: run.flags,
+            origin: self.glyph_origin(cell.point, cell.style.flags),
+            text: cell.text.clone(),
+            color: effective_foreground(cell),
+            style_flags: cell.style.flags,
         });
     }
 
@@ -1130,17 +1085,6 @@ struct BackgroundRunBuilder {
     next_col: u16,
     cols: u16,
     color: Rgba,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct GlyphRunBuilder {
-    row: u16,
-    start_col: u16,
-    next_col: u16,
-    text: String,
-    char_count: usize,
-    foreground: Rgba,
-    flags: CellFlags,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2904,8 +2848,9 @@ mod tests {
         let frame = planner.plan(&snapshot);
 
         assert_eq!(frame.backgrounds.len(), 1);
-        assert_eq!(frame.glyphs.len(), 1);
-        assert_eq!(frame.glyphs[0].text, "hi");
+        assert_eq!(frame.glyphs.len(), 2);
+        assert_eq!(frame.glyphs[0].text, "h");
+        assert_eq!(frame.glyphs[1].text, "i");
         assert!(frame.cursor.is_some());
     }
 
@@ -3065,20 +3010,66 @@ mod tests {
     }
 
     #[test]
-    fn planner_merges_text_runs_and_splits_on_blank_or_style() {
+    fn planner_positions_glyphs_on_terminal_cell_grid() {
         let mut snapshot = RenderSnapshot::from_plain_lines(&["ab cd"]);
         snapshot.rows[0].cells[4].style.foreground = Rgba::rgb(120, 180, 240);
         let planner = FramePlanner::new(CellMetrics::default());
 
         let frame = planner.plan(&snapshot);
 
+        assert_eq!(frame.glyphs.len(), 4);
+        assert_eq!(frame.glyphs[0].text, "a");
+        assert_eq!(frame.glyphs[1].text, "b");
+        assert_eq!(frame.glyphs[2].text, "c");
+        assert_eq!(frame.glyphs[3].text, "d");
+        assert_eq!(
+            frame.glyphs[2].origin,
+            planner.cell_origin(CellPoint::new(0, 3))
+        );
+        assert_eq!(
+            frame.glyphs[3].origin,
+            planner.cell_origin(CellPoint::new(0, 4))
+        );
+    }
+
+    #[test]
+    fn planner_positions_wide_glyphs_and_cursor_on_terminal_cell_grid() {
+        let metrics = CellMetrics {
+            cell: PixelSize {
+                width: 10.0,
+                height: 20.0,
+            },
+            padding: PixelPoint { x: 0.0, y: 0.0 },
+        };
+        let mut snapshot = RenderSnapshot::from_plain_lines(&["你你a"]);
+        snapshot.cursor.position = CellPoint::new(0, 5);
+        let planner = FramePlanner::new(metrics);
+
+        let frame = planner.plan(&snapshot);
+
         assert_eq!(frame.glyphs.len(), 3);
-        assert_eq!(frame.glyphs[0].text, "ab");
-        assert_eq!(frame.glyphs[1].text, "c");
-        assert_eq!(frame.glyphs[2].text, "d");
+        assert_eq!(frame.glyphs[0].text, "你");
+        assert_eq!(frame.glyphs[0].origin, PixelPoint { x: 0.0, y: 0.0 });
+        assert_eq!(frame.glyphs[1].text, "你");
+        assert_eq!(frame.glyphs[1].origin, PixelPoint { x: 20.0, y: 0.0 });
+        assert_eq!(frame.glyphs[2].text, "a");
+        assert_eq!(frame.glyphs[2].origin, PixelPoint { x: 40.0, y: 0.0 });
+        assert_eq!(frame.cursor.unwrap().origin, PixelPoint { x: 50.0, y: 0.0 });
+    }
+
+    #[test]
+    fn planner_skips_blank_cells_without_collapsing_glyph_columns() {
+        let snapshot = RenderSnapshot::from_plain_lines(&["a b"]);
+        let planner = FramePlanner::new(CellMetrics::default());
+
+        let frame = planner.plan(&snapshot);
+
+        assert_eq!(frame.glyphs.len(), 2);
+        assert_eq!(frame.glyphs[0].text, "a");
+        assert_eq!(frame.glyphs[1].text, "b");
         assert_eq!(
             frame.glyphs[1].origin,
-            planner.cell_origin(CellPoint::new(0, 3))
+            planner.cell_origin(CellPoint::new(0, 2))
         );
     }
 
@@ -3103,24 +3094,20 @@ mod tests {
     }
 
     #[test]
-    fn planner_splits_long_text_runs_for_webgpu_glyphon_batches() {
-        let line = "x".repeat(MAX_GLYPHON_TEXT_AREA_CHARS + 5);
+    fn planner_batches_many_cell_glyphs_for_webgpu_glyphon_prepare() {
+        let line = "x".repeat(MAX_GLYPHON_RENDERER_CHARS + 5);
         let snapshot = RenderSnapshot::from_plain_lines(&[&line]);
         let planner = FramePlanner::new(CellMetrics::default());
 
         let frame = planner.plan(&snapshot);
 
-        assert_eq!(frame.glyphs.len(), 2);
-        assert_eq!(
-            frame.glyphs[0].text.chars().count(),
-            MAX_GLYPHON_TEXT_AREA_CHARS
-        );
+        assert_eq!(frame.glyphs.len(), MAX_GLYPHON_RENDERER_CHARS + 5);
+        assert!(frame.glyphs.iter().all(|glyph| glyph.text == "x"));
         assert_eq!(frame.stats.glyph_prepare_batches, 2);
-        assert_eq!(frame.stats.max_glyph_run_chars, MAX_GLYPHON_TEXT_AREA_CHARS);
-        assert_eq!(frame.glyphs[1].text, "xxxxx");
+        assert_eq!(frame.stats.max_glyph_run_chars, 1);
         assert_eq!(
-            frame.glyphs[1].origin,
-            planner.cell_origin(CellPoint::new(0, MAX_GLYPHON_TEXT_AREA_CHARS as u16))
+            frame.glyphs[MAX_GLYPHON_RENDERER_CHARS].origin,
+            planner.cell_origin(CellPoint::new(0, MAX_GLYPHON_RENDERER_CHARS as u16))
         );
     }
 
@@ -3422,11 +3409,13 @@ mod tests {
 
         let frame = planner.plan(&snapshot);
 
-        assert_eq!(frame.glyphs.len(), 2);
+        assert_eq!(frame.glyphs.len(), 3);
         assert_eq!(frame.glyphs[0].color, Rgba::rgb(200, 100, 50));
         assert_eq!(frame.glyphs[0].text, "a");
         assert_eq!(frame.glyphs[1].color, Rgba::rgb(100, 50, 25));
-        assert_eq!(frame.glyphs[1].text, "bc");
+        assert_eq!(frame.glyphs[1].text, "b");
+        assert_eq!(frame.glyphs[2].color, Rgba::rgb(100, 50, 25));
+        assert_eq!(frame.glyphs[2].text, "c");
         assert_eq!(frame.text_decorations.len(), 2);
         assert_eq!(frame.text_decorations[0].color, Rgba::rgb(100, 50, 25));
         assert_eq!(frame.text_decorations[1].color, Rgba::rgb(80, 200, 20));
@@ -3680,10 +3669,10 @@ mod tests {
                 visible_rows: 1,
                 visible_cols: 5,
                 background_runs: 1,
-                glyph_runs: 3,
+                glyph_runs: 4,
                 glyph_chars: 4,
                 glyph_prepare_batches: 1,
-                max_glyph_run_chars: 2,
+                max_glyph_run_chars: 1,
                 selection_rects: 1,
                 search_highlight_rects: 0,
                 hyperlink_hover_rects: 0,
@@ -3735,7 +3724,7 @@ mod tests {
                 .iter()
                 .map(|glyph| glyph.text.as_str())
                 .collect::<Vec<_>>(),
-            vec!["abc", "xyz"]
+            vec!["a", "b", "c", "x", "y", "z"]
         );
         assert_eq!(second_frame.stats.reused_rows, 1);
         assert_eq!(second_frame.stats.rebuilt_rows, 1);
@@ -3928,7 +3917,7 @@ mod tests {
                 .iter()
                 .map(|glyph| glyph.text.as_str())
                 .collect::<Vec<_>>(),
-            vec!["abc", "def"]
+            vec!["a", "b", "c", "d", "e", "f"]
         );
     }
 
@@ -3956,7 +3945,7 @@ mod tests {
                 .iter()
                 .map(|glyph| glyph.text.as_str())
                 .collect::<Vec<_>>(),
-            vec!["abc", "def"]
+            vec!["a", "b", "c", "d", "e", "f"]
         );
     }
 
@@ -3981,7 +3970,7 @@ mod tests {
                 .iter()
                 .map(|glyph| glyph.text.as_str())
                 .collect::<Vec<_>>(),
-            vec!["abc", "def"]
+            vec!["a", "b", "c", "d", "e", "f"]
         );
     }
 
@@ -4036,7 +4025,7 @@ mod tests {
                 .iter()
                 .map(|glyph| glyph.text.as_str())
                 .collect::<Vec<_>>(),
-            vec!["abc", "def"]
+            vec!["a", "b", "c", "d", "e", "f"]
         );
     }
 
