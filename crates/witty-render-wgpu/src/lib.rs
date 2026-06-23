@@ -97,6 +97,7 @@ pub struct GlyphBatchItem {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FramePlan {
     pub backgrounds: Vec<RectBatchItem>,
+    pub overlay_backgrounds: Vec<RectBatchItem>,
     pub glyphs: Vec<GlyphBatchItem>,
     pub cursor: Option<RectBatchItem>,
     pub selection: Vec<RectBatchItem>,
@@ -122,6 +123,7 @@ impl FramePlan {
         rebuilt_rows: usize,
     ) {
         let rect_count = self.backgrounds.len()
+            + self.overlay_backgrounds.len()
             + self.search_highlights.len()
             + self.selection.len()
             + self.hyperlink_hover.len()
@@ -2011,7 +2013,14 @@ impl WgpuRectRenderer {
 
     fn vertices_for_frame(&self, frame: &FramePlan) -> Vec<Vertex> {
         let mut vertices = Vec::new();
+        let terminal_background_bounds = terminal_background_bounds(&frame.backgrounds);
         for rect in frame.backgrounds.iter() {
+            let rect = terminal_background_rect_for_surface(
+                rect,
+                terminal_background_bounds,
+                self.config.width as f32,
+                self.config.height as f32,
+            );
             push_rect_vertices(
                 &mut vertices,
                 rect.origin.x,
@@ -2032,6 +2041,7 @@ impl WgpuRectRenderer {
             .chain(frame.text_decorations.iter())
             .chain(frame.ime_preedit.iter())
             .chain(frame.cursor.iter())
+            .chain(frame.overlay_backgrounds.iter())
         {
             push_rect_vertices(
                 &mut vertices,
@@ -2666,6 +2676,37 @@ fn create_background_image_texture(
         width: image.width,
         height: image.height,
     }
+}
+
+fn terminal_background_bounds(rects: &[RectBatchItem]) -> Option<(f32, f32)> {
+    let mut max_right = 0.0f32;
+    let mut max_bottom = 0.0f32;
+    for rect in rects {
+        max_right = max_right.max(rect.origin.x + rect.size.width);
+        max_bottom = max_bottom.max(rect.origin.y + rect.size.height);
+    }
+    (!rects.is_empty()).then_some((max_right, max_bottom))
+}
+
+fn terminal_background_rect_for_surface(
+    rect: &RectBatchItem,
+    bounds: Option<(f32, f32)>,
+    surface_width: f32,
+    surface_height: f32,
+) -> RectBatchItem {
+    let Some((max_right, max_bottom)) = bounds else {
+        return rect.clone();
+    };
+    let mut rect = rect.clone();
+    let right = rect.origin.x + rect.size.width;
+    let bottom = rect.origin.y + rect.size.height;
+    if (max_right - right).abs() <= 0.5 && surface_width > right {
+        rect.size.width = (surface_width - rect.origin.x).max(rect.size.width);
+    }
+    if (max_bottom - bottom).abs() <= 0.5 && surface_height > bottom {
+        rect.size.height = (surface_height - rect.origin.y).max(rect.size.height);
+    }
+    rect
 }
 
 #[allow(clippy::too_many_arguments)]

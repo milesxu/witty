@@ -19,7 +19,9 @@ use winit::event::{
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, KeyLocation, ModifiersState, NamedKey, PhysicalKey};
 use winit::monitor::MonitorHandle;
-use winit::window::{Fullscreen, ImePurpose, Window, WindowAttributes, WindowId};
+use winit::window::{
+    CursorIcon, Fullscreen, ImePurpose, ResizeDirection, Window, WindowAttributes, WindowId,
+};
 use witty_core::{
     encode_terminal_focus_event, encode_terminal_mouse_event, paste_payload, terminal_char_width,
     BasicTerminal, CellFlags, CellPoint, CellRange, CursorShape, CursorState, FocusEventKind,
@@ -97,6 +99,8 @@ const CUSTOM_TITLEBAR_MENU_WIDTH: f32 = 220.0;
 const CUSTOM_TITLEBAR_MENU_ITEM_HEIGHT: f32 = 30.0;
 const CUSTOM_TITLEBAR_FULLSCREEN_REVEAL_ZONE: f64 = 4.0;
 const CUSTOM_TITLEBAR_FULLSCREEN_HIDE_DELAY: Duration = Duration::from_millis(900);
+const CUSTOM_RESIZE_BORDER_WIDTH: f64 = 6.0;
+const ABOUT_STATUS_DURATION: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WindowSmokeOptions {
@@ -157,6 +161,65 @@ impl WindowLastActiveClosePolicy {
             Self::Block => "block",
             Self::CloseWindow => "close-window",
             Self::FallbackLocalSession => "fallback-local-session",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum NativeSessionTabPosition {
+    Top,
+    #[default]
+    Bottom,
+}
+
+impl NativeSessionTabPosition {
+    pub(crate) fn config_values() -> &'static [&'static str] {
+        &["top", "bottom"]
+    }
+
+    pub(crate) fn parse_config_value(value: &str) -> Option<Self> {
+        match value {
+            "top" => Some(Self::Top),
+            "bottom" => Some(Self::Bottom),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_config_value(self) -> &'static str {
+        match self {
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum NativeSessionTabLabelStyle {
+    #[default]
+    Index,
+    Profile,
+    IndexProfile,
+}
+
+impl NativeSessionTabLabelStyle {
+    pub(crate) fn config_values() -> &'static [&'static str] {
+        &["index", "profile", "index-profile"]
+    }
+
+    pub(crate) fn parse_config_value(value: &str) -> Option<Self> {
+        match value {
+            "index" => Some(Self::Index),
+            "profile" => Some(Self::Profile),
+            "index-profile" | "index_profile" => Some(Self::IndexProfile),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_config_value(self) -> &'static str {
+        match self {
+            Self::Index => "index",
+            Self::Profile => "profile",
+            Self::IndexProfile => "index-profile",
         }
     }
 }
@@ -856,6 +919,27 @@ impl<T> NativeSessionRuntimeRegistry<T> {
     #[cfg(test)]
     fn as_slice(&self) -> &[NativeSessionRuntimeRecord<T>] {
         &self.parked
+    }
+}
+
+impl<T> NativeSessionRuntimeRegistry<T>
+where
+    T: TerminalTransport,
+{
+    fn resize_all(&mut self, size: GridSize) {
+        for record in &mut self.parked {
+            record.runtime.terminal.resize(size);
+            if let Err(err) = record.runtime.transport.resize(size) {
+                eprintln!(
+                    "failed to resize parked session {}: {err:#}",
+                    record.id.0
+                );
+            }
+            record
+                .runtime
+                .terminal_search
+                .rebuild(&record.runtime.terminal.search_text_rows());
+        }
     }
 }
 
@@ -2135,6 +2219,8 @@ pub fn run(
     background_opacity: Option<f32>,
     background_image_path: Option<PathBuf>,
     background_image_fit: Option<RendererBackgroundImageFit>,
+    session_tab_position: NativeSessionTabPosition,
+    session_tab_label_style: NativeSessionTabLabelStyle,
     font_paths: Vec<PathBuf>,
     restore_state: Option<RestartSnapshotV1>,
 ) -> anyhow::Result<()> {
@@ -2159,6 +2245,8 @@ pub fn run(
         background_opacity,
         background_image_path,
         background_image_fit,
+        session_tab_position,
+        session_tab_label_style,
         font_paths,
         restore_state,
     )?;
@@ -2941,6 +3029,8 @@ struct TerminalWindowApp {
     profile_action_session_runtimes: NativeSessionRuntimeRegistry<LocalPtyTransport>,
     active_session_close_fallback_policy: NativeActiveSessionCloseFallbackPolicy,
     session_tab_notice: Option<NativeSessionTabStripNotice>,
+    session_tab_position: NativeSessionTabPosition,
+    session_tab_label_style: NativeSessionTabLabelStyle,
     shell_integration: ShellIntegrationState,
     ime_composition: ImeComposition,
     metrics: CellMetrics,
@@ -2966,6 +3056,7 @@ struct TerminalWindowApp {
     hovered_empty_session_welcome: Option<NativeEmptySessionWelcomeHit>,
     hovered_hyperlink: Option<HyperlinkId>,
     hovered_command_block_id: Option<u64>,
+    about_status_deadline: Option<Instant>,
     selection_anchor: Option<CellPoint>,
     last_left_click: Option<ClickStamp>,
     mouse_report: NativeMouseReportState,
@@ -3021,6 +3112,8 @@ impl TerminalWindowApp {
         background_opacity: Option<f32>,
         background_image_path: Option<PathBuf>,
         background_image_fit: Option<RendererBackgroundImageFit>,
+        session_tab_position: NativeSessionTabPosition,
+        session_tab_label_style: NativeSessionTabLabelStyle,
         font_paths: Vec<PathBuf>,
         restore_state: Option<RestartSnapshotV1>,
     ) -> Result<Self> {
@@ -3118,6 +3211,8 @@ impl TerminalWindowApp {
             profile_action_session_runtimes: startup.profile_action_session_runtimes,
             active_session_close_fallback_policy: smoke.last_active_close_policy.into(),
             session_tab_notice: None,
+            session_tab_position,
+            session_tab_label_style,
             shell_integration: ShellIntegrationState::default(),
             ime_composition: ImeComposition::default(),
             metrics,
@@ -3143,6 +3238,7 @@ impl TerminalWindowApp {
             hovered_empty_session_welcome: None,
             hovered_hyperlink: None,
             hovered_command_block_id: None,
+            about_status_deadline: None,
             selection_anchor: None,
             last_left_click: None,
             mouse_report: NativeMouseReportState::default(),
@@ -3194,15 +3290,21 @@ impl TerminalWindowApp {
         }
 
         self.size = size;
-        self.terminal.resize(size);
-        if let Err(err) = self.app.resize_transport(size) {
-            eprintln!("failed to resize local pty: {err:#}");
-        }
-        self.refresh_search_after_terminal_change();
+        self.sync_all_session_runtime_sizes();
         let _ = self.refresh_session_tab_hover_for_current_pointer();
         let _ = self.refresh_profile_action_hover_for_current_pointer();
         let _ = self.refresh_empty_session_welcome_hover_for_current_pointer();
         self.rebuild_frame();
+    }
+
+    fn sync_all_session_runtime_sizes(&mut self) {
+        let size = self.size;
+        self.terminal.resize(size);
+        if let Err(err) = self.app.resize_transport(size) {
+            eprintln!("failed to resize active pty: {err:#}");
+        }
+        self.profile_action_session_runtimes.resize_all(size);
+        self.refresh_search_after_terminal_change();
     }
 
     fn apply_window_scale_factor(&mut self, scale_factor: f64) -> bool {
@@ -3331,6 +3433,8 @@ impl TerminalWindowApp {
             &session_tabs,
             self.hovered_session_tab,
             self.session_tab_notice,
+            self.session_tab_position,
+            self.session_tab_label_style,
             self.metrics,
             self.size,
         );
@@ -3353,6 +3457,12 @@ impl TerminalWindowApp {
             &mut frame,
             self.profile_actions.snapshot(),
             self.hovered_profile_action,
+            self.metrics,
+            self.size,
+        );
+        apply_about_status_overlay(
+            &mut frame,
+            self.about_status_deadline.is_some(),
             self.metrics,
             self.size,
         );
@@ -4052,6 +4162,7 @@ impl TerminalWindowApp {
         );
 
         if close_result == NativeSessionCloseResult::Closed {
+            self.sync_all_session_runtime_sizes();
             self.command_block_action_menu.close();
             self.selection_anchor = None;
             self.last_left_click = None;
@@ -4162,6 +4273,22 @@ impl TerminalWindowApp {
                 return true;
             }
             return false;
+        }
+
+        event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+        false
+    }
+
+    fn apply_about_status_timeout(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        let Some(deadline) = self.about_status_deadline else {
+            return false;
+        };
+
+        if Instant::now() >= deadline {
+            self.about_status_deadline = None;
+            self.rebuild_frame();
+            self.request_redraw();
+            return true;
         }
 
         event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
@@ -4442,6 +4569,7 @@ impl TerminalWindowApp {
         self.ime_composition.clear_preedit();
         self.terminal_search.close();
         self.command_block_action_menu.close();
+        self.about_status_deadline = None;
         self.command_palette.open(self.app.commands());
         self.rebuild_frame();
     }
@@ -4450,12 +4578,23 @@ impl TerminalWindowApp {
         self.ime_composition.clear_preedit();
         self.command_palette.close();
         self.command_block_action_menu.close();
+        self.about_status_deadline = None;
         apply_search_command(
             &mut self.terminal,
             &mut self.terminal_search,
             SEARCH_OPEN_COMMAND_ID,
         );
         self.rebuild_frame();
+    }
+
+    fn show_about_status(&mut self) {
+        self.ime_composition.clear_preedit();
+        self.command_palette.close();
+        self.command_block_action_menu.close();
+        self.terminal_search.close();
+        self.about_status_deadline = Instant::now().checked_add(ABOUT_STATUS_DURATION);
+        self.rebuild_frame();
+        self.request_redraw();
     }
 
     fn toggle_frame_diagnostics(&mut self) {
@@ -4969,9 +5108,14 @@ impl TerminalWindowApp {
             self.start_new_local_shell_command();
             return;
         }
+        if command_id == "witty.about" {
+            self.show_about_status();
+            return;
+        }
         if apply_search_command(&mut self.terminal, &mut self.terminal_search, command_id) {
             self.close_command_palette();
             self.command_block_action_menu.close();
+            self.about_status_deadline = None;
             self.rebuild_frame();
             return;
         }
@@ -5265,6 +5409,8 @@ impl TerminalWindowApp {
         let hovered = native_session_tab_strip_hit_for_position(
             &rows,
             self.session_tab_notice,
+            self.session_tab_position,
+            self.session_tab_label_style,
             position,
             self.metrics,
             self.size,
@@ -5304,7 +5450,11 @@ impl TerminalWindowApp {
             return false;
         }
 
-        self.profile_action_sessions.set_active(target_session_id)
+        let switched = self.profile_action_sessions.set_active(target_session_id);
+        if switched {
+            self.sync_all_session_runtime_sizes();
+        }
+        switched
     }
 
     fn close_profile_action_session(
@@ -5328,6 +5478,7 @@ impl TerminalWindowApp {
                 &mut self.profile_action_sessions,
                 &mut self.profile_action_session_runtimes,
             ) {
+                self.sync_all_session_runtime_sizes();
                 return NativeSessionCloseResult::Closed;
             }
             if !has_inactive_parked_native_session_runtime(
@@ -5364,6 +5515,8 @@ impl TerminalWindowApp {
         let Some(hit) = native_session_tab_strip_hit_for_position(
             &rows,
             self.session_tab_notice,
+            self.session_tab_position,
+            self.session_tab_label_style,
             position,
             self.metrics,
             self.size,
@@ -5965,6 +6118,82 @@ impl TerminalWindowApp {
         }
     }
 
+    fn handle_resize_mouse_input(&mut self, state: ElementState, button: MouseButton) -> bool {
+        if button != MouseButton::Left {
+            return false;
+        }
+
+        let Some(position) = self.pointer_position else {
+            return false;
+        };
+        let Some(direction) = self.resize_direction_for_position(position) else {
+            return false;
+        };
+
+        if state == ElementState::Pressed {
+            if let Some(window) = &self.window {
+                if let Err(err) = window.drag_resize_window(direction) {
+                    eprintln!("failed to start window resize: {err:#}");
+                }
+            }
+        }
+        true
+    }
+
+    fn resize_direction_for_position(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<ResizeDirection> {
+        if self.window_fullscreen {
+            return None;
+        }
+        if matches!(
+            self.titlebar_hit_test(position),
+            Some(NativeTitleBarHit::Button(_) | NativeTitleBarHit::MenuItem(_))
+        ) {
+            return None;
+        }
+        let window = self.window.as_ref()?;
+        if window.is_maximized() {
+            return None;
+        }
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return None;
+        }
+
+        let border = (CUSTOM_RESIZE_BORDER_WIDTH * window.scale_factor()).max(1.0);
+        let x = position.x;
+        let y = position.y;
+        let left = x >= 0.0 && x <= border;
+        let right = x >= (f64::from(size.width) - border) && x < f64::from(size.width);
+        let top = y >= 0.0 && y <= border;
+        let bottom = y >= (f64::from(size.height) - border) && y < f64::from(size.height);
+
+        match (top, bottom, left, right) {
+            (true, _, true, _) => Some(ResizeDirection::NorthWest),
+            (true, _, _, true) => Some(ResizeDirection::NorthEast),
+            (_, true, true, _) => Some(ResizeDirection::SouthWest),
+            (_, true, _, true) => Some(ResizeDirection::SouthEast),
+            (true, _, _, _) => Some(ResizeDirection::North),
+            (_, true, _, _) => Some(ResizeDirection::South),
+            (_, _, true, _) => Some(ResizeDirection::West),
+            (_, _, _, true) => Some(ResizeDirection::East),
+            _ => None,
+        }
+    }
+
+    fn sync_resize_cursor_for_position(&self, position: PhysicalPosition<f64>) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        let cursor = self
+            .resize_direction_for_position(position)
+            .map(CursorIcon::from)
+            .unwrap_or(CursorIcon::Default);
+        window.set_cursor(cursor);
+    }
+
     fn activate_titlebar_menu_item(&mut self, item: NativeTitleBarMenuItem) {
         match item {
             NativeTitleBarMenuItem::NewLocalShell => self.start_new_local_shell_command(),
@@ -5979,6 +6208,9 @@ impl TerminalWindowApp {
     }
 
     fn handle_mouse_input(&mut self, state: ElementState, button: MouseButton) -> bool {
+        if self.handle_resize_mouse_input(state, button) {
+            return true;
+        }
         if self.handle_titlebar_mouse_input(state, button) {
             return true;
         }
@@ -6048,6 +6280,7 @@ impl TerminalWindowApp {
 
     fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) -> bool {
         self.pointer_position = Some(position);
+        self.sync_resize_cursor_for_position(position);
         let titlebar_changed = self.update_titlebar_for_cursor_position(position);
         if self.titlebar_consumes_position(position) {
             let content_hover_changed = self.clear_content_hover_state();
@@ -6170,6 +6403,9 @@ impl TerminalWindowApp {
 
     fn handle_cursor_left(&mut self) -> bool {
         self.pointer_position = None;
+        if let Some(window) = &self.window {
+            window.set_cursor(CursorIcon::Default);
+        }
         let content_hover_changed = self.clear_content_hover_state();
         let titlebar_hover_changed = self.hovered_titlebar_hit.is_some();
         self.hovered_titlebar_hit = None;
@@ -6610,6 +6846,10 @@ impl ApplicationHandler<NativeWindowEvent> for TerminalWindowApp {
             return;
         }
         if self.apply_fullscreen_titlebar_hide_timeout(event_loop) {
+            self.schedule_background_image_result_poll(event_loop);
+            return;
+        }
+        if self.apply_about_status_timeout(event_loop) {
             self.schedule_background_image_result_poll(event_loop);
             return;
         }
@@ -8038,6 +8278,7 @@ fn apply_empty_session_welcome_overlay(
     }
 
     frame.backgrounds.clear();
+    frame.overlay_backgrounds.clear();
     frame.glyphs.clear();
     frame.cursor = None;
     frame.selection.clear();
@@ -8051,7 +8292,7 @@ fn apply_empty_session_welcome_overlay(
         return;
     }
 
-    frame.backgrounds.push(RectBatchItem {
+    frame.overlay_backgrounds.push(RectBatchItem {
         origin: cell_origin(CellPoint::new(0, 0), metrics),
         size: PixelSize {
             width: f32::from(grid_size.cols) * metrics.cell.width,
@@ -8091,7 +8332,7 @@ fn apply_empty_session_welcome_overlay(
     }
     for span in empty_session_welcome_button_spans(content_width) {
         if hovered.is_some_and(|hit| hit.target == span.target) {
-            frame.backgrounds.push(RectBatchItem {
+            frame.overlay_backgrounds.push(RectBatchItem {
                 origin: cell_origin(
                     CellPoint::new(
                         panel.start.row + button_row,
@@ -8286,7 +8527,7 @@ fn apply_search_bar_overlay(
         frame.cursor = None;
     }
 
-    frame.backgrounds.push(RectBatchItem {
+    frame.overlay_backgrounds.push(RectBatchItem {
         origin: panel_origin,
         size: panel_size,
         color: Rgba::rgb(18, 24, 30),
@@ -8301,6 +8542,67 @@ fn apply_search_bar_overlay(
         &search_bar_text(search, ime, panel.cols.saturating_sub(2)),
         Rgba::rgb(232, 238, 226),
     );
+}
+
+fn apply_about_status_overlay(
+    frame: &mut FramePlan,
+    visible: bool,
+    metrics: CellMetrics,
+    grid_size: GridSize,
+) {
+    if !visible || grid_size.rows == 0 || grid_size.cols == 0 {
+        return;
+    }
+
+    let panel = search_bar_panel(grid_size);
+    let panel_origin = cell_origin(panel.start, metrics);
+    let panel_size = PixelSize {
+        width: f32::from(panel.cols) * metrics.cell.width,
+        height: metrics.cell.height,
+    };
+
+    frame
+        .glyphs
+        .retain(|glyph| !glyph_origin_inside(glyph, panel_origin, panel_size));
+    frame
+        .search_highlights
+        .retain(|rect| !rect_origin_inside(rect, panel_origin, panel_size));
+    frame
+        .selection
+        .retain(|rect| !rect_origin_inside(rect, panel_origin, panel_size));
+    if frame
+        .cursor
+        .as_ref()
+        .is_some_and(|cursor| rect_origin_inside(cursor, panel_origin, panel_size))
+    {
+        frame.cursor = None;
+    }
+
+    frame.overlay_backgrounds.push(RectBatchItem {
+        origin: panel_origin,
+        size: panel_size,
+        color: Rgba::rgb(18, 24, 30),
+    });
+
+    push_palette_text(
+        frame,
+        panel,
+        metrics,
+        0,
+        1,
+        &about_status_text(panel.cols.saturating_sub(2)),
+        Rgba::rgb(232, 238, 226),
+    );
+}
+
+fn about_status_text(width: u16) -> String {
+    truncate_cells(
+        &format!(
+            "Witty {} - Rust/wgpu terminal prototype | Ctrl+Shift+P Commands | Ctrl+Shift+F Search | F11 Fullscreen",
+            env!("CARGO_PKG_VERSION")
+        ),
+        width,
+    )
 }
 
 fn search_bar_panel(grid_size: GridSize) -> PalettePanel {
@@ -8386,10 +8688,25 @@ fn apply_command_palette_overlay(
     frame
         .glyphs
         .retain(|glyph| !glyph_origin_inside(glyph, panel_origin, panel_size));
+    frame
+        .search_highlights
+        .retain(|rect| !rect_origin_inside(rect, panel_origin, panel_size));
+    frame
+        .hyperlink_hover
+        .retain(|rect| !rect_origin_inside(rect, panel_origin, panel_size));
+    frame
+        .hyperlink_underlines
+        .retain(|rect| !rect_origin_inside(rect, panel_origin, panel_size));
+    frame
+        .text_decorations
+        .retain(|rect| !rect_origin_inside(rect, panel_origin, panel_size));
+    frame
+        .ime_preedit
+        .retain(|rect| !rect_origin_inside(rect, panel_origin, panel_size));
     frame.selection.clear();
     frame.cursor = None;
 
-    frame.backgrounds.push(RectBatchItem {
+    frame.overlay_backgrounds.push(RectBatchItem {
         origin: panel_origin,
         size: panel_size,
         color: Rgba::rgb(18, 22, 28),
@@ -8422,7 +8739,7 @@ fn apply_command_palette_overlay(
     for (offset, item) in items.iter().enumerate() {
         let row = offset as u16 + 1;
         if item.selected {
-            frame.backgrounds.push(RectBatchItem {
+            frame.overlay_backgrounds.push(RectBatchItem {
                 origin: cell_origin(
                     CellPoint::new(panel.start.row + row, panel.start.col),
                     metrics,
@@ -8491,7 +8808,7 @@ fn apply_profile_action_overlay(
         frame.cursor = None;
     }
 
-    frame.backgrounds.push(RectBatchItem {
+    frame.overlay_backgrounds.push(RectBatchItem {
         origin: panel_origin,
         size: panel_size,
         color: Rgba::rgb(20, 28, 34),
@@ -8516,7 +8833,7 @@ fn apply_profile_action_overlay(
         .enumerate()
     {
         if let Some(hit) = hovered.filter(|hit| hit.row_index == offset && hit.key == row.key) {
-            frame.backgrounds.push(RectBatchItem {
+            frame.overlay_backgrounds.push(RectBatchItem {
                 origin: cell_origin(
                     CellPoint::new(panel.start.row + offset as u16 + 1, panel.start.col),
                     metrics,
@@ -8551,7 +8868,7 @@ fn apply_profile_action_overlay(
         if let Some(hit) =
             hovered.filter(|hit| hit.row_index == start_success_row_index && hit.key == success.key)
         {
-            frame.backgrounds.push(RectBatchItem {
+            frame.overlay_backgrounds.push(RectBatchItem {
                 origin: cell_origin(
                     CellPoint::new(panel.start.row + row_offset as u16, panel.start.col),
                     metrics,
@@ -8587,7 +8904,7 @@ fn apply_profile_action_overlay(
         if let Some(hit) =
             hovered.filter(|hit| hit.row_index == start_failure_row_index && hit.key == failure.key)
         {
-            frame.backgrounds.push(RectBatchItem {
+            frame.overlay_backgrounds.push(RectBatchItem {
                 origin: cell_origin(
                     CellPoint::new(panel.start.row + row_offset as u16, panel.start.col),
                     metrics,
@@ -8631,7 +8948,7 @@ fn apply_profile_action_overlay(
         if let Some(hit) = hovered
             .filter(|hit| hit.row_index == overlay_row_index && hit.key == option.request_key)
         {
-            frame.backgrounds.push(RectBatchItem {
+            frame.overlay_backgrounds.push(RectBatchItem {
                 origin: cell_origin(
                     CellPoint::new(panel.start.row + row_offset as u16, panel.start.col),
                     metrics,
@@ -8673,6 +8990,8 @@ fn apply_native_session_tab_strip_overlay(
     rows: &[NativeSessionTabRow],
     hovered: Option<NativeSessionTabStripHit>,
     notice: Option<NativeSessionTabStripNotice>,
+    position: NativeSessionTabPosition,
+    label_style: NativeSessionTabLabelStyle,
     metrics: CellMetrics,
     grid_size: GridSize,
 ) {
@@ -8680,7 +8999,11 @@ fn apply_native_session_tab_strip_overlay(
         return;
     }
 
-    let origin = cell_origin(CellPoint::new(0, 0), metrics);
+    let Some(tab_row) = native_session_tab_strip_row(position, grid_size) else {
+        return;
+    };
+
+    let origin = cell_origin(CellPoint::new(tab_row, 0), metrics);
     let size = PixelSize {
         width: f32::from(grid_size.cols) * metrics.cell.width,
         height: metrics.cell.height,
@@ -8702,19 +9025,19 @@ fn apply_native_session_tab_strip_overlay(
         frame.cursor = None;
     }
 
-    frame.backgrounds.push(RectBatchItem {
+    frame.overlay_backgrounds.push(RectBatchItem {
         origin,
         size,
         color: Rgba::rgb(18, 24, 28),
     });
     let width = grid_size.cols.saturating_sub(2);
     let action_width = native_session_tab_strip_action_width(rows, notice, width);
-    for span in native_session_tab_strip_spans(rows, action_width) {
+    for span in native_session_tab_strip_spans(rows, action_width, label_style) {
         if Some(span.hit) != hovered {
             continue;
         }
-        frame.backgrounds.push(RectBatchItem {
-            origin: cell_origin(CellPoint::new(0, 1 + span.start_col), metrics),
+        frame.overlay_backgrounds.push(RectBatchItem {
+            origin: cell_origin(CellPoint::new(tab_row, 1 + span.start_col), metrics),
             size: PixelSize {
                 width: f32::from(span.end_col.saturating_sub(span.start_col)) * metrics.cell.width,
                 height: metrics.cell.height,
@@ -8723,11 +9046,12 @@ fn apply_native_session_tab_strip_overlay(
         });
     }
     frame.glyphs.push(GlyphBatchItem {
-        origin: cell_origin(CellPoint::new(0, 1), metrics),
+        origin: cell_origin(CellPoint::new(tab_row, 1), metrics),
         text: native_session_tab_strip_text_with_notice(
             rows,
             notice,
             grid_size.cols.saturating_sub(2),
+            label_style,
         ),
         color: Rgba::rgb(228, 235, 236),
         style_flags: CellFlags::default(),
@@ -8737,6 +9061,8 @@ fn apply_native_session_tab_strip_overlay(
 fn native_session_tab_strip_hit_for_position(
     rows: &[NativeSessionTabRow],
     notice: Option<NativeSessionTabStripNotice>,
+    position_kind: NativeSessionTabPosition,
+    label_style: NativeSessionTabLabelStyle,
     position: PhysicalPosition<f64>,
     metrics: CellMetrics,
     grid_size: GridSize,
@@ -8744,20 +9070,31 @@ fn native_session_tab_strip_hit_for_position(
     if rows.is_empty() || grid_size.rows == 0 || grid_size.cols < 8 {
         return None;
     }
+    let tab_row = native_session_tab_strip_row(position_kind, grid_size)?;
 
     let point = pixel_point_for_position(position)?;
     let cell = cell_point_for_pixel_point(point, metrics, grid_size);
-    if cell.row != 0 || cell.col == 0 {
+    if cell.row != tab_row || cell.col == 0 {
         return None;
     }
 
     let text_col = cell.col.saturating_sub(1);
     let width = grid_size.cols.saturating_sub(2);
     let action_width = native_session_tab_strip_action_width(rows, notice, width);
-    native_session_tab_strip_spans(rows, action_width)
+    native_session_tab_strip_spans(rows, action_width, label_style)
         .into_iter()
         .find(|span| text_col >= span.start_col && text_col < span.end_col)
         .map(|span| span.hit)
+}
+
+fn native_session_tab_strip_row(
+    position: NativeSessionTabPosition,
+    grid_size: GridSize,
+) -> Option<u16> {
+    match position {
+        NativeSessionTabPosition::Top => Some(0),
+        NativeSessionTabPosition::Bottom => grid_size.rows.checked_sub(1),
+    }
 }
 
 fn native_session_tab_strip_action_width(
@@ -8787,6 +9124,7 @@ fn native_session_tab_strip_action_width(
 fn native_session_tab_strip_spans(
     rows: &[NativeSessionTabRow],
     width: u16,
+    label_style: NativeSessionTabLabelStyle,
 ) -> Vec<NativeSessionTabStripSpan> {
     let mut spans = Vec::new();
     let mut col = 0u16;
@@ -8794,7 +9132,7 @@ fn native_session_tab_strip_spans(
         if col >= width {
             break;
         }
-        let label_width = text_cell_width(&native_session_tab_label(row));
+        let label_width = text_cell_width(&native_session_tab_label(row, row_index, label_style));
         let close_width = text_cell_width(native_session_tab_close_label());
         let summary_width = label_width.saturating_add(1).saturating_add(close_width);
         let select_end_col = col.saturating_add(label_width).min(width);
@@ -8827,20 +9165,17 @@ fn native_session_tab_strip_spans(
     spans
 }
 
-#[cfg(test)]
-fn native_session_tab_strip_text(rows: &[NativeSessionTabRow], width: u16) -> String {
-    native_session_tab_strip_text_with_notice(rows, None, width)
-}
-
 fn native_session_tab_strip_text_with_notice(
     rows: &[NativeSessionTabRow],
     notice: Option<NativeSessionTabStripNotice>,
     width: u16,
+    label_style: NativeSessionTabLabelStyle,
 ) -> String {
     let Some(notice) = notice else {
         let text = rows
             .iter()
-            .map(native_session_tab_summary)
+            .enumerate()
+            .map(|(row_index, row)| native_session_tab_summary(row, row_index, label_style))
             .collect::<Vec<_>>()
             .join("  ");
         return truncate_cells(&text, width);
@@ -8853,7 +9188,8 @@ fn native_session_tab_strip_text_with_notice(
 
     let text = rows
         .iter()
-        .map(native_session_tab_summary)
+        .enumerate()
+        .map(|(row_index, row)| native_session_tab_summary(row, row_index, label_style))
         .collect::<Vec<_>>()
         .join("  ");
     let notice_width = text_cell_width(notice_text);
@@ -8878,28 +9214,35 @@ fn native_session_tab_strip_text_with_notice(
     )
 }
 
-fn native_session_tab_summary(row: &NativeSessionTabRow) -> String {
+fn native_session_tab_summary(
+    row: &NativeSessionTabRow,
+    row_index: usize,
+    label_style: NativeSessionTabLabelStyle,
+) -> String {
     format!(
         "{} {}",
-        native_session_tab_label(row),
+        native_session_tab_label(row, row_index, label_style),
         native_session_tab_close_label()
     )
 }
 
-fn native_session_tab_label(row: &NativeSessionTabRow) -> String {
-    let marker = if row.active { "[active]" } else { "[inactive]" };
-
-    format!(
-        "{marker} {} | {} | plugin={} | mode={}",
-        row.profile_id,
-        native_resolved_profile_action_kind_label(row.kind),
-        row.source_plugin,
-        native_profile_action_start_mode_label(row.mode)
-    )
+fn native_session_tab_label(
+    row: &NativeSessionTabRow,
+    row_index: usize,
+    label_style: NativeSessionTabLabelStyle,
+) -> String {
+    let marker = if row.active { "*" } else { "" };
+    match label_style {
+        NativeSessionTabLabelStyle::Index => format!("{marker}{row_index}"),
+        NativeSessionTabLabelStyle::Profile => format!("{marker}{}", row.profile_id),
+        NativeSessionTabLabelStyle::IndexProfile => {
+            format!("{marker}{row_index}:{}", row.profile_id)
+        }
+    }
 }
 
 fn native_session_tab_close_label() -> &'static str {
-    "[x]"
+    "x"
 }
 
 fn native_session_tab_strip_notice_text(notice: NativeSessionTabStripNotice) -> &'static str {
@@ -8923,6 +9266,7 @@ fn offset_frame_y(frame: &mut FramePlan, offset: f32) {
     for rect in frame
         .backgrounds
         .iter_mut()
+        .chain(frame.overlay_backgrounds.iter_mut())
         .chain(frame.selection.iter_mut())
         .chain(frame.search_highlights.iter_mut())
         .chain(frame.hyperlink_hover.iter_mut())
@@ -8960,7 +9304,7 @@ fn apply_native_titlebar_overlay(
     clear_frame_regions(frame, &clear_regions);
 
     if overlay.visible {
-        frame.backgrounds.push(rect_item(
+        frame.overlay_backgrounds.push(rect_item(
             titlebar_rect,
             if overlay.menu_open {
                 Rgba::rgb(25, 31, 36)
@@ -8968,7 +9312,7 @@ fn apply_native_titlebar_overlay(
                 Rgba::rgb(21, 27, 32)
             },
         ));
-        frame.backgrounds.push(RectBatchItem {
+        frame.overlay_backgrounds.push(RectBatchItem {
             origin: PixelPoint {
                 x: 0.0,
                 y: native_titlebar_height(scale_factor)
@@ -8994,6 +9338,11 @@ fn apply_native_titlebar_overlay(
 
 fn clear_frame_regions(frame: &mut FramePlan, regions: &[NativeOverlayRect]) {
     frame.backgrounds.retain(|rect| {
+        !regions
+            .iter()
+            .any(|region| rect_origin_inside(rect, region.origin, region.size))
+    });
+    frame.overlay_backgrounds.retain(|rect| {
         !regions
             .iter()
             .any(|region| rect_origin_inside(rect, region.origin, region.size))
@@ -9060,7 +9409,7 @@ fn draw_native_titlebar_button(
         (_, true) => Rgba::rgb(44, 55, 62),
         _ => Rgba::rgb(29, 37, 43),
     };
-    frame.backgrounds.push(rect_item(rect, button_color));
+    frame.overlay_backgrounds.push(rect_item(rect, button_color));
 
     if button == NativeTitleBarButton::Menu {
         draw_menu_button_icon(frame, rect, hovered, scale_factor);
@@ -9107,7 +9456,7 @@ fn draw_menu_button_icon(
     let line_gap = 5.0 * scale_factor;
     let line_x = rect.origin.x + (rect.size.width - line_width) * 0.5;
     for line_index in 0..3 {
-        frame.backgrounds.push(RectBatchItem {
+        frame.overlay_backgrounds.push(RectBatchItem {
             origin: PixelPoint {
                 x: line_x,
                 y: rect.origin.y + line_top + line_index as f32 * line_gap,
@@ -9179,8 +9528,8 @@ fn draw_native_titlebar_menu(
         },
         ..menu_rect
     };
-    frame.backgrounds.push(rect_item(menu_rect, Rgba::rgb(27, 35, 40)));
-    frame.backgrounds.push(RectBatchItem {
+    frame.overlay_backgrounds.push(rect_item(menu_rect, Rgba::rgb(27, 35, 40)));
+    frame.overlay_backgrounds.push(RectBatchItem {
         origin: menu_rect.origin,
         size: PixelSize {
             width: menu_rect.size.width,
@@ -9198,7 +9547,7 @@ fn draw_native_titlebar_menu(
             .hovered_hit
             .is_some_and(|hit| hit == NativeTitleBarHit::MenuItem(item));
         if hovered {
-            frame.backgrounds.push(RectBatchItem {
+            frame.overlay_backgrounds.push(RectBatchItem {
                 origin: row_origin,
                 size: PixelSize {
                     width: menu_rect.size.width,
@@ -9413,7 +9762,7 @@ fn apply_native_update_notice_overlay(
         frame.cursor = None;
     }
 
-    frame.backgrounds.push(RectBatchItem {
+    frame.overlay_backgrounds.push(RectBatchItem {
         origin,
         size,
         color: Rgba::rgb(54, 43, 18),
@@ -9422,7 +9771,7 @@ fn apply_native_update_notice_overlay(
         let width = grid_size.cols.saturating_sub(2);
         let button_width = text_cell_width(&native_update_notice_button_text());
         if width > button_width {
-            frame.backgrounds.push(RectBatchItem {
+            frame.overlay_backgrounds.push(RectBatchItem {
                 origin: cell_origin(
                     CellPoint::new(row, 1 + width.saturating_sub(button_width)),
                     metrics,
@@ -10032,15 +10381,6 @@ fn profile_action_status_label(status: NativeProfileActionDisplayStatus) -> &'st
     }
 }
 
-fn native_resolved_profile_action_kind_label(
-    kind: NativeResolvedProfileActionKind,
-) -> &'static str {
-    match kind {
-        NativeResolvedProfileActionKind::ProfilePicker => "picker",
-        NativeResolvedProfileActionKind::ProfileLaunch => "launch",
-    }
-}
-
 fn native_profile_action_start_mode_label(mode: NativeProfileActionStartMode) -> &'static str {
     match mode {
         NativeProfileActionStartMode::ReplaceCurrentSession => "replace_current_session",
@@ -10163,7 +10503,7 @@ fn apply_frame_diagnostics_overlay(
         frame.cursor = None;
     }
 
-    frame.backgrounds.push(RectBatchItem {
+    frame.overlay_backgrounds.push(RectBatchItem {
         origin: panel_origin,
         size: panel_size,
         color: Rgba::rgb(24, 30, 34),
@@ -12711,9 +13051,14 @@ mod tests {
         assert!(!rows[1].active);
         assert_eq!(rows[1].profile_id, "prod");
         assert_eq!(rows[1].mode, NativeProfileActionStartMode::NewTab);
-        let tab_text = native_session_tab_strip_text(&rows, 240);
-        assert!(tab_text.contains("[inactive] prod | launch"));
-        assert!(tab_text.contains("mode=new_tab"));
+        let tab_text = native_session_tab_strip_text_with_notice(
+            &rows,
+            None,
+            240,
+            NativeSessionTabLabelStyle::IndexProfile,
+        );
+        assert!(tab_text.contains("*0:active x"));
+        assert!(tab_text.contains("1:prod x"));
         for hidden in [
             "prod.example.com",
             "ssh",
@@ -12897,9 +13242,14 @@ mod tests {
             Some("/active")
         );
 
-        let tab_text = native_session_tab_strip_text(&sessions.tab_rows(), 240);
-        assert!(tab_text.contains("[inactive] local-1 | launch | plugin=witty-local"));
-        assert!(tab_text.contains("[active] local-2 | launch | plugin=witty-local"));
+        let tab_text = native_session_tab_strip_text_with_notice(
+            &sessions.tab_rows(),
+            None,
+            240,
+            NativeSessionTabLabelStyle::IndexProfile,
+        );
+        assert!(tab_text.contains("0:local-1 x"));
+        assert!(tab_text.contains("*1:local-2 x"));
     }
 
     #[test]
@@ -13225,9 +13575,14 @@ mod tests {
         assert_eq!(rows[1].session_id, NativeSessionId(2));
         assert_eq!(rows[1].profile_id, "staging");
         assert!(rows[1].active);
-        let text = native_session_tab_strip_text(&rows, 120);
-        assert!(text.contains("[inactive] prod | launch"));
-        assert!(text.contains("[active] staging | picker"));
+        let text = native_session_tab_strip_text_with_notice(
+            &rows,
+            None,
+            120,
+            NativeSessionTabLabelStyle::IndexProfile,
+        );
+        assert!(text.contains("0:prod x"));
+        assert!(text.contains("*1:staging x"));
         assert!(!text.contains("open production"));
         assert!(!text.contains("choose staging"));
         assert!(!registry.set_active(NativeSessionId(99)));
@@ -13736,6 +14091,8 @@ mod tests {
             None,
             None,
             None,
+            NativeSessionTabPosition::Bottom,
+            NativeSessionTabLabelStyle::Index,
             Vec::new(),
             None,
         )
@@ -13788,6 +14145,8 @@ mod tests {
             None,
             None,
             None,
+            NativeSessionTabPosition::Bottom,
+            NativeSessionTabLabelStyle::Index,
             Vec::new(),
             None,
         )
@@ -13814,6 +14173,8 @@ mod tests {
     fn native_session_tab_strip_hit_test_maps_visible_tab_text_only() {
         let metrics = CellMetrics::default();
         let grid_size = GridSize::new(4, 120);
+        let position = NativeSessionTabPosition::Top;
+        let label_style = NativeSessionTabLabelStyle::Index;
         let rows = vec![
             NativeSessionTabRow {
                 session_id: NativeSessionId(1),
@@ -13834,14 +14195,24 @@ mod tests {
                 active: true,
             },
         ];
-        let first_label_width = text_cell_width(&native_session_tab_label(&rows[0]));
-        let first_width = text_cell_width(&native_session_tab_summary(&rows[0]));
+        let first_label_width = text_cell_width(&native_session_tab_label(
+            &rows[0],
+            0,
+            label_style,
+        ));
+        let first_width = text_cell_width(&native_session_tab_summary(
+            &rows[0],
+            0,
+            label_style,
+        ));
         let first_close_start = first_label_width.saturating_add(1);
         let second_start = first_width.saturating_add(2);
 
         let first_hit = native_session_tab_strip_hit_for_position(
             &rows,
             None,
+            position,
+            label_style,
             physical_position_for_cell(CellPoint::new(0, 1), metrics),
             metrics,
             grid_size,
@@ -13849,6 +14220,8 @@ mod tests {
         let first_close_hit = native_session_tab_strip_hit_for_position(
             &rows,
             None,
+            position,
+            label_style,
             physical_position_for_cell(CellPoint::new(0, 1 + first_close_start), metrics),
             metrics,
             grid_size,
@@ -13856,6 +14229,8 @@ mod tests {
         let separator_hit = native_session_tab_strip_hit_for_position(
             &rows,
             None,
+            position,
+            label_style,
             physical_position_for_cell(CellPoint::new(0, 1 + first_width), metrics),
             metrics,
             grid_size,
@@ -13863,6 +14238,8 @@ mod tests {
         let second_hit = native_session_tab_strip_hit_for_position(
             &rows,
             None,
+            position,
+            label_style,
             physical_position_for_cell(CellPoint::new(0, 1 + second_start), metrics),
             metrics,
             grid_size,
@@ -13870,6 +14247,8 @@ mod tests {
         let terminal_hit = native_session_tab_strip_hit_for_position(
             &rows,
             None,
+            position,
+            label_style,
             physical_position_for_cell(CellPoint::new(1, 1), metrics),
             metrics,
             grid_size,
@@ -13906,6 +14285,8 @@ mod tests {
     #[test]
     fn native_session_tab_strip_hit_test_ignores_truncated_close_affordance() {
         let metrics = CellMetrics::default();
+        let position = NativeSessionTabPosition::Top;
+        let label_style = NativeSessionTabLabelStyle::Index;
         let row = NativeSessionTabRow {
             session_id: NativeSessionId(1),
             key: PendingProfileActionKey::profile_launch(0),
@@ -13915,13 +14296,16 @@ mod tests {
             mode: NativeProfileActionStartMode::ReplaceCurrentSession,
             active: true,
         };
-        let close_start = text_cell_width(&native_session_tab_label(&row)).saturating_add(1);
+        let close_start =
+            text_cell_width(&native_session_tab_label(&row, 0, label_style)).saturating_add(1);
         let rows = vec![row];
         let grid_size = GridSize::new(4, close_start.saturating_add(3));
 
         let truncated_close_hit = native_session_tab_strip_hit_for_position(
             &rows,
             None,
+            position,
+            label_style,
             physical_position_for_cell(CellPoint::new(0, 1 + close_start), metrics),
             metrics,
             grid_size,
@@ -13954,23 +14338,22 @@ mod tests {
                 target: NativeSessionTabStripTarget::Select,
             }),
             None,
+            NativeSessionTabPosition::Top,
+            NativeSessionTabLabelStyle::Index,
             metrics,
             grid_size,
         );
 
-        assert_eq!(frame.backgrounds.len(), 2);
+        assert_eq!(frame.overlay_backgrounds.len(), 2);
         assert_eq!(
-            frame.backgrounds[1].origin,
+            frame.overlay_backgrounds[1].origin,
             cell_origin(CellPoint::new(0, 1), metrics)
         );
         assert_eq!(
-            frame.backgrounds[1].color,
+            frame.overlay_backgrounds[1].color,
             native_session_tab_hover_color(NativeSessionTabStripTarget::Select)
         );
-        assert!(frame
-            .glyphs
-            .iter()
-            .any(|glyph| glyph.text.contains("[active] prod | launch")));
+        assert!(frame.glyphs.iter().any(|glyph| glyph.text.contains("*0 x")));
         for hidden in ["prod.example.com", "ssh -tt", "LocalPtyConfig"] {
             assert!(
                 !frame.glyphs.iter().any(|glyph| glyph.text.contains(hidden)),
@@ -13983,6 +14366,7 @@ mod tests {
     fn native_session_tab_strip_close_hover_uses_close_target_color_only() {
         let metrics = CellMetrics::default();
         let grid_size = GridSize::new(6, 120);
+        let label_style = NativeSessionTabLabelStyle::Index;
         let row = NativeSessionTabRow {
             session_id: NativeSessionId(1),
             key: PendingProfileActionKey::profile_launch(0),
@@ -13992,7 +14376,8 @@ mod tests {
             mode: NativeProfileActionStartMode::ReplaceCurrentSession,
             active: true,
         };
-        let close_start = text_cell_width(&native_session_tab_label(&row)).saturating_add(1);
+        let close_start =
+            text_cell_width(&native_session_tab_label(&row, 0, label_style)).saturating_add(1);
         let close_width = text_cell_width(native_session_tab_close_label());
         let mut frame = FramePlan::default();
 
@@ -14005,25 +14390,27 @@ mod tests {
                 target: NativeSessionTabStripTarget::Close,
             }),
             None,
+            NativeSessionTabPosition::Top,
+            label_style,
             metrics,
             grid_size,
         );
 
-        assert_eq!(frame.backgrounds.len(), 2);
+        assert_eq!(frame.overlay_backgrounds.len(), 2);
         assert_eq!(
-            frame.backgrounds[1].origin,
+            frame.overlay_backgrounds[1].origin,
             cell_origin(CellPoint::new(0, 1 + close_start), metrics)
         );
         assert_eq!(
-            frame.backgrounds[1].size.width,
+            frame.overlay_backgrounds[1].size.width,
             f32::from(close_width) * metrics.cell.width
         );
         assert_eq!(
-            frame.backgrounds[1].color,
+            frame.overlay_backgrounds[1].color,
             native_session_tab_hover_color(NativeSessionTabStripTarget::Close)
         );
         assert_ne!(
-            frame.backgrounds[1].color,
+            frame.overlay_backgrounds[1].color,
             native_session_tab_hover_color(NativeSessionTabStripTarget::Select)
         );
         for hidden in ["prod.example.com", "ssh -tt", "LocalPtyConfig"] {
@@ -14070,21 +14457,21 @@ mod tests {
             ..FramePlan::default()
         };
 
-        apply_native_session_tab_strip_overlay(&mut frame, &[row], None, None, metrics, grid_size);
+        apply_native_session_tab_strip_overlay(
+            &mut frame,
+            &[row],
+            None,
+            None,
+            NativeSessionTabPosition::Top,
+            NativeSessionTabLabelStyle::IndexProfile,
+            metrics,
+            grid_size,
+        );
 
         assert!(frame
             .glyphs
             .iter()
-            .any(|glyph| glyph.text.contains("[active] prod | launch")));
-        assert!(frame
-            .glyphs
-            .iter()
-            .any(|glyph| glyph.text.contains("plugin=profile-bridge")));
-        assert!(frame
-            .glyphs
-            .iter()
-            .any(|glyph| glyph.text.contains("mode=replace_current_session")));
-        assert!(frame.glyphs.iter().any(|glyph| glyph.text.contains("[x]")));
+            .any(|glyph| glyph.text.contains("*0:prod x")));
         assert!(!frame
             .glyphs
             .iter()
@@ -14094,7 +14481,7 @@ mod tests {
             .iter()
             .any(|glyph| glyph.text.contains("terminal row one")));
         assert_eq!(frame.cursor, None);
-        assert_eq!(frame.backgrounds.len(), 1);
+        assert_eq!(frame.overlay_backgrounds.len(), 1);
         for hidden in [
             "prod.example.com",
             "ssh -tt",
@@ -14124,10 +14511,11 @@ mod tests {
             &[row],
             Some(NativeSessionTabStripNotice::LastActiveCloseBlocked),
             160,
+            NativeSessionTabLabelStyle::Index,
         );
 
         assert!(text.contains("[close blocked: last active]"));
-        assert!(text.contains("[x]"));
+        assert!(text.contains('x'));
         for hidden in [
             "prod.example.com",
             "ssh",
@@ -14165,10 +14553,17 @@ mod tests {
         let action_width = native_session_tab_strip_action_width(&rows, Some(notice), width);
         let notice_start_col = action_width.saturating_add(text_cell_width("  "));
 
-        let text = native_session_tab_strip_text_with_notice(&rows, Some(notice), width);
+        let text = native_session_tab_strip_text_with_notice(
+            &rows,
+            Some(notice),
+            width,
+            NativeSessionTabLabelStyle::IndexProfile,
+        );
         let notice_hit = native_session_tab_strip_hit_for_position(
             &rows,
             Some(notice),
+            NativeSessionTabPosition::Top,
+            NativeSessionTabLabelStyle::IndexProfile,
             physical_position_for_cell(CellPoint::new(0, 1 + notice_start_col), metrics),
             metrics,
             grid_size,
@@ -14176,6 +14571,8 @@ mod tests {
         let same_position_without_notice = native_session_tab_strip_hit_for_position(
             &rows,
             None,
+            NativeSessionTabPosition::Top,
+            NativeSessionTabLabelStyle::IndexProfile,
             physical_position_for_cell(CellPoint::new(0, 1 + notice_start_col), metrics),
             metrics,
             grid_size,
@@ -16904,7 +17301,7 @@ mod tests {
             CellPoint::new(panel.start.row + row_index as u16 + 1, panel.start.col),
             metrics,
         );
-        assert!(frame.backgrounds.iter().any(|rect| {
+        assert!(frame.overlay_backgrounds.iter().any(|rect| {
             rect.origin == hover_origin
                 && rect.size.width == f32::from(panel.cols) * metrics.cell.width
                 && rect.size.height == metrics.cell.height
@@ -17952,7 +18349,7 @@ mod tests {
 
         apply_frame_diagnostics_overlay(&mut frame, stats, metrics, GridSize::new(24, 80));
 
-        assert!(!frame.backgrounds.is_empty());
+        assert!(!frame.overlay_backgrounds.is_empty());
         assert!(frame
             .glyphs
             .iter()

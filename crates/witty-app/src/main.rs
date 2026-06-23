@@ -17,8 +17,8 @@ use anyhow::{bail, Context as _, Result};
 use serde::Deserialize;
 use update_state::read_restart_snapshot;
 use window::{
-    MouseSelectionOverridePolicy, WindowLastActiveClosePolicy, WindowSmokeOptions,
-    DEFAULT_WINDOW_TITLE,
+    MouseSelectionOverridePolicy, NativeSessionTabLabelStyle, NativeSessionTabPosition,
+    WindowLastActiveClosePolicy, WindowSmokeOptions, DEFAULT_WINDOW_TITLE,
 };
 use witty_core::{
     BasicTerminal, CellPoint, CellRange, GridSize, Osc52ClipboardPolicy, TerminalHostAction,
@@ -207,6 +207,8 @@ fn main() -> anyhow::Result<()> {
             options.background_opacity,
             options.background_image.clone(),
             options.background_image_fit,
+            options.session_tab_position,
+            options.session_tab_label_style,
             options.font_paths,
             restore_state,
         );
@@ -300,6 +302,8 @@ struct AppOptions {
     background_opacity: Option<f32>,
     background_image: Option<PathBuf>,
     background_image_fit: Option<RendererBackgroundImageFit>,
+    session_tab_position: NativeSessionTabPosition,
+    session_tab_label_style: NativeSessionTabLabelStyle,
     font_paths: Vec<PathBuf>,
     restore_state_path: Option<PathBuf>,
     wittyrc_path: Option<PathBuf>,
@@ -329,6 +333,8 @@ struct AppOptionsExplicit {
     background_opacity: bool,
     background_image: bool,
     background_image_fit: bool,
+    session_tab_position: bool,
+    session_tab_label_style: bool,
     font_paths: bool,
     cwd: bool,
     window_cols: bool,
@@ -364,6 +370,8 @@ impl AppOptions {
         let mut background_opacity = None;
         let mut background_image = None;
         let mut background_image_fit = None;
+        let mut session_tab_position = NativeSessionTabPosition::default();
+        let mut session_tab_label_style = NativeSessionTabLabelStyle::default();
         let mut font_paths = Vec::new();
         let mut restore_state_path = None;
         let mut wittyrc_path = None;
@@ -682,6 +690,30 @@ impl AppOptions {
                     background_image_fit =
                         Some(parse_background_image_fit(&value, "--background-image-fit")?);
                     explicit.background_image_fit = true;
+                    window_only_args_seen = true;
+                }
+                "--session-tab-position" => {
+                    let Some(value) = args.next() else {
+                        bail!("--session-tab-position requires a value");
+                    };
+                    if explicit.session_tab_position {
+                        bail!("only one --session-tab-position value is allowed");
+                    }
+                    session_tab_position =
+                        parse_session_tab_position(&value, "--session-tab-position")?;
+                    explicit.session_tab_position = true;
+                    window_only_args_seen = true;
+                }
+                "--session-tab-label" => {
+                    let Some(value) = args.next() else {
+                        bail!("--session-tab-label requires a value");
+                    };
+                    if explicit.session_tab_label_style {
+                        bail!("only one --session-tab-label value is allowed");
+                    }
+                    session_tab_label_style =
+                        parse_session_tab_label_style(&value, "--session-tab-label")?;
+                    explicit.session_tab_label_style = true;
                     window_only_args_seen = true;
                 }
                 "--font-path" => {
@@ -1133,6 +1165,8 @@ impl AppOptions {
             background_opacity,
             background_image,
             background_image_fit,
+            session_tab_position,
+            session_tab_label_style,
             font_paths,
             restore_state_path,
             wittyrc_path,
@@ -1292,6 +1326,18 @@ impl AppOptions {
                     Some(parse_background_image_fit(&value, "background_image_fit")?);
             }
         }
+        if !self.explicit.session_tab_position {
+            if let Some(value) = config.session_tab_position {
+                self.session_tab_position =
+                    parse_session_tab_position(&value, "session_tab_position")?;
+            }
+        }
+        if !self.explicit.session_tab_label_style {
+            if let Some(value) = config.session_tab_label {
+                self.session_tab_label_style =
+                    parse_session_tab_label_style(&value, "session_tab_label")?;
+            }
+        }
         if !self.explicit.font_paths && self.font_paths.is_empty() && !config.font_paths.is_empty()
         {
             self.font_paths = config
@@ -1424,6 +1470,20 @@ impl AppOptions {
                 self.explicit.window_last_active_close_policy = true;
             }
         }
+        if !self.explicit.session_tab_position {
+            if let Some(value) = config.session_tab_position {
+                self.session_tab_position =
+                    parse_session_tab_position(&value, "session-tab-position")?;
+                self.explicit.session_tab_position = true;
+            }
+        }
+        if !self.explicit.session_tab_label_style {
+            if let Some(value) = config.session_tab_label {
+                self.session_tab_label_style =
+                    parse_session_tab_label_style(&value, "session-tab-label")?;
+                self.explicit.session_tab_label_style = true;
+            }
+        }
         Ok(())
     }
 }
@@ -1550,6 +1610,10 @@ struct NativeWindowConfig {
     #[serde(default)]
     background_image_fit: Option<String>,
     #[serde(default)]
+    session_tab_position: Option<String>,
+    #[serde(default)]
+    session_tab_label: Option<String>,
+    #[serde(default)]
     font_paths: Vec<PathBuf>,
     #[serde(default)]
     cwd: Option<PathBuf>,
@@ -1582,6 +1646,10 @@ struct WittyrcConfig {
     background_image_fit: Option<String>,
     #[serde(default, rename = "window-last-active-close")]
     window_last_active_close: Option<String>,
+    #[serde(default, rename = "session-tab-position")]
+    session_tab_position: Option<String>,
+    #[serde(default, rename = "session-tab-label")]
+    session_tab_label: Option<String>,
 }
 
 fn default_native_window_config_path() -> Result<PathBuf> {
@@ -1660,6 +1728,8 @@ fn native_window_config_template() -> String {
         "background_opacity": 1.0,
         "background_image": null,
         "background_image_fit": "cover",
+        "session_tab_position": "bottom",
+        "session_tab_label": "index",
         "window_title": "Witty",
         "program": null,
         "args": [],
@@ -1898,6 +1968,8 @@ fn native_window_effective_config_summary(
             .as_ref()
             .map(|path| path.display().to_string()),
         "background_image_fit": visual_config.background_image_fit().as_config_value(),
+        "session_tab_position": options.session_tab_position.as_config_value(),
+        "session_tab_label": options.session_tab_label_style.as_config_value(),
         "font_source_count": options.font_paths.len(),
         "window_cols": grid.cols,
         "window_rows": grid.rows,
@@ -1949,6 +2021,8 @@ fn wittyrc_effective_config_summary(
             .as_ref()
             .map(|path| path.display().to_string()),
         "background_image_fit": visual_config.background_image_fit().as_config_value(),
+        "session_tab_position": options.session_tab_position.as_config_value(),
+        "session_tab_label": options.session_tab_label_style.as_config_value(),
         "font_source_count": options.font_paths.len(),
         "window_last_active_close": options.window_smoke.last_active_close_policy.as_config_value(),
     });
@@ -2370,6 +2444,30 @@ fn parse_background_image_fit(value: &str, name: &str) -> Result<RendererBackgro
             RendererBackgroundImageFit::config_values().join(", ")
         ),
     }
+}
+
+fn parse_session_tab_position(value: &str, name: &str) -> Result<NativeSessionTabPosition> {
+    let value = value.trim();
+    if let Some(position) = NativeSessionTabPosition::parse_config_value(value) {
+        return Ok(position);
+    }
+
+    bail!(
+        "{name} must be one of: {}",
+        NativeSessionTabPosition::config_values().join(", ")
+    )
+}
+
+fn parse_session_tab_label_style(value: &str, name: &str) -> Result<NativeSessionTabLabelStyle> {
+    let value = value.trim();
+    if let Some(style) = NativeSessionTabLabelStyle::parse_config_value(value) {
+        return Ok(style);
+    }
+
+    bail!(
+        "{name} must be one of: {}",
+        NativeSessionTabLabelStyle::config_values().join(", ")
+    )
 }
 
 fn parse_window_cols(value: &str, name: &str) -> Result<u16> {
@@ -3637,6 +3735,10 @@ mod tests {
             "~/Pictures/witty.png".to_owned(),
             "--background-image-fit".to_owned(),
             "scale-crop".to_owned(),
+            "--session-tab-position".to_owned(),
+            "top".to_owned(),
+            "--session-tab-label".to_owned(),
+            "index-profile".to_owned(),
             "--font-path".to_owned(),
             "/fonts/JetBrainsMonoNerdFont-Regular.ttf".to_owned(),
             "--font-path".to_owned(),
@@ -3668,6 +3770,11 @@ mod tests {
         assert_eq!(
             options.background_image_fit,
             Some(RendererBackgroundImageFit::Cover)
+        );
+        assert_eq!(options.session_tab_position, NativeSessionTabPosition::Top);
+        assert_eq!(
+            options.session_tab_label_style,
+            NativeSessionTabLabelStyle::IndexProfile
         );
         assert_eq!(
             options.font_paths,
@@ -3708,6 +3815,8 @@ mod tests {
             background_opacity: Some(0.75),
             background_image: Some(PathBuf::from("/images/witty.png")),
             background_image_fit: Some("cover".to_owned()),
+            session_tab_position: Some("top".to_owned()),
+            session_tab_label: Some("index-profile".to_owned()),
             font_paths: vec![
                 PathBuf::from("/fonts/HackNerdFont-Regular.ttf"),
                 PathBuf::from("/fonts/SymbolsNerdFontMono-Regular.ttf"),
@@ -3750,6 +3859,11 @@ mod tests {
         assert_eq!(
             options.background_image_fit,
             Some(RendererBackgroundImageFit::Cover)
+        );
+        assert_eq!(options.session_tab_position, NativeSessionTabPosition::Top);
+        assert_eq!(
+            options.session_tab_label_style,
+            NativeSessionTabLabelStyle::IndexProfile
         );
         assert_eq!(
             options.font_paths,
@@ -3837,6 +3951,8 @@ mod tests {
             background_opacity: Some(0.7),
             background_image: Some(PathBuf::from("/config/background.png")),
             background_image_fit: Some("cover".to_owned()),
+            session_tab_position: Some("top".to_owned()),
+            session_tab_label: Some("profile".to_owned()),
             font_paths: vec![PathBuf::from("/config/Hack.ttf")],
             cwd: Some(PathBuf::from("/config/project")),
             scrollback_lines: Some(50000),
@@ -3943,11 +4059,15 @@ mod tests {
         assert_eq!(config.background_opacity, Some(1.0));
         assert_eq!(config.background_image.as_deref(), Some("null"));
         assert_eq!(config.background_image_fit.as_deref(), Some("cover"));
+        assert_eq!(config.session_tab_position.as_deref(), Some("bottom"));
+        assert_eq!(config.session_tab_label.as_deref(), Some("index"));
         assert!(template.contains("font-family = \"Maple Mono NF CN\""));
         assert!(template.contains("terminal-padding = 0"));
         assert!(template.contains("background-opacity = 1.0"));
         assert!(template.contains("background-image = \"null\""));
         assert!(template.contains("background-image-fit = \"cover\""));
+        assert!(template.contains("session-tab-position = \"bottom\""));
+        assert!(template.contains("session-tab-label = \"index\""));
         assert!(template.contains("window-last-active-close = \"close-window\""));
         assert!(template.ends_with('\n'));
     }
@@ -4025,6 +4145,8 @@ background-image-fit = "scale-and-crop""#,
                         background_image: Some("/wittyrc/background.png".to_owned()),
                         background_image_fit: Some("cover".to_owned()),
                         window_last_active_close: Some("block".to_owned()),
+                        session_tab_position: Some("bottom".to_owned()),
+                        session_tab_label: Some("index".to_owned()),
                     }))
                 },
             )
@@ -4316,6 +4438,11 @@ background-image-fit = "scale-and-crop""#,
             options.background_image_fit,
             Some(RendererBackgroundImageFit::Cover)
         );
+        assert_eq!(options.session_tab_position, NativeSessionTabPosition::Bottom);
+        assert_eq!(
+            options.session_tab_label_style,
+            NativeSessionTabLabelStyle::Index
+        );
         assert_eq!(options.window_title.as_deref(), Some("Witty"));
         assert_eq!(options.program, None);
         assert!(options.args.is_empty());
@@ -4464,6 +4591,8 @@ background-image-fit = "scale-and-crop""#,
                     background_opacity: Some(0.85),
                     background_image: Some(PathBuf::from("/candidate/background.png")),
                     background_image_fit: Some("cover".to_owned()),
+                    session_tab_position: Some("bottom".to_owned()),
+                    session_tab_label: Some("index".to_owned()),
                     font_paths: vec![PathBuf::from("/missing/SymbolsNerdFontMono.ttf")],
                     cwd: Some(PathBuf::from("/work/project")),
                     scrollback_lines: Some(20000),
@@ -4549,6 +4678,8 @@ background-image-fit = "scale-and-crop""#,
                         background_opacity: Some(0.78),
                         background_image: Some(PathBuf::from("/config/background.png")),
                         background_image_fit: Some("cover".to_owned()),
+                        session_tab_position: Some("bottom".to_owned()),
+                        session_tab_label: Some("index".to_owned()),
                         font_paths: vec![PathBuf::from("/fonts/Symbols.ttf")],
                         cwd: Some(PathBuf::from("/config/project")),
                         scrollback_lines: Some(20000),
