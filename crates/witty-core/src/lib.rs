@@ -863,6 +863,8 @@ pub struct RenderRow {
 pub struct RenderSnapshot {
     pub size: GridSize,
     pub rows: Vec<RenderRow>,
+    #[serde(default = "default_cell_background")]
+    pub default_background: Rgba,
     pub cursor: CursorState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor_color: Option<Rgba>,
@@ -883,6 +885,7 @@ impl RenderSnapshot {
         Self {
             size,
             rows: Vec::new(),
+            default_background: default_cell_background(),
             cursor: CursorState::default(),
             cursor_color: None,
             selection: None,
@@ -927,6 +930,7 @@ impl RenderSnapshot {
         Self {
             size: GridSize::new(lines.len() as u16, cols),
             rows,
+            default_background: default_cell_background(),
             cursor: CursorState::default(),
             cursor_color: None,
             selection: None,
@@ -955,6 +959,10 @@ impl RenderSnapshot {
         let id = self.hyperlink_id_at(point)?;
         self.hyperlinks.iter().find(|link| link.id == id)
     }
+}
+
+fn default_cell_background() -> Rgba {
+    CellStyle::default().background
 }
 
 pub fn terminal_char_width(ch: char) -> u8 {

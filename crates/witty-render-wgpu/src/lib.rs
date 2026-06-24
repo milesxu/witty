@@ -92,8 +92,9 @@ pub struct GlyphBatchItem {
     pub style_flags: CellFlags,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FramePlan {
+    pub default_background: Rgba,
     pub backgrounds: Vec<RectBatchItem>,
     pub overlay_backgrounds: Vec<RectBatchItem>,
     pub glyphs: Vec<GlyphBatchItem>,
@@ -106,6 +107,26 @@ pub struct FramePlan {
     pub ime_preedit: Vec<RectBatchItem>,
     pub damage: DamageRegion,
     pub stats: FrameStats,
+}
+
+impl Default for FramePlan {
+    fn default() -> Self {
+        Self {
+            default_background: Rgba::BLACK,
+            backgrounds: Vec::new(),
+            overlay_backgrounds: Vec::new(),
+            glyphs: Vec::new(),
+            cursor: None,
+            selection: Vec::new(),
+            search_highlights: Vec::new(),
+            hyperlink_hover: Vec::new(),
+            hyperlink_underlines: Vec::new(),
+            text_decorations: Vec::new(),
+            ime_preedit: Vec::new(),
+            damage: DamageRegion::default(),
+            stats: FrameStats::default(),
+        }
+    }
 }
 
 impl FramePlan {
@@ -238,7 +259,10 @@ impl FramePlanner {
     }
 
     pub fn plan(&self, snapshot: &RenderSnapshot) -> FramePlan {
-        let mut frame = FramePlan::default();
+        let mut frame = FramePlan {
+            default_background: snapshot.default_background,
+            ..FramePlan::default()
+        };
 
         for row in &snapshot.rows {
             self.plan_row(row).extend_frame(&mut frame);
@@ -1978,13 +2002,24 @@ impl WgpuRectRenderer {
     fn vertices_for_frame(&self, frame: &FramePlan) -> Vec<Vertex> {
         let mut vertices = Vec::new();
         let terminal_background_bounds = terminal_background_bounds(&frame.backgrounds);
-        for rect in frame.backgrounds.iter() {
-            let rect = terminal_background_rect_for_surface(
-                rect,
-                terminal_background_bounds,
+        for rect in terminal_background_edge_fill_rects(
+            terminal_background_bounds,
+            self.config.width as f32,
+            self.config.height as f32,
+            frame.default_background,
+        ) {
+            push_rect_vertices(
+                &mut vertices,
+                rect.origin.x,
+                rect.origin.y,
+                rect.size.width,
+                rect.size.height,
+                color_with_opacity(rect.color, self.visual_config.background_opacity),
                 self.config.width as f32,
                 self.config.height as f32,
             );
+        }
+        for rect in frame.backgrounds.iter() {
             push_rect_vertices(
                 &mut vertices,
                 rect.origin.x,
@@ -2642,35 +2677,107 @@ fn create_background_image_texture(
     }
 }
 
-fn terminal_background_bounds(rects: &[RectBatchItem]) -> Option<(f32, f32)> {
-    let mut max_right = 0.0f32;
-    let mut max_bottom = 0.0f32;
-    for rect in rects {
-        max_right = max_right.max(rect.origin.x + rect.size.width);
-        max_bottom = max_bottom.max(rect.origin.y + rect.size.height);
-    }
-    (!rects.is_empty()).then_some((max_right, max_bottom))
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TerminalBackgroundBounds {
+    min_left: f32,
+    min_top: f32,
+    max_right: f32,
+    max_bottom: f32,
 }
 
-fn terminal_background_rect_for_surface(
-    rect: &RectBatchItem,
-    bounds: Option<(f32, f32)>,
+fn terminal_background_bounds(rects: &[RectBatchItem]) -> Option<TerminalBackgroundBounds> {
+    let mut iter = rects.iter();
+    let first = iter.next()?;
+    let mut bounds = TerminalBackgroundBounds {
+        min_left: first.origin.x,
+        min_top: first.origin.y,
+        max_right: first.origin.x + first.size.width,
+        max_bottom: first.origin.y + first.size.height,
+    };
+    for rect in iter {
+        bounds.min_left = bounds.min_left.min(rect.origin.x);
+        bounds.min_top = bounds.min_top.min(rect.origin.y);
+        bounds.max_right = bounds.max_right.max(rect.origin.x + rect.size.width);
+        bounds.max_bottom = bounds.max_bottom.max(rect.origin.y + rect.size.height);
+    }
+    Some(bounds)
+}
+
+fn terminal_background_edge_fill_rects(
+    bounds: Option<TerminalBackgroundBounds>,
     surface_width: f32,
     surface_height: f32,
-) -> RectBatchItem {
-    let Some((max_right, max_bottom)) = bounds else {
-        return rect.clone();
+    default_background: Rgba,
+) -> Vec<RectBatchItem> {
+    let Some(bounds) = bounds else {
+        return vec![RectBatchItem {
+            origin: PixelPoint { x: 0.0, y: 0.0 },
+            size: PixelSize {
+                width: surface_width.max(0.0),
+                height: surface_height.max(0.0),
+            },
+            color: default_background,
+        }];
     };
-    let mut rect = rect.clone();
-    let right = rect.origin.x + rect.size.width;
-    let bottom = rect.origin.y + rect.size.height;
-    if (max_right - right).abs() <= 0.5 && surface_width > right {
-        rect.size.width = (surface_width - rect.origin.x).max(rect.size.width);
+
+    let mut rects = Vec::new();
+    if bounds.min_top > 0.0 {
+        rects.push(RectBatchItem {
+            origin: PixelPoint { x: 0.0, y: 0.0 },
+            size: PixelSize {
+                width: surface_width.max(0.0),
+                height: bounds.min_top.min(surface_height).max(0.0),
+            },
+            color: default_background,
+        });
     }
-    if (max_bottom - bottom).abs() <= 0.5 && surface_height > bottom {
-        rect.size.height = (surface_height - rect.origin.y).max(rect.size.height);
+
+    let band_top = bounds.min_top.clamp(0.0, surface_height.max(0.0));
+    let band_bottom = bounds.max_bottom.clamp(0.0, surface_height.max(0.0));
+    let band_height = (band_bottom - band_top).max(0.0);
+    if bounds.min_left > 0.0 && band_height > 0.0 {
+        rects.push(RectBatchItem {
+            origin: PixelPoint {
+                x: 0.0,
+                y: band_top,
+            },
+            size: PixelSize {
+                width: bounds.min_left.min(surface_width).max(0.0),
+                height: band_height,
+            },
+            color: default_background,
+        });
     }
-    rect
+
+    if surface_width > bounds.max_right && band_height > 0.0 {
+        rects.push(RectBatchItem {
+            origin: PixelPoint {
+                x: bounds.max_right,
+                y: band_top,
+            },
+            size: PixelSize {
+                width: surface_width - bounds.max_right,
+                height: band_height,
+            },
+            color: default_background,
+        });
+    }
+
+    if surface_height > bounds.max_bottom {
+        rects.push(RectBatchItem {
+            origin: PixelPoint {
+                x: 0.0,
+                y: bounds.max_bottom,
+            },
+            size: PixelSize {
+                width: surface_width.max(0.0),
+                height: surface_height - bounds.max_bottom,
+            },
+            color: default_background,
+        });
+    }
+
+    rects
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2917,6 +3024,106 @@ mod tests {
             color_with_opacity(Rgba::with_alpha(10, 20, 30, 200), 2.0),
             Rgba::with_alpha(10, 20, 30, 200)
         );
+    }
+
+    #[test]
+    fn terminal_background_edge_fill_uses_default_background_for_grid_gaps() {
+        let fills = terminal_background_edge_fill_rects(
+            Some(TerminalBackgroundBounds {
+                min_left: 0.0,
+                min_top: 0.0,
+                max_right: 90.0,
+                max_bottom: 40.0,
+            }),
+            100.0,
+            55.0,
+            Rgba::rgb(1, 2, 3),
+        );
+
+        assert_eq!(
+            fills,
+            vec![
+                RectBatchItem {
+                    origin: PixelPoint { x: 90.0, y: 0.0 },
+                    size: PixelSize {
+                        width: 10.0,
+                        height: 40.0,
+                    },
+                    color: Rgba::rgb(1, 2, 3),
+                },
+                RectBatchItem {
+                    origin: PixelPoint { x: 0.0, y: 40.0 },
+                    size: PixelSize {
+                        width: 100.0,
+                        height: 15.0,
+                    },
+                    color: Rgba::rgb(1, 2, 3),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_background_edge_fill_covers_top_gap_when_grid_is_bottom_aligned() {
+        let fills = terminal_background_edge_fill_rects(
+            Some(TerminalBackgroundBounds {
+                min_left: 0.0,
+                min_top: 8.0,
+                max_right: 90.0,
+                max_bottom: 44.0,
+            }),
+            100.0,
+            55.0,
+            Rgba::rgb(1, 2, 3),
+        );
+
+        assert_eq!(
+            fills,
+            vec![
+                RectBatchItem {
+                    origin: PixelPoint { x: 0.0, y: 0.0 },
+                    size: PixelSize {
+                        width: 100.0,
+                        height: 8.0,
+                    },
+                    color: Rgba::rgb(1, 2, 3),
+                },
+                RectBatchItem {
+                    origin: PixelPoint { x: 90.0, y: 8.0 },
+                    size: PixelSize {
+                        width: 10.0,
+                        height: 36.0,
+                    },
+                    color: Rgba::rgb(1, 2, 3),
+                },
+                RectBatchItem {
+                    origin: PixelPoint { x: 0.0, y: 44.0 },
+                    size: PixelSize {
+                        width: 100.0,
+                        height: 11.0,
+                    },
+                    color: Rgba::rgb(1, 2, 3),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_background_edge_fill_does_not_extend_last_cell_background() {
+        let cell_background = RectBatchItem {
+            origin: PixelPoint { x: 0.0, y: 20.0 },
+            size: PixelSize {
+                width: 90.0,
+                height: 20.0,
+            },
+            color: Rgba::rgb(220, 223, 233),
+        };
+        let bounds = terminal_background_bounds(std::slice::from_ref(&cell_background));
+        let fills = terminal_background_edge_fill_rects(bounds, 100.0, 55.0, Rgba::BLACK);
+
+        assert_eq!(cell_background.size.height, 20.0);
+        assert!(fills.iter().all(|fill| fill.color == Rgba::BLACK));
+        assert!(fills.iter().any(|fill| fill.origin.y == 40.0));
     }
 
     #[test]

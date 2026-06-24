@@ -3403,15 +3403,13 @@ impl TerminalWindowApp {
             self.metrics,
             self.titlebar_reserved_height(),
         );
-        if size == self.size {
-            return;
+        if size != self.size {
+            self.size = size;
+            self.sync_all_session_runtime_sizes();
+            let _ = self.refresh_session_tab_hover_for_current_pointer();
+            let _ = self.refresh_profile_action_hover_for_current_pointer();
+            let _ = self.refresh_empty_session_welcome_hover_for_current_pointer();
         }
-
-        self.size = size;
-        self.sync_all_session_runtime_sizes();
-        let _ = self.refresh_session_tab_hover_for_current_pointer();
-        let _ = self.refresh_profile_action_hover_for_current_pointer();
-        let _ = self.refresh_empty_session_welcome_hover_for_current_pointer();
         self.rebuild_frame();
     }
 
@@ -3668,7 +3666,20 @@ impl TerminalWindowApp {
     }
 
     fn terminal_content_y_offset(&self) -> f32 {
-        self.titlebar_reserved_height()
+        let titlebar_reserved_height = self.titlebar_reserved_height();
+        titlebar_reserved_height
+            + self
+                .window
+                .as_ref()
+                .map(|window| {
+                    terminal_bottom_align_y_offset(
+                        window.inner_size(),
+                        self.metrics,
+                        self.size,
+                        titlebar_reserved_height,
+                    )
+                })
+                .unwrap_or(0.0)
     }
 
     fn titlebar_window_width(&self) -> f32 {
@@ -5049,10 +5060,13 @@ impl TerminalWindowApp {
     }
 
     fn copy_selection_to_clipboard(&mut self) {
-        if let Err(err) = copy_selection_to_clipboard(&self.terminal, self.clipboard.as_mut()) {
-            let message = format!("\r\n[clipboard copy failed: {err:#}]\r\n");
-            self.terminal.feed(message.as_bytes());
-            self.rebuild_frame();
+        match copy_selection_to_clipboard_and_clear(&mut self.terminal, self.clipboard.as_mut()) {
+            Ok(_) => self.rebuild_frame(),
+            Err(err) => {
+                let message = format!("\r\n[clipboard copy failed: {err:#}]\r\n");
+                self.terminal.feed(message.as_bytes());
+                self.rebuild_frame();
+            }
         }
     }
 
@@ -7407,6 +7421,17 @@ fn grid_size_for_window_with_reserved_height(
     )
 }
 
+fn terminal_bottom_align_y_offset(
+    surface_size: PhysicalSize<u32>,
+    metrics: CellMetrics,
+    size: GridSize,
+    reserved_height: f32,
+) -> f32 {
+    let occupied_height =
+        reserved_height + metrics.padding.y * 2.0 + f32::from(size.rows) * metrics.cell.height;
+    (surface_size.height as f32 - occupied_height).max(0.0)
+}
+
 #[cfg(test)]
 fn cell_point_for_position(
     position: PhysicalPosition<f64>,
@@ -8277,12 +8302,46 @@ fn read_arboard_clipboard_image(
 
 fn read_system_clipboard_text(clipboard: &mut arboard::Clipboard) -> Result<String> {
     if should_prefer_gtk_clipboard() {
-        return read_preferred_gtk_clipboard_text();
+        return match read_preferred_gtk_clipboard_text() {
+            Ok(text) => Ok(text),
+            Err(gtk_err) => {
+                tracing::warn!(
+                    target: "witty_app::clipboard",
+                    error = %gtk_err,
+                    "preferred GTK/GDK clipboard text path failed; trying arboard fallback"
+                );
+                clipboard.get_text().with_context(|| {
+                    format!(
+                        "{gtk_err:#}; arboard fallback failed to read text from system clipboard"
+                    )
+                })
+            }
+        };
     }
 
-    clipboard
+    match clipboard
         .get_text()
         .context("failed to read text from system clipboard")
+    {
+        Ok(text) => Ok(text),
+        Err(arboard_err) => match read_gtk_clipboard_text() {
+            Ok(Some(text)) => {
+                tracing::info!(
+                    target: "witty_app::clipboard",
+                    arboard_error = %arboard_err,
+                    bytes = text.len(),
+                    "used GTK/GDK clipboard text fallback after arboard failed"
+                );
+                Ok(text)
+            }
+            Ok(None) => Err(anyhow!(
+                "{arboard_err:#}; GTK/GDK text fallback found no text in the clipboard"
+            )),
+            Err(fallback_err) => Err(anyhow!(
+                "{arboard_err:#}; GTK/GDK text fallback failed: {fallback_err:#}"
+            )),
+        },
+    }
 }
 
 fn read_preferred_gtk_clipboard_text() -> Result<String> {
@@ -8477,21 +8536,26 @@ import sys
 
 import gi
 
-gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, GLib
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gtk, Gdk, GLib
+
+ok, _ = Gtk.init_check([])
+if not ok:
+    print("GTK init failed", file=sys.stderr)
+    sys.exit(3)
 
 display = Gdk.Display.get_default()
 if display is None:
     print("no GDK display available", file=sys.stderr)
     sys.exit(3)
 
-clipboard = display.get_clipboard()
+clipboard = Gtk.Clipboard.get_default(display)
 loop = GLib.MainLoop()
 state = {"status": 3, "error": "clipboard text unavailable", "text": ""}
 
-def done(clipboard, result):
+def done(clipboard, text, _data):
     try:
-        text = clipboard.read_text_finish(result)
         if text is None:
             state["status"] = 2
             state["error"] = "clipboard does not contain text"
@@ -8522,7 +8586,7 @@ def timeout():
     return False
 
 GLib.timeout_add(3000, timeout)
-clipboard.read_text_async(None, done)
+clipboard.request_text(done, None)
 loop.run()
 
 if state["status"] == 0:
@@ -8538,8 +8602,14 @@ import sys
 
 import gi
 
-gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, GLib
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gtk, Gdk, GLib
+
+ok, _ = Gtk.init_check([])
+if not ok:
+    print("GTK init failed", file=sys.stderr)
+    sys.exit(3)
 
 path = sys.argv[1]
 display = Gdk.Display.get_default()
@@ -8547,18 +8617,17 @@ if display is None:
     print("no GDK display available", file=sys.stderr)
     sys.exit(3)
 
-clipboard = display.get_clipboard()
+clipboard = Gtk.Clipboard.get_default(display)
 loop = GLib.MainLoop()
 state = {"status": 3, "error": "clipboard image unavailable"}
 
-def done(clipboard, result):
+def done(clipboard, pixbuf, _data):
     try:
-        texture = clipboard.read_texture_finish(result)
-        if texture is None:
+        if pixbuf is None:
             state["status"] = 2
             state["error"] = "clipboard does not contain an image"
         else:
-            texture.save_to_png(path)
+            pixbuf.savev(path, "png", [], [])
             state["status"] = 0
             state["error"] = ""
     except Exception as exc:
@@ -8584,7 +8653,7 @@ def timeout():
     return False
 
 GLib.timeout_add(3000, timeout)
-clipboard.read_texture_async(None, done)
+clipboard.request_image(done, None)
 loop.run()
 
 if state["status"] != 0:
@@ -8675,6 +8744,18 @@ fn copy_selection_to_clipboard(
     clipboard: &mut dyn ClipboardSink,
 ) -> Result<bool> {
     copy_selection_to_target(terminal, clipboard, ClipboardSelection::Clipboard)
+}
+
+fn copy_selection_to_clipboard_and_clear(
+    terminal: &mut BasicTerminal,
+    clipboard: &mut dyn ClipboardSink,
+) -> Result<bool> {
+    let had_selection = terminal.selected_text().is_some();
+    let copied = copy_selection_to_clipboard(terminal, clipboard)?;
+    if had_selection {
+        terminal.set_selection(None);
+    }
+    Ok(copied)
 }
 
 fn copy_selection_to_primary(
@@ -12105,6 +12186,7 @@ mod tests {
     struct RecordingClipboard {
         clipboard_read: String,
         primary_read: String,
+        clipboard_write_error: Option<String>,
         clipboard_text_error: Option<String>,
         clipboard_image: Option<ClipboardImage>,
         writes: Vec<(ClipboardSelection, String)>,
@@ -12112,6 +12194,11 @@ mod tests {
 
     impl ClipboardSink for RecordingClipboard {
         fn set_text(&mut self, selection: ClipboardSelection, text: &str) -> Result<()> {
+            if selection == ClipboardSelection::Clipboard {
+                if let Some(error) = &self.clipboard_write_error {
+                    bail!("{error}");
+                }
+            }
             self.writes.push((selection, text.to_owned()));
             Ok(())
         }
@@ -12603,6 +12690,30 @@ mod tests {
         let size = grid_size_for_window(PhysicalSize::new(98, 44), CellMetrics::default());
 
         assert_eq!(size, GridSize::new(2, 10));
+    }
+
+    #[test]
+    fn terminal_bottom_align_y_offset_moves_partial_row_gap_above_grid() {
+        let offset = terminal_bottom_align_y_offset(
+            PhysicalSize::new(98, 44),
+            CellMetrics::default(),
+            GridSize::new(2, 10),
+            0.0,
+        );
+
+        assert_eq!(offset, 8.0);
+    }
+
+    #[test]
+    fn terminal_bottom_align_y_offset_accounts_for_reserved_titlebar_height() {
+        let offset = terminal_bottom_align_y_offset(
+            PhysicalSize::new(98, 80),
+            CellMetrics::default(),
+            GridSize::new(2, 10),
+            34.0,
+        );
+
+        assert_eq!(offset, 10.0);
     }
 
     #[test]
@@ -17500,6 +17611,68 @@ mod tests {
             clipboard.writes,
             vec![(ClipboardSelection::Clipboard, "ello".to_owned())]
         );
+    }
+
+    #[test]
+    fn copy_selection_to_clipboard_and_clear_clears_selection_after_success() {
+        let mut terminal = BasicTerminal::new(GridSize::new(3, 8));
+        let mut clipboard = RecordingClipboard::default();
+
+        terminal.feed(b"hello");
+        terminal.set_selection(Some(CellRange {
+            start: CellPoint::new(0, 1),
+            end: CellPoint::new(0, 4),
+        }));
+
+        let copied =
+            copy_selection_to_clipboard_and_clear(&mut terminal, &mut clipboard).unwrap();
+
+        assert!(copied);
+        assert_eq!(
+            clipboard.writes,
+            vec![(ClipboardSelection::Clipboard, "ello".to_owned())]
+        );
+        assert_eq!(terminal.selected_text(), None);
+    }
+
+    #[test]
+    fn copy_selection_to_clipboard_and_clear_clears_empty_selection() {
+        let mut terminal = BasicTerminal::new(GridSize::new(3, 8));
+        let mut clipboard = RecordingClipboard::default();
+
+        terminal.set_selection(Some(CellRange {
+            start: CellPoint::new(0, 0),
+            end: CellPoint::new(0, 2),
+        }));
+
+        let copied =
+            copy_selection_to_clipboard_and_clear(&mut terminal, &mut clipboard).unwrap();
+
+        assert!(!copied);
+        assert!(clipboard.writes.is_empty());
+        assert_eq!(terminal.selected_text(), None);
+    }
+
+    #[test]
+    fn copy_selection_to_clipboard_and_clear_preserves_selection_on_write_error() {
+        let mut terminal = BasicTerminal::new(GridSize::new(3, 8));
+        let mut clipboard = RecordingClipboard {
+            clipboard_write_error: Some("clipboard offline".to_owned()),
+            ..RecordingClipboard::default()
+        };
+
+        terminal.feed(b"hello");
+        terminal.set_selection(Some(CellRange {
+            start: CellPoint::new(0, 1),
+            end: CellPoint::new(0, 4),
+        }));
+
+        let err =
+            copy_selection_to_clipboard_and_clear(&mut terminal, &mut clipboard).unwrap_err();
+
+        assert!(err.to_string().contains("clipboard offline"));
+        assert!(clipboard.writes.is_empty());
+        assert_eq!(terminal.selected_text().as_deref(), Some("ello"));
     }
 
     #[test]

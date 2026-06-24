@@ -685,6 +685,7 @@ impl BasicTerminalState {
         RenderSnapshot {
             size: self.size,
             rows,
+            default_background: self.visible_default_background(),
             cursor,
             cursor_color: self.cursor_color,
             selection: self.selection,
@@ -2461,6 +2462,14 @@ impl BasicTerminalState {
             CellColor::DefaultBackground => self.default_background,
             CellColor::Indexed(index) => self.indexed_color(index),
             CellColor::Direct(color) => color,
+        }
+    }
+
+    fn visible_default_background(&self) -> Rgba {
+        if self.reverse_video {
+            self.default_foreground
+        } else {
+            self.default_background
         }
     }
 
@@ -4830,6 +4839,7 @@ mod tests {
             snapshot.rows[0].cells[2].style.background,
             Rgba::rgb(0x0a, 0x0b, 0x0c)
         );
+        assert_eq!(snapshot.default_background, Rgba::rgb(0x0a, 0x0b, 0x0c));
     }
 
     #[test]
