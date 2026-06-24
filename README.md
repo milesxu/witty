@@ -147,10 +147,22 @@ with a bundled template:
 
 ```toml
 font-family = "Maple Mono NF CN"
+font-size = 14
 terminal-padding = 0
 background-opacity = 1.0
 background-image = "null"
 background-image-fit = "cover"
+background-overlay-color = "#000000"
+background-overlay-opacity = 0.0
+theme-foreground = "#ffffff"
+theme-background = "#000000"
+theme-cursor = "null"
+theme-palette = [
+  "#000000", "#cd0000", "#00cd00", "#cdcd00",
+  "#0000ee", "#cd00cd", "#00cdcd", "#e5e5e5",
+  "#7f7f7f", "#ff0000", "#00ff00", "#ffff00",
+  "#5c5cff", "#ff00ff", "#00ffff", "#ffffff",
+]
 cursor-shape = "block"
 cursor-blink = true
 cursor-blink-rate = "normal"
@@ -199,6 +211,8 @@ cargo run -p witty-app -- --window \
   --background-opacity 0.85 \
   --background-image /path/to/background.png \
   --background-image-fit cover \
+  --background-overlay-color "#000000" \
+  --background-overlay-opacity 0.20 \
   --cursor-shape bar \
   --cursor-blink true \
   --cursor-blink-rate slow \
@@ -218,6 +232,17 @@ with `background-opacity = 0.85` or `--background-opacity 0.85`. Set
 fall back to desktop transparency. Background images default to
 `background-image-fit = "cover"`, which scales the image to fill the window and
 center-crops any overflow. The CLI spelling is `--background-image-fit cover`.
+Set `background-overlay-color` and `background-overlay-opacity` to tint or dim
+the desktop/image background behind terminal cells without remapping application
+truecolor output; a black overlay around `0.15`-`0.30` is useful for busy
+photographic backgrounds. CLI spellings are `--background-overlay-color #000000`
+and `--background-overlay-opacity 0.25`.
+Terminal colors can be themed from `.wittyrc`: `theme-foreground` and
+`theme-background` set default SGR colors, `theme-cursor` sets the cursor
+override or uses `"null"` for the renderer default, and `theme-palette` accepts
+exactly 16 xterm-style ANSI colors. Direct truecolor output from applications is
+not remapped by the theme, while indexed ANSI colors follow the configured
+palette.
 Cursor shape defaults to `block`; set `cursor-shape = "underline"` or
 `"bar"` for horizontal or vertical cursors. Set `cursor-blink = false` for a
 steady cursor. CLI spellings are `--cursor-shape block|underline|bar` and

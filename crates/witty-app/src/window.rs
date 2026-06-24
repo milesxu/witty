@@ -27,8 +27,8 @@ use witty_core::{
     BasicTerminal, CellFlags, CellPoint, CellRange, CursorShape, CursorState, FocusEventKind,
     GridSize, HyperlinkId, MouseButtonCode, MouseEventKind, MouseModifiers, Osc52ClipboardPolicy,
     PixelMousePosition, RenderSnapshot, Rgba, SearchHighlight, TerminalClipboardSelection,
-    TerminalClipboardWrite, TerminalHostAction, TerminalHyperlink, TerminalInputModes,
-    TerminalMouseEvent,
+    TerminalClipboardWrite, TerminalColorTheme, TerminalHostAction, TerminalHyperlink,
+    TerminalInputModes, TerminalMouseEvent,
 };
 use witty_launcher::open_external_url;
 use witty_plugin_api::{CommandRegistration, PluginAction, PluginEvent};
@@ -2409,6 +2409,9 @@ pub fn run(
     background_opacity: Option<f32>,
     background_image_path: Option<PathBuf>,
     background_image_fit: Option<RendererBackgroundImageFit>,
+    background_overlay_color: Option<Rgba>,
+    background_overlay_opacity: Option<f32>,
+    terminal_color_theme: TerminalColorTheme,
     cursor_shape: CursorShape,
     cursor_blink: bool,
     cursor_blink_rate: CursorBlinkRate,
@@ -2441,6 +2444,9 @@ pub fn run(
         background_opacity,
         background_image_path,
         background_image_fit,
+        background_overlay_color,
+        background_overlay_opacity,
+        terminal_color_theme,
         cursor_shape,
         cursor_blink,
         cursor_blink_rate,
@@ -2564,13 +2570,15 @@ fn local_pty_config_for_launch(
     Ok(config)
 }
 
-fn basic_terminal_with_cursor_style(
+fn basic_terminal_with_config(
     size: GridSize,
     max_scrollback_lines: usize,
+    terminal_color_theme: TerminalColorTheme,
     cursor_shape: CursorShape,
     cursor_blink: bool,
 ) -> BasicTerminal {
     let mut terminal = BasicTerminal::with_scrollback_limit(size, max_scrollback_lines);
+    terminal.set_color_theme(terminal_color_theme);
     terminal.set_default_cursor_style(cursor_shape, cursor_blink);
     terminal
 }
@@ -2581,7 +2589,13 @@ fn basic_terminal_like(
     template: &BasicTerminal,
 ) -> BasicTerminal {
     let (cursor_shape, cursor_blink) = template.default_cursor_style();
-    basic_terminal_with_cursor_style(size, max_scrollback_lines, cursor_shape, cursor_blink)
+    basic_terminal_with_config(
+        size,
+        max_scrollback_lines,
+        template.color_theme(),
+        cursor_shape,
+        cursor_blink,
+    )
 }
 
 fn set_local_pty_env_pair(env: &mut Vec<(String, String)>, pair: (String, String)) {
@@ -3071,11 +3085,17 @@ fn native_window_session_startup_for_launch(
     size: GridSize,
     max_scrollback_lines: usize,
     local_tab_config: LocalPtyConfig,
+    terminal_color_theme: TerminalColorTheme,
     cursor_shape: CursorShape,
     cursor_blink: bool,
 ) -> Result<NativeWindowSessionStartup> {
-    let terminal =
-        basic_terminal_with_cursor_style(size, max_scrollback_lines, cursor_shape, cursor_blink);
+    let terminal = basic_terminal_with_config(
+        size,
+        max_scrollback_lines,
+        terminal_color_theme,
+        cursor_shape,
+        cursor_blink,
+    );
     let transport = LocalPtyTransport::spawn(local_tab_config.clone())?;
     Ok(NativeWindowSessionStartup {
         size,
@@ -3091,6 +3111,7 @@ fn native_window_session_startup_for_restore(
     snapshot: RestartSnapshotV1,
     fallback_local_tab_config: LocalPtyConfig,
     max_scrollback_lines: usize,
+    terminal_color_theme: TerminalColorTheme,
     cursor_shape: CursorShape,
     cursor_blink: bool,
 ) -> Result<NativeWindowSessionStartup> {
@@ -3102,8 +3123,13 @@ fn native_window_session_startup_for_restore(
     let active_config = active_tab.launch.to_local_pty_config(size);
     let transport =
         LocalPtyTransport::spawn(active_config).context("spawn active restored local pty")?;
-    let terminal =
-        basic_terminal_with_cursor_style(size, max_scrollback_lines, cursor_shape, cursor_blink);
+    let terminal = basic_terminal_with_config(
+        size,
+        max_scrollback_lines,
+        terminal_color_theme,
+        cursor_shape,
+        cursor_blink,
+    );
     let mut sessions = NativeSessionRegistry::default();
     let mut parked_sessions = NativeSessionRuntimeRegistry::default();
 
@@ -3123,9 +3149,10 @@ fn native_window_session_startup_for_restore(
             session_id,
             NativeSessionRuntime {
                 transport,
-                terminal: basic_terminal_with_cursor_style(
+                terminal: basic_terminal_with_config(
                     size,
                     max_scrollback_lines,
+                    terminal_color_theme,
                     cursor_shape,
                     cursor_blink,
                 ),
@@ -3358,6 +3385,9 @@ impl TerminalWindowApp {
         background_opacity: Option<f32>,
         background_image_path: Option<PathBuf>,
         background_image_fit: Option<RendererBackgroundImageFit>,
+        background_overlay_color: Option<Rgba>,
+        background_overlay_opacity: Option<f32>,
+        terminal_color_theme: TerminalColorTheme,
         cursor_shape: CursorShape,
         cursor_blink: bool,
         cursor_blink_rate: CursorBlinkRate,
@@ -3387,6 +3417,7 @@ impl TerminalWindowApp {
                 snapshot,
                 local_tab_config.clone(),
                 max_scrollback_lines,
+                terminal_color_theme,
                 cursor_shape,
                 cursor_blink,
             )?,
@@ -3394,6 +3425,7 @@ impl TerminalWindowApp {
                 size,
                 max_scrollback_lines,
                 local_tab_config,
+                terminal_color_theme,
                 cursor_shape,
                 cursor_blink,
             )?,
@@ -3430,6 +3462,14 @@ impl TerminalWindowApp {
         };
         let visual_config = match background_image_fit {
             Some(fit) => visual_config.with_background_image_fit(fit),
+            None => visual_config,
+        };
+        let visual_config = match background_overlay_color {
+            Some(color) => visual_config.with_background_overlay_color(color),
+            None => visual_config,
+        };
+        let visual_config = match background_overlay_opacity {
+            Some(opacity) => visual_config.with_background_overlay_opacity(opacity),
             None => visual_config,
         };
         let metrics = font_config.cell_metrics();
@@ -7322,6 +7362,10 @@ fn terminal_window_title(title: Option<&str>, default_title: &str) -> String {
         .to_owned()
 }
 
+fn terminal_color_config_value(color: Rgba) -> String {
+    format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
+}
+
 fn terminal_window_initial_inner_size(
     initial_size: Option<GridSize>,
     metrics: CellMetrics,
@@ -7476,6 +7520,8 @@ fn native_window_startup_report_json(
         "background_opacity": visual_config.background_opacity(),
         "background_image": visual_config.has_background_image(),
         "background_image_fit": visual_config.background_image_fit().as_config_value(),
+        "background_overlay_color": terminal_color_config_value(visual_config.background_overlay_color()),
+        "background_overlay_opacity": visual_config.background_overlay_opacity(),
         "transparent_window": visual_config.requires_window_transparency(),
         "font_source_count": font_source_count,
         "will_request_adapter": true,
@@ -7530,6 +7576,8 @@ fn native_window_first_frame_report_json(
         "background_opacity": visual_config.background_opacity(),
         "background_image": visual_config.has_background_image(),
         "background_image_fit": visual_config.background_image_fit().as_config_value(),
+        "background_overlay_color": terminal_color_config_value(visual_config.background_overlay_color()),
+        "background_overlay_opacity": visual_config.background_overlay_opacity(),
         "transparent_window": visual_config.requires_window_transparency(),
         "font_source_count": font_source_count,
         "visible_rows": stats.visible_rows,
@@ -15330,6 +15378,9 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
+            TerminalColorTheme::default(),
             CursorShape::Block,
             true,
             CursorBlinkRate::Normal,
@@ -15390,6 +15441,9 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
+            TerminalColorTheme::default(),
             CursorShape::Block,
             true,
             CursorBlinkRate::Normal,

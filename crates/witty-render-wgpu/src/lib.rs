@@ -23,6 +23,8 @@ const DEFAULT_TERMINAL_PADDING: PixelPoint = PixelPoint { x: 0.0, y: 0.0 };
 const DEFAULT_SURFACE_CLEAR_COLOR: Rgba = Rgba::BLACK;
 const TRANSPARENT_SURFACE_CLEAR_COLOR: Rgba = Rgba::with_alpha(0, 0, 0, 0);
 const DEFAULT_BACKGROUND_OPACITY: f32 = 1.0;
+const DEFAULT_BACKGROUND_OVERLAY_COLOR: Rgba = Rgba::BLACK;
+const DEFAULT_BACKGROUND_OVERLAY_OPACITY: f32 = 0.0;
 const BASELINE_SHIFT_FONT_SCALE: f32 = 0.72;
 const MAX_GLYPHON_RENDERER_CHARS: usize = 120;
 
@@ -1511,6 +1513,8 @@ pub struct RendererVisualConfig {
     background_opacity: f32,
     background_image: Option<RendererBackgroundImage>,
     background_image_fit: RendererBackgroundImageFit,
+    background_overlay_color: Rgba,
+    background_overlay_opacity: f32,
 }
 
 impl RendererVisualConfig {
@@ -1519,6 +1523,8 @@ impl RendererVisualConfig {
             background_opacity: DEFAULT_BACKGROUND_OPACITY,
             background_image: None,
             background_image_fit: RendererBackgroundImageFit::default(),
+            background_overlay_color: DEFAULT_BACKGROUND_OVERLAY_COLOR,
+            background_overlay_opacity: DEFAULT_BACKGROUND_OVERLAY_OPACITY,
         }
     }
 
@@ -1537,12 +1543,30 @@ impl RendererVisualConfig {
         self
     }
 
+    pub fn with_background_overlay_color(mut self, color: Rgba) -> Self {
+        self.background_overlay_color = color;
+        self
+    }
+
+    pub fn with_background_overlay_opacity(mut self, opacity: f32) -> Self {
+        self.background_overlay_opacity = sane_background_opacity(opacity);
+        self
+    }
+
     pub fn background_opacity(&self) -> f32 {
         self.background_opacity
     }
 
     pub fn background_image_fit(&self) -> RendererBackgroundImageFit {
         self.background_image_fit
+    }
+
+    pub fn background_overlay_color(&self) -> Rgba {
+        self.background_overlay_color
+    }
+
+    pub fn background_overlay_opacity(&self) -> f32 {
+        self.background_overlay_opacity
     }
 
     pub fn has_background_image(&self) -> bool {
@@ -2000,60 +2024,12 @@ impl WgpuRectRenderer {
     }
 
     fn vertices_for_frame(&self, frame: &FramePlan) -> Vec<Vertex> {
-        let mut vertices = Vec::new();
-        let terminal_background_bounds = terminal_background_bounds(&frame.backgrounds);
-        for rect in terminal_background_edge_fill_rects(
-            terminal_background_bounds,
+        rect_vertices_for_frame(
+            frame,
             self.config.width as f32,
             self.config.height as f32,
-            frame.default_background,
-        ) {
-            push_rect_vertices(
-                &mut vertices,
-                rect.origin.x,
-                rect.origin.y,
-                rect.size.width,
-                rect.size.height,
-                color_with_opacity(rect.color, self.visual_config.background_opacity),
-                self.config.width as f32,
-                self.config.height as f32,
-            );
-        }
-        for rect in frame.backgrounds.iter() {
-            push_rect_vertices(
-                &mut vertices,
-                rect.origin.x,
-                rect.origin.y,
-                rect.size.width,
-                rect.size.height,
-                color_with_opacity(rect.color, self.visual_config.background_opacity),
-                self.config.width as f32,
-                self.config.height as f32,
-            );
-        }
-        for rect in frame
-            .search_highlights
-            .iter()
-            .chain(frame.selection.iter())
-            .chain(frame.hyperlink_hover.iter())
-            .chain(frame.hyperlink_underlines.iter())
-            .chain(frame.text_decorations.iter())
-            .chain(frame.ime_preedit.iter())
-            .chain(frame.cursor.iter())
-            .chain(frame.overlay_backgrounds.iter())
-        {
-            push_rect_vertices(
-                &mut vertices,
-                rect.origin.x,
-                rect.origin.y,
-                rect.size.width,
-                rect.size.height,
-                rect.color,
-                self.config.width as f32,
-                self.config.height as f32,
-            );
-        }
-        vertices
+            &self.visual_config,
+        )
     }
 
     fn background_image_vertices(&self) -> Vec<ImageVertex> {
@@ -2112,6 +2088,83 @@ impl WgpuRectRenderer {
                 .write_buffer(buffer, 0, bytemuck::cast_slice(vertices));
         }
     }
+}
+
+fn rect_vertices_for_frame(
+    frame: &FramePlan,
+    surface_width: f32,
+    surface_height: f32,
+    visual_config: &RendererVisualConfig,
+) -> Vec<Vertex> {
+    let mut vertices = Vec::new();
+    let terminal_background_bounds = terminal_background_bounds(&frame.backgrounds);
+    for rect in terminal_background_edge_fill_rects(
+        terminal_background_bounds,
+        surface_width,
+        surface_height,
+        frame.default_background,
+    ) {
+        push_rect_vertices(
+            &mut vertices,
+            rect.origin.x,
+            rect.origin.y,
+            rect.size.width,
+            rect.size.height,
+            color_with_opacity(rect.color, visual_config.background_opacity),
+            surface_width,
+            surface_height,
+        );
+    }
+    for rect in frame.backgrounds.iter() {
+        push_rect_vertices(
+            &mut vertices,
+            rect.origin.x,
+            rect.origin.y,
+            rect.size.width,
+            rect.size.height,
+            color_with_opacity(rect.color, visual_config.background_opacity),
+            surface_width,
+            surface_height,
+        );
+    }
+    if visual_config.background_overlay_opacity > 0.0 {
+        push_rect_vertices(
+            &mut vertices,
+            0.0,
+            0.0,
+            surface_width,
+            surface_height,
+            color_with_opacity(
+                visual_config.background_overlay_color,
+                visual_config.background_overlay_opacity,
+            ),
+            surface_width,
+            surface_height,
+        );
+    }
+    for rect in frame
+        .search_highlights
+        .iter()
+        .chain(frame.selection.iter())
+        .chain(frame.hyperlink_hover.iter())
+        .chain(frame.hyperlink_underlines.iter())
+        .chain(frame.text_decorations.iter())
+        .chain(frame.ime_preedit.iter())
+        .chain(frame.cursor.iter())
+        .chain(frame.overlay_backgrounds.iter())
+    {
+        push_rect_vertices(
+            &mut vertices,
+            rect.origin.x,
+            rect.origin.y,
+            rect.size.width,
+            rect.size.height,
+            rect.color,
+            surface_width,
+            surface_height,
+        );
+    }
+    vertices
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -3024,6 +3077,87 @@ mod tests {
             color_with_opacity(Rgba::with_alpha(10, 20, 30, 200), 2.0),
             Rgba::with_alpha(10, 20, 30, 200)
         );
+    }
+
+    #[test]
+    fn background_overlay_visual_config_defaults_to_disabled_and_clamps_opacity() {
+        let config = RendererVisualConfig::default()
+            .with_background_overlay_color(Rgba::rgb(1, 2, 3))
+            .with_background_overlay_opacity(1.5);
+
+        assert_eq!(RendererVisualConfig::default().background_overlay_color(), Rgba::BLACK);
+        assert_eq!(
+            RendererVisualConfig::default().background_overlay_opacity(),
+            0.0
+        );
+        assert_eq!(config.background_overlay_color(), Rgba::rgb(1, 2, 3));
+        assert_eq!(config.background_overlay_opacity(), 1.0);
+    }
+
+    #[test]
+    fn background_overlay_vertices_render_above_terminal_backgrounds() {
+        let frame = FramePlan {
+            backgrounds: vec![RectBatchItem {
+                origin: PixelPoint { x: 0.0, y: 0.0 },
+                size: PixelSize {
+                    width: 100.0,
+                    height: 60.0,
+                },
+                color: Rgba::rgb(10, 20, 30),
+            }],
+            selection: vec![RectBatchItem {
+                origin: PixelPoint { x: 0.0, y: 0.0 },
+                size: PixelSize {
+                    width: 20.0,
+                    height: 20.0,
+                },
+                color: Rgba::rgb(40, 50, 60),
+            }],
+            cursor: Some(RectBatchItem {
+                origin: PixelPoint { x: 20.0, y: 0.0 },
+                size: PixelSize {
+                    width: 10.0,
+                    height: 20.0,
+                },
+                color: Rgba::rgb(70, 80, 90),
+            }),
+            overlay_backgrounds: vec![RectBatchItem {
+                origin: PixelPoint { x: 0.0, y: 20.0 },
+                size: PixelSize {
+                    width: 30.0,
+                    height: 20.0,
+                },
+                color: Rgba::rgb(100, 110, 120),
+            }],
+            ..FramePlan::default()
+        };
+        let config = RendererVisualConfig::default()
+            .with_background_opacity(0.5)
+            .with_background_overlay_color(Rgba::rgb(4, 5, 6))
+            .with_background_overlay_opacity(0.25);
+
+        let vertices = rect_vertices_for_frame(&frame, 100.0, 60.0, &config);
+
+        assert_eq!(vertices.len(), 30);
+        assert_eq!(rect_vertex_color(&vertices, 0), Rgba::with_alpha(10, 20, 30, 128));
+        assert_eq!(rect_vertex_color(&vertices, 1), Rgba::with_alpha(4, 5, 6, 64));
+        assert_eq!(rect_vertex_color(&vertices, 2), Rgba::rgb(40, 50, 60));
+        assert_eq!(rect_vertex_color(&vertices, 3), Rgba::rgb(70, 80, 90));
+        assert_eq!(rect_vertex_color(&vertices, 4), Rgba::rgb(100, 110, 120));
+    }
+
+    fn rect_vertex_color(vertices: &[Vertex], rect_index: usize) -> Rgba {
+        let color = vertices[rect_index * 6].color;
+        Rgba::with_alpha(
+            channel_from_linear(color[0]),
+            channel_from_linear(color[1]),
+            channel_from_linear(color[2]),
+            channel_from_linear(color[3]),
+        )
+    }
+
+    fn channel_from_linear(channel: f32) -> u8 {
+        (channel * 255.0).round().clamp(0.0, 255.0) as u8
     }
 
     #[test]

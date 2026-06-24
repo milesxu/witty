@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod logging;
 mod real_tui_smoke;
 mod update_state;
@@ -23,8 +25,9 @@ use window::{
     DEFAULT_WINDOW_TITLE,
 };
 use witty_core::{
-    BasicTerminal, CellPoint, CellRange, CursorShape, GridSize, Osc52ClipboardPolicy,
-    TerminalHostAction, DEFAULT_MAX_SCROLLBACK_LINES,
+    parse_terminal_color, BasicTerminal, CellPoint, CellRange, CursorShape, GridSize,
+    Osc52ClipboardPolicy, Rgba, TerminalColorTheme, TerminalHostAction,
+    DEFAULT_MAX_SCROLLBACK_LINES,
 };
 use witty_plugin_api::{
     CommandRegistration, PluginAction, PluginEvent, PluginManifest, PluginPermissions,
@@ -243,6 +246,9 @@ fn run_main(args: Vec<String>) -> anyhow::Result<()> {
             options.background_opacity,
             options.background_image.clone(),
             options.background_image_fit,
+            options.background_overlay_color,
+            options.background_overlay_opacity,
+            options.terminal_color_theme,
             options.cursor_shape,
             options.cursor_blink,
             options.cursor_blink_rate,
@@ -364,6 +370,9 @@ struct AppOptions {
     background_opacity: Option<f32>,
     background_image: Option<PathBuf>,
     background_image_fit: Option<RendererBackgroundImageFit>,
+    background_overlay_color: Option<Rgba>,
+    background_overlay_opacity: Option<f32>,
+    terminal_color_theme: TerminalColorTheme,
     cursor_shape: CursorShape,
     cursor_blink: bool,
     cursor_blink_rate: CursorBlinkRate,
@@ -400,6 +409,8 @@ struct AppOptionsExplicit {
     background_opacity: bool,
     background_image: bool,
     background_image_fit: bool,
+    background_overlay_color: bool,
+    background_overlay_opacity: bool,
     cursor_shape: bool,
     cursor_blink: bool,
     cursor_blink_rate: bool,
@@ -443,6 +454,9 @@ impl AppOptions {
         let mut background_opacity = None;
         let mut background_image = None;
         let mut background_image_fit = None;
+        let mut background_overlay_color = None;
+        let mut background_overlay_opacity = None;
+        let terminal_color_theme = TerminalColorTheme::default();
         let mut cursor_shape = CursorShape::Block;
         let mut cursor_blink = true;
         let mut cursor_blink_rate = CursorBlinkRate::default();
@@ -770,6 +784,32 @@ impl AppOptions {
                         "--background-image-fit",
                     )?);
                     explicit.background_image_fit = true;
+                    window_only_args_seen = true;
+                }
+                "--background-overlay-color" => {
+                    let Some(value) = args.next() else {
+                        bail!("--background-overlay-color requires a value");
+                    };
+                    if background_overlay_color.is_some() {
+                        bail!("only one --background-overlay-color value is allowed");
+                    }
+                    background_overlay_color =
+                        Some(parse_background_overlay_color(&value, "--background-overlay-color")?);
+                    explicit.background_overlay_color = true;
+                    window_only_args_seen = true;
+                }
+                "--background-overlay-opacity" => {
+                    let Some(value) = args.next() else {
+                        bail!("--background-overlay-opacity requires a value");
+                    };
+                    if background_overlay_opacity.is_some() {
+                        bail!("only one --background-overlay-opacity value is allowed");
+                    }
+                    background_overlay_opacity = Some(parse_background_overlay_opacity(
+                        &value,
+                        "--background-overlay-opacity",
+                    )?);
+                    explicit.background_overlay_opacity = true;
                     window_only_args_seen = true;
                 }
                 "--cursor-shape" => {
@@ -1315,6 +1355,9 @@ impl AppOptions {
             background_opacity,
             background_image,
             background_image_fit,
+            background_overlay_color,
+            background_overlay_opacity,
+            terminal_color_theme,
             cursor_shape,
             cursor_blink,
             cursor_blink_rate,
@@ -1481,6 +1524,22 @@ impl AppOptions {
             if let Some(value) = config.background_image_fit {
                 self.background_image_fit =
                     Some(parse_background_image_fit(&value, "background_image_fit")?);
+            }
+        }
+        if !self.explicit.background_overlay_color && self.background_overlay_color.is_none() {
+            if let Some(value) = config.background_overlay_color {
+                self.background_overlay_color = Some(parse_background_overlay_color(
+                    &value,
+                    "background_overlay_color",
+                )?);
+            }
+        }
+        if !self.explicit.background_overlay_opacity
+            && self.background_overlay_opacity.is_none()
+        {
+            if let Some(value) = config.background_overlay_opacity {
+                self.background_overlay_opacity =
+                    Some(validate_background_overlay_opacity(value, "background_overlay_opacity")?);
             }
         }
         if !self.explicit.cursor_shape {
@@ -1656,6 +1715,33 @@ impl AppOptions {
                 self.explicit.background_image_fit = true;
             }
         }
+        if !self.explicit.background_overlay_color && self.background_overlay_color.is_none() {
+            if let Some(value) = config.background_overlay_color {
+                self.background_overlay_color = Some(parse_background_overlay_color(
+                    &value,
+                    "background-overlay-color",
+                )?);
+                self.explicit.background_overlay_color = true;
+            }
+        }
+        if !self.explicit.background_overlay_opacity
+            && self.background_overlay_opacity.is_none()
+        {
+            if let Some(value) = config.background_overlay_opacity {
+                self.background_overlay_opacity = Some(validate_background_overlay_opacity(
+                    value,
+                    "background-overlay-opacity",
+                )?);
+                self.explicit.background_overlay_opacity = true;
+            }
+        }
+        self.terminal_color_theme = parse_wittyrc_terminal_color_theme(
+            self.terminal_color_theme,
+            config.theme_foreground,
+            config.theme_background,
+            config.theme_cursor,
+            config.theme_palette,
+        )?;
         if !self.explicit.cursor_shape {
             if let Some(value) = config.cursor_shape {
                 self.cursor_shape = parse_cursor_shape(&value, "cursor-shape")?;
@@ -1857,6 +1943,10 @@ struct NativeWindowConfig {
     #[serde(default)]
     background_image_fit: Option<String>,
     #[serde(default)]
+    background_overlay_color: Option<String>,
+    #[serde(default)]
+    background_overlay_opacity: Option<f32>,
+    #[serde(default)]
     cursor_shape: Option<String>,
     #[serde(default)]
     cursor_blink: Option<bool>,
@@ -1905,6 +1995,18 @@ struct WittyrcConfig {
     background_image: Option<String>,
     #[serde(default, rename = "background-image-fit")]
     background_image_fit: Option<String>,
+    #[serde(default, rename = "background-overlay-color")]
+    background_overlay_color: Option<String>,
+    #[serde(default, rename = "background-overlay-opacity")]
+    background_overlay_opacity: Option<f32>,
+    #[serde(default, rename = "theme-foreground")]
+    theme_foreground: Option<String>,
+    #[serde(default, rename = "theme-background")]
+    theme_background: Option<String>,
+    #[serde(default, rename = "theme-cursor")]
+    theme_cursor: Option<String>,
+    #[serde(default, rename = "theme-palette")]
+    theme_palette: Vec<String>,
     #[serde(default, rename = "window-last-active-close")]
     window_last_active_close: Option<String>,
     #[serde(default, rename = "cursor-shape")]
@@ -2003,6 +2105,8 @@ fn native_window_config_template() -> String {
         "background_opacity": 1.0,
         "background_image": null,
         "background_image_fit": "cover",
+        "background_overlay_color": "#000000",
+        "background_overlay_opacity": 0.0,
         "cursor_shape": "block",
         "cursor_blink": true,
         "cursor_blink_rate": "normal",
@@ -2249,6 +2353,9 @@ fn native_window_effective_config_summary(
             .as_ref()
             .map(|path| path.display().to_string()),
         "background_image_fit": visual_config.background_image_fit().as_config_value(),
+        "background_overlay_color": terminal_color_config_value(visual_config.background_overlay_color()),
+        "background_overlay_opacity": visual_config.background_overlay_opacity(),
+        "terminal_theme": terminal_theme_summary_value(options.terminal_color_theme),
         "cursor_shape": cursor_shape_config_value(options.cursor_shape),
         "cursor_blink": options.cursor_blink,
         "cursor_blink_rate": options.cursor_blink_rate.as_config_value(),
@@ -2308,6 +2415,9 @@ fn wittyrc_effective_config_summary(
             .as_ref()
             .map(|path| path.display().to_string()),
         "background_image_fit": visual_config.background_image_fit().as_config_value(),
+        "background_overlay_color": terminal_color_config_value(visual_config.background_overlay_color()),
+        "background_overlay_opacity": visual_config.background_overlay_opacity(),
+        "terminal_theme": terminal_theme_summary_value(options.terminal_color_theme),
         "cursor_shape": cursor_shape_config_value(options.cursor_shape),
         "cursor_blink": options.cursor_blink,
         "cursor_blink_rate": options.cursor_blink_rate.as_config_value(),
@@ -2348,6 +2458,14 @@ fn renderer_visual_config_for_options(
     };
     let config = match options.background_image_fit {
         Some(fit) => config.with_background_image_fit(fit),
+        None => config,
+    };
+    let config = match options.background_overlay_color {
+        Some(color) => config.with_background_overlay_color(color),
+        None => config,
+    };
+    let config = match options.background_overlay_opacity {
+        Some(opacity) => config.with_background_overlay_opacity(opacity),
         None => config,
     };
     config.with_background_image(background_image)
@@ -2737,6 +2855,99 @@ fn parse_background_image_fit(value: &str, name: &str) -> Result<RendererBackgro
             RendererBackgroundImageFit::config_values().join(", ")
         ),
     }
+}
+
+fn parse_background_overlay_color(value: &str, name: &str) -> Result<Rgba> {
+    parse_terminal_theme_color(value, name)
+}
+
+fn parse_background_overlay_opacity(value: &str, name: &str) -> Result<f32> {
+    let opacity = value
+        .parse::<f32>()
+        .with_context(|| format!("{name} must be a number between 0.0 and 1.0"))?;
+    validate_background_overlay_opacity(opacity, name)
+}
+
+fn validate_background_overlay_opacity(opacity: f32, name: &str) -> Result<f32> {
+    validate_background_opacity(opacity, name)
+}
+
+fn parse_wittyrc_terminal_color_theme(
+    current: TerminalColorTheme,
+    foreground: Option<String>,
+    background: Option<String>,
+    cursor: Option<String>,
+    palette: Vec<String>,
+) -> Result<TerminalColorTheme> {
+    let mut theme = current;
+    if let Some(value) = foreground {
+        theme.foreground = parse_terminal_theme_color(&value, "theme-foreground")?;
+    }
+    if let Some(value) = background {
+        theme.background = parse_terminal_theme_color(&value, "theme-background")?;
+    }
+    if let Some(value) = cursor {
+        theme.cursor_color = parse_optional_terminal_theme_color(&value, "theme-cursor")?;
+    }
+    if !palette.is_empty() {
+        if palette.len() != TerminalColorTheme::ANSI_COLOR_COUNT {
+            bail!(
+                "theme-palette must contain exactly {} colors",
+                TerminalColorTheme::ANSI_COLOR_COUNT
+            );
+        }
+        for (index, value) in palette.iter().enumerate() {
+            theme.palette[index] =
+                parse_terminal_theme_color(value, &format!("theme-palette[{index}]"))?;
+        }
+    }
+    Ok(theme)
+}
+
+fn parse_optional_terminal_theme_color(value: &str, name: &str) -> Result<Option<Rgba>> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("{name} cannot be empty");
+    }
+    if value.eq_ignore_ascii_case("null") || value.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    Ok(Some(parse_terminal_theme_color(value, name)?))
+}
+
+fn parse_terminal_theme_color(value: &str, name: &str) -> Result<Rgba> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("{name} cannot be empty");
+    }
+    parse_terminal_color(value)
+        .with_context(|| format!("{name} must be a color like #rrggbb or rgb:rrrr/gggg/bbbb"))
+}
+
+fn terminal_color_config_value(color: Rgba) -> String {
+    format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
+}
+
+fn terminal_optional_color_config_value(color: Option<Rgba>) -> Option<String> {
+    color.map(terminal_color_config_value)
+}
+
+fn terminal_palette_config_value(
+    palette: [Rgba; TerminalColorTheme::ANSI_COLOR_COUNT],
+) -> Vec<String> {
+    palette
+        .into_iter()
+        .map(terminal_color_config_value)
+        .collect()
+}
+
+fn terminal_theme_summary_value(theme: TerminalColorTheme) -> serde_json::Value {
+    serde_json::json!({
+        "foreground": terminal_color_config_value(theme.foreground),
+        "background": terminal_color_config_value(theme.background),
+        "cursor": terminal_optional_color_config_value(theme.cursor_color),
+        "palette": terminal_palette_config_value(theme.palette),
+    })
 }
 
 fn parse_cursor_shape(value: &str, name: &str) -> Result<CursorShape> {
@@ -3737,6 +3948,8 @@ mod tests {
         assert_eq!(options.background_opacity, None);
         assert_eq!(options.background_image, None);
         assert_eq!(options.background_image_fit, None);
+        assert_eq!(options.background_overlay_color, None);
+        assert_eq!(options.background_overlay_opacity, None);
         assert!(options.font_paths.is_empty());
         assert!(options.launcher_args.is_empty());
         assert_eq!(
@@ -4053,6 +4266,10 @@ mod tests {
             "~/Pictures/witty.png".to_owned(),
             "--background-image-fit".to_owned(),
             "scale-crop".to_owned(),
+            "--background-overlay-color".to_owned(),
+            "#0a141e".to_owned(),
+            "--background-overlay-opacity".to_owned(),
+            "0.24".to_owned(),
             "--cursor-shape".to_owned(),
             "bar".to_owned(),
             "--cursor-blink".to_owned(),
@@ -4103,6 +4320,11 @@ mod tests {
             options.background_image_fit,
             Some(RendererBackgroundImageFit::Cover)
         );
+        assert_eq!(
+            options.background_overlay_color,
+            Some(Rgba::rgb(0x0a, 0x14, 0x1e))
+        );
+        assert_eq!(options.background_overlay_opacity, Some(0.24));
         assert_eq!(options.cursor_shape, CursorShape::Bar);
         assert!(!options.cursor_blink);
         assert_eq!(options.cursor_blink_rate, CursorBlinkRate::Slow);
@@ -4158,6 +4380,8 @@ mod tests {
             background_opacity: Some(0.75),
             background_image: Some(PathBuf::from("/images/witty.png")),
             background_image_fit: Some("cover".to_owned()),
+            background_overlay_color: Some("#101820".to_owned()),
+            background_overlay_opacity: Some(0.22),
             cursor_shape: Some("bar".to_owned()),
             cursor_blink: Some(false),
             cursor_blink_rate: Some("slow".to_owned()),
@@ -4209,6 +4433,11 @@ mod tests {
             options.background_image_fit,
             Some(RendererBackgroundImageFit::Cover)
         );
+        assert_eq!(
+            options.background_overlay_color,
+            Some(Rgba::rgb(0x10, 0x18, 0x20))
+        );
+        assert_eq!(options.background_overlay_opacity, Some(0.22));
         assert_eq!(options.cursor_shape, CursorShape::Bar);
         assert!(!options.cursor_blink);
         assert_eq!(options.cursor_blink_rate, CursorBlinkRate::Slow);
@@ -4278,6 +4507,10 @@ mod tests {
                 "0.9",
                 "--background-image",
                 "null",
+                "--background-overlay-color",
+                "#112233",
+                "--background-overlay-opacity",
+                "0.2",
                 "--cwd",
                 "/cli/project",
                 "--env",
@@ -4310,6 +4543,8 @@ mod tests {
             background_opacity: Some(0.7),
             background_image: Some(PathBuf::from("/config/background.png")),
             background_image_fit: Some("cover".to_owned()),
+            background_overlay_color: Some("#445566".to_owned()),
+            background_overlay_opacity: Some(0.45),
             cursor_shape: Some("underline".to_owned()),
             cursor_blink: Some(true),
             cursor_blink_rate: Some("variable".to_owned()),
@@ -4361,6 +4596,11 @@ mod tests {
             options.background_image_fit,
             Some(RendererBackgroundImageFit::Cover)
         );
+        assert_eq!(
+            options.background_overlay_color,
+            Some(Rgba::rgb(0x11, 0x22, 0x33))
+        );
+        assert_eq!(options.background_overlay_opacity, Some(0.2));
         assert_eq!(options.cursor_shape, CursorShape::Underline);
         assert!(options.cursor_blink);
         assert_eq!(options.cursor_blink_rate, CursorBlinkRate::Variable);
@@ -4431,6 +4671,15 @@ mod tests {
         assert_eq!(config.background_opacity, Some(1.0));
         assert_eq!(config.background_image.as_deref(), Some("null"));
         assert_eq!(config.background_image_fit.as_deref(), Some("cover"));
+        assert_eq!(config.background_overlay_color.as_deref(), Some("#000000"));
+        assert_eq!(config.background_overlay_opacity, Some(0.0));
+        assert_eq!(config.theme_foreground.as_deref(), Some("#ffffff"));
+        assert_eq!(config.theme_background.as_deref(), Some("#000000"));
+        assert_eq!(config.theme_cursor.as_deref(), Some("null"));
+        assert_eq!(
+            config.theme_palette.len(),
+            TerminalColorTheme::ANSI_COLOR_COUNT
+        );
         assert_eq!(config.cursor_shape.as_deref(), Some("block"));
         assert_eq!(config.cursor_blink, Some(true));
         assert_eq!(config.cursor_blink_rate.as_deref(), Some("normal"));
@@ -4446,6 +4695,12 @@ mod tests {
         assert!(template.contains("background-opacity = 1.0"));
         assert!(template.contains("background-image = \"null\""));
         assert!(template.contains("background-image-fit = \"cover\""));
+        assert!(template.contains("background-overlay-color = \"#000000\""));
+        assert!(template.contains("background-overlay-opacity = 0.0"));
+        assert!(template.contains("theme-foreground = \"#ffffff\""));
+        assert!(template.contains("theme-background = \"#000000\""));
+        assert!(template.contains("theme-cursor = \"null\""));
+        assert!(template.contains("theme-palette = ["));
         assert!(template.contains("cursor-shape = \"block\""));
         assert!(template.contains("cursor-blink = true"));
         assert!(template.contains("cursor-blink-rate = \"normal\""));
@@ -4479,17 +4734,28 @@ mod tests {
         let unknown_path = root.join("unknown.wittyrc");
         std::fs::write(
             &config_path,
-            r#"font-family = "Maple Mono NF CN"
+            r##"font-family = "Maple Mono NF CN"
 font-size = 15
 terminal-padding = 4
 background-opacity = 0.8
 background-image = "/images/witty.png"
 background-image-fit = "scale-and-crop"
+background-overlay-color = "#102030"
+background-overlay-opacity = 0.25
+theme-foreground = "#dcd7ba"
+theme-background = "#1f1f28"
+theme-cursor = "#c8c093"
+theme-palette = [
+  "#090618", "#c34043", "#76946a", "#c0a36e",
+  "#7e9cd8", "#957fb8", "#6a9589", "#c8c093",
+  "#727169", "#e82424", "#98bb6c", "#e6c384",
+  "#7fb4ca", "#938aa9", "#7aa89f", "#dcd7ba",
+]
 cursor-shape = "underline"
 cursor-blink = false
 cursor-blink-rate = "slow"
 cursor-style-source = "config"
-osc52-clipboard = "allow""#,
+osc52-clipboard = "allow""##,
         )
         .unwrap();
         std::fs::write(&unknown_path, r#"font_family = "Maple Mono NF CN""#).unwrap();
@@ -4510,6 +4776,16 @@ osc52-clipboard = "allow""#,
             config.background_image_fit.as_deref(),
             Some("scale-and-crop")
         );
+        assert_eq!(config.background_overlay_color.as_deref(), Some("#102030"));
+        assert_eq!(config.background_overlay_opacity, Some(0.25));
+        assert_eq!(config.theme_foreground.as_deref(), Some("#dcd7ba"));
+        assert_eq!(config.theme_background.as_deref(), Some("#1f1f28"));
+        assert_eq!(config.theme_cursor.as_deref(), Some("#c8c093"));
+        assert_eq!(
+            config.theme_palette.len(),
+            TerminalColorTheme::ANSI_COLOR_COUNT
+        );
+        assert_eq!(config.theme_palette[1], "#c34043");
         assert_eq!(config.cursor_shape.as_deref(), Some("underline"));
         assert_eq!(config.cursor_blink, Some(false));
         assert_eq!(config.cursor_blink_rate.as_deref(), Some("slow"));
@@ -4550,6 +4826,29 @@ osc52-clipboard = "allow""#,
                         background_opacity: Some(0.6),
                         background_image: Some("/wittyrc/background.png".to_owned()),
                         background_image_fit: Some("cover".to_owned()),
+                        background_overlay_color: Some("#14283c".to_owned()),
+                        background_overlay_opacity: Some(0.26),
+                        theme_foreground: Some("#dcd7ba".to_owned()),
+                        theme_background: Some("#1f1f28".to_owned()),
+                        theme_cursor: Some("#c8c093".to_owned()),
+                        theme_palette: vec![
+                            "#090618".to_owned(),
+                            "#c34043".to_owned(),
+                            "#76946a".to_owned(),
+                            "#c0a36e".to_owned(),
+                            "#7e9cd8".to_owned(),
+                            "#957fb8".to_owned(),
+                            "#6a9589".to_owned(),
+                            "#c8c093".to_owned(),
+                            "#727169".to_owned(),
+                            "#e82424".to_owned(),
+                            "#98bb6c".to_owned(),
+                            "#e6c384".to_owned(),
+                            "#7fb4ca".to_owned(),
+                            "#938aa9".to_owned(),
+                            "#7aa89f".to_owned(),
+                            "#dcd7ba".to_owned(),
+                        ],
                         window_last_active_close: Some("block".to_owned()),
                         cursor_shape: Some("bar".to_owned()),
                         cursor_blink: Some(false),
@@ -4560,6 +4859,7 @@ osc52-clipboard = "allow""#,
                         session_tab_show_single: Some(false),
                         session_tab_show_multiple: Some(false),
                         osc52_clipboard: Some("allow".to_owned()),
+                        ..WittyrcConfig::default()
                     }))
                 },
             )
@@ -4576,6 +4876,8 @@ osc52-clipboard = "allow""#,
                         terminal_padding: Some(8),
                         background_opacity: Some(0.8),
                         background_image: Some(PathBuf::from("/window/background.png")),
+                        background_overlay_color: Some("#ffffff".to_owned()),
+                        background_overlay_opacity: Some(0.9),
                         window_last_active_close: Some("close-window".to_owned()),
                         ..NativeWindowConfig::default()
                     }))
@@ -4599,6 +4901,27 @@ osc52-clipboard = "allow""#,
         assert_eq!(
             options.background_image_fit,
             Some(RendererBackgroundImageFit::Cover)
+        );
+        assert_eq!(
+            options.background_overlay_color,
+            Some(Rgba::rgb(0x14, 0x28, 0x3c))
+        );
+        assert_eq!(options.background_overlay_opacity, Some(0.26));
+        assert_eq!(
+            options.terminal_color_theme.foreground,
+            Rgba::rgb(0xdc, 0xd7, 0xba)
+        );
+        assert_eq!(
+            options.terminal_color_theme.background,
+            Rgba::rgb(0x1f, 0x1f, 0x28)
+        );
+        assert_eq!(
+            options.terminal_color_theme.cursor_color,
+            Some(Rgba::rgb(0xc8, 0xc0, 0x93))
+        );
+        assert_eq!(
+            options.terminal_color_theme.palette[1],
+            Rgba::rgb(0xc3, 0x40, 0x43)
         );
         assert_eq!(
             options.window_smoke.last_active_close_policy,
@@ -4688,6 +5011,34 @@ osc52-clipboard = "allow""#,
         assert!(format!("{error:#}").contains("cursor-shape"));
         assert_eq!(options.font_size, None);
         assert_eq!(options.cursor_shape, CursorShape::Block);
+    }
+
+    #[test]
+    fn app_options_wittyrc_theme_failure_preserves_existing_options() {
+        let mut options = AppOptions::parse([
+            "--window".to_owned(),
+            "--wittyrc".to_owned(),
+            "/configs/.wittyrc".to_owned(),
+        ])
+        .unwrap();
+
+        let error = options
+            .apply_wittyrc_defaults(
+                || unreachable!("explicit wittyrc should not use default path"),
+                |_| {
+                    Ok(Some(WittyrcConfig {
+                        font_size: Some(18),
+                        theme_foreground: Some("#dcd7ba".to_owned()),
+                        theme_palette: vec!["#000000".to_owned()],
+                        ..WittyrcConfig::default()
+                    }))
+                },
+            )
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("theme-palette"));
+        assert_eq!(options.font_size, None);
+        assert_eq!(options.terminal_color_theme, TerminalColorTheme::default());
     }
 
     #[test]
@@ -4833,6 +5184,11 @@ osc52-clipboard = "allow""#,
                     Ok(Some(WittyrcConfig {
                         font_family: Some("Maple Mono NF CN".to_owned()),
                         terminal_padding: Some(7),
+                        background_overlay_color: Some("#101820".to_owned()),
+                        background_overlay_opacity: Some(0.21),
+                        theme_foreground: Some("#dcd7ba".to_owned()),
+                        theme_background: Some("#1f1f28".to_owned()),
+                        theme_cursor: Some("none".to_owned()),
                         ..WittyrcConfig::default()
                     }))
                 },
@@ -4876,6 +5232,15 @@ osc52-clipboard = "allow""#,
         assert!((json["background_opacity"].as_f64().unwrap() - 0.65).abs() < 0.001);
         assert_eq!(json["background_image"], "/window/background.png");
         assert_eq!(json["background_image_fit"], "cover");
+        assert_eq!(json["background_overlay_color"], "#101820");
+        assert!((json["background_overlay_opacity"].as_f64().unwrap() - 0.21).abs() < 0.001);
+        assert_eq!(json["terminal_theme"]["foreground"], "#dcd7ba");
+        assert_eq!(json["terminal_theme"]["background"], "#1f1f28");
+        assert_eq!(json["terminal_theme"]["cursor"], serde_json::Value::Null);
+        assert_eq!(
+            json["terminal_theme"]["palette"].as_array().unwrap().len(),
+            16
+        );
         assert_eq!(json["cursor_shape"], "block");
         assert_eq!(json["cursor_blink"], true);
         assert_eq!(json["cursor_blink_rate"], "normal");
@@ -4901,6 +5266,11 @@ osc52-clipboard = "allow""#,
             options.background_image_fit,
             Some(RendererBackgroundImageFit::Cover)
         );
+        assert_eq!(
+            options.background_overlay_color,
+            Some(Rgba::rgb(0x00, 0x00, 0x00))
+        );
+        assert_eq!(options.background_overlay_opacity, Some(0.0));
         assert_eq!(options.cursor_shape, CursorShape::Block);
         assert!(options.cursor_blink);
         assert_eq!(options.session_tab_position, NativeSessionTabPosition::Top);
@@ -5063,6 +5433,8 @@ osc52-clipboard = "allow""#,
                     background_opacity: Some(0.85),
                     background_image: Some(PathBuf::from("/candidate/background.png")),
                     background_image_fit: Some("cover".to_owned()),
+                    background_overlay_color: Some("#000000".to_owned()),
+                    background_overlay_opacity: Some(0.25),
                     cursor_shape: Some("block".to_owned()),
                     cursor_blink: Some(true),
                     cursor_blink_rate: Some("slow".to_owned()),
@@ -5156,6 +5528,8 @@ osc52-clipboard = "allow""#,
                         background_opacity: Some(0.78),
                         background_image: Some(PathBuf::from("/config/background.png")),
                         background_image_fit: Some("cover".to_owned()),
+                        background_overlay_color: Some("#081018".to_owned()),
+                        background_overlay_opacity: Some(0.3),
                         cursor_shape: Some("bar".to_owned()),
                         cursor_blink: Some(false),
                         cursor_blink_rate: Some("variable".to_owned()),
@@ -5207,6 +5581,8 @@ osc52-clipboard = "allow""#,
         assert!((json["background_opacity"].as_f64().unwrap() - 0.78).abs() < 0.001);
         assert_eq!(json["background_image"], "/cli/background.png");
         assert_eq!(json["background_image_fit"], "cover");
+        assert_eq!(json["background_overlay_color"], "#081018");
+        assert!((json["background_overlay_opacity"].as_f64().unwrap() - 0.3).abs() < 0.001);
         assert_eq!(json["cursor_shape"], "bar");
         assert_eq!(json["cursor_blink"], false);
         assert_eq!(json["cursor_blink_rate"], "variable");
@@ -5340,6 +5716,14 @@ osc52-clipboard = "allow""#,
                 ..NativeWindowConfig::default()
             },
             NativeWindowConfig {
+                background_overlay_color: Some("blue".to_owned()),
+                ..NativeWindowConfig::default()
+            },
+            NativeWindowConfig {
+                background_overlay_opacity: Some(1.1),
+                ..NativeWindowConfig::default()
+            },
+            NativeWindowConfig {
                 cursor_shape: Some("caret".to_owned()),
                 ..NativeWindowConfig::default()
             },
@@ -5410,7 +5794,7 @@ osc52-clipboard = "allow""#,
         let unknown_path = root.join("unknown.v1.json");
         std::fs::write(
             &config_path,
-            r#"{
+            r##"{
                 "window_title": "Project Shell",
                 "program": "tmux",
                 "args": ["new-session", "-A"],
@@ -5421,6 +5805,8 @@ osc52-clipboard = "allow""#,
                 "background_opacity": 0.84,
                 "background_image": "/images/background.png",
                 "background_image_fit": "cover",
+                "background_overlay_color": "#203040",
+                "background_overlay_opacity": 0.18,
                 "cursor_shape": "bar",
                 "cursor_blink": false,
                 "cursor_blink_rate": "slow",
@@ -5433,7 +5819,7 @@ osc52-clipboard = "allow""#,
                 "window_last_active_close": "close-window",
                 "window_cols": 120,
                 "window_rows": 36
-            }"#,
+            }"##,
         )
         .unwrap();
         std::fs::write(&unknown_path, r#"{"unknown": true}"#).unwrap();
@@ -5458,6 +5844,8 @@ osc52-clipboard = "allow""#,
             Some(Path::new("/images/background.png"))
         );
         assert_eq!(config.background_image_fit.as_deref(), Some("cover"));
+        assert_eq!(config.background_overlay_color.as_deref(), Some("#203040"));
+        assert_eq!(config.background_overlay_opacity, Some(0.18));
         assert_eq!(config.cursor_shape.as_deref(), Some("bar"));
         assert_eq!(config.cursor_blink, Some(false));
         assert_eq!(config.cursor_blink_rate.as_deref(), Some("slow"));

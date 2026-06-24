@@ -11,7 +11,7 @@ use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
 
-pub use basic_terminal::BasicTerminal;
+pub use basic_terminal::{parse_terminal_color, BasicTerminal, TerminalColorTheme};
 pub use mouse::{
     encode_terminal_focus_event, encode_terminal_mouse_event, FocusEventKind, MouseButtonCode,
     MouseEventKind, MouseModifiers, PixelMousePosition, TerminalMouseEvent,

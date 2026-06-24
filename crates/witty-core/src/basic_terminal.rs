@@ -56,6 +56,37 @@ const CURSOR_POSITION_REPORT: u16 = 6;
 const REPORT_TEXT_AREA_SIZE_CHARS: u16 = 18;
 const REPORT_SCREEN_SIZE_CHARS: u16 = 19;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalColorTheme {
+    pub foreground: Rgba,
+    pub background: Rgba,
+    pub cursor_color: Option<Rgba>,
+    pub palette: [Rgba; Self::ANSI_COLOR_COUNT],
+}
+
+impl TerminalColorTheme {
+    pub const ANSI_COLOR_COUNT: usize = 16;
+
+    pub fn builtin_palette() -> [Rgba; Self::ANSI_COLOR_COUNT] {
+        std::array::from_fn(|index| default_ansi_color(index as u8))
+    }
+}
+
+impl Default for TerminalColorTheme {
+    fn default() -> Self {
+        Self {
+            foreground: CellStyle::default().foreground,
+            background: CellStyle::default().background,
+            cursor_color: None,
+            palette: Self::builtin_palette(),
+        }
+    }
+}
+
+pub fn parse_terminal_color(text: &str) -> Option<Rgba> {
+    osc_color(text.as_bytes())
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum CharsetIndex {
     #[default]
@@ -184,6 +215,14 @@ impl BasicTerminal {
 
     pub fn default_cursor_style(&self) -> (CursorShape, bool) {
         self.state.default_cursor_style()
+    }
+
+    pub fn set_color_theme(&mut self, theme: TerminalColorTheme) {
+        self.state.set_color_theme(theme);
+    }
+
+    pub fn color_theme(&self) -> TerminalColorTheme {
+        self.state.color_theme()
     }
 
     pub fn visible_row_anchors(&self) -> Vec<TerminalVisibleRowAnchor> {
@@ -549,6 +588,7 @@ struct BasicTerminalState {
     charsets: [StandardCharset; 4],
     tab_stops: BTreeSet<u16>,
     current_style: BasicCellStyle,
+    color_theme: TerminalColorTheme,
     palette_overrides: BTreeMap<u8, Rgba>,
     default_foreground: Rgba,
     default_background: Rgba,
@@ -578,6 +618,7 @@ impl BasicTerminalState {
     fn new(size: GridSize) -> Self {
         let mut next_main_row_anchor = 0;
         let mut next_alternate_row_anchor = 0;
+        let color_theme = TerminalColorTheme::default();
         Self {
             size,
             main: ScreenBuffer::new(size, &mut next_main_row_anchor),
@@ -612,12 +653,13 @@ impl BasicTerminalState {
             charsets: [StandardCharset::Ascii; 4],
             tab_stops: default_tab_stops(size),
             current_style: BasicCellStyle::default(),
+            color_theme,
             palette_overrides: BTreeMap::new(),
-            default_foreground: CellStyle::default().foreground,
-            default_background: CellStyle::default().background,
+            default_foreground: color_theme.foreground,
+            default_background: color_theme.background,
             default_cursor_shape: CursorShape::Block,
             default_cursor_blink: true,
-            cursor_color: None,
+            cursor_color: color_theme.cursor_color,
             scrollback: VecDeque::new(),
             scrollback_row_anchors: VecDeque::new(),
             next_main_row_anchor,
@@ -1318,10 +1360,7 @@ impl BasicTerminalState {
         self.charsets = [StandardCharset::Ascii; 4];
         self.current_style = BasicCellStyle::default();
         self.active_hyperlink = None;
-        self.palette_overrides.clear();
-        self.default_foreground = CellStyle::default().foreground;
-        self.default_background = CellStyle::default().background;
-        self.cursor_color = None;
+        self.restore_color_theme_defaults();
         self.main.cursor.shape = self.default_cursor_shape;
         self.main.cursor.visible = true;
         self.main.cursor.blink = self.default_cursor_blink;
@@ -1374,10 +1413,7 @@ impl BasicTerminalState {
         self.single_shift_charset = None;
         self.charsets = [StandardCharset::Ascii; 4];
         self.tab_stops = default_tab_stops(self.size);
-        self.palette_overrides.clear();
-        self.default_foreground = CellStyle::default().foreground;
-        self.default_background = CellStyle::default().background;
-        self.cursor_color = None;
+        self.restore_color_theme_defaults();
         self.current_style = BasicCellStyle::default();
         self.scrollback.clear();
         self.scrollback_row_anchors.clear();
@@ -2378,6 +2414,48 @@ impl BasicTerminalState {
         }
     }
 
+    fn set_color_theme(&mut self, theme: TerminalColorTheme) {
+        let previous = self.color_theme;
+        if previous == theme {
+            return;
+        }
+
+        let mut full_damage = false;
+        let cursor_row = self.cursor().position.row;
+        let cursor_color_was_theme = self.cursor_color == previous.cursor_color;
+
+        self.color_theme = theme;
+        if self.default_foreground == previous.foreground {
+            self.default_foreground = theme.foreground;
+            full_damage = true;
+        }
+        if self.default_background == previous.background {
+            self.default_background = theme.background;
+            full_damage = true;
+        }
+        if previous.palette != theme.palette {
+            full_damage = true;
+        }
+        if cursor_color_was_theme && self.cursor_color != theme.cursor_color {
+            self.cursor_color = theme.cursor_color;
+            self.mark_row_dirty(cursor_row);
+        }
+        if full_damage {
+            self.mark_full_damage();
+        }
+    }
+
+    fn color_theme(&self) -> TerminalColorTheme {
+        self.color_theme
+    }
+
+    fn restore_color_theme_defaults(&mut self) {
+        self.palette_overrides.clear();
+        self.default_foreground = self.color_theme.foreground;
+        self.default_background = self.color_theme.background;
+        self.cursor_color = self.color_theme.cursor_color;
+    }
+
     fn set_palette_color(&mut self, index: u8, color: Rgba) {
         if self.palette_overrides.insert(index, color) != Some(color) {
             self.mark_full_damage();
@@ -2412,11 +2490,11 @@ impl BasicTerminalState {
     }
 
     fn reset_default_foreground(&mut self) {
-        self.set_default_foreground(CellStyle::default().foreground);
+        self.set_default_foreground(self.color_theme.foreground);
     }
 
     fn reset_default_background(&mut self) {
-        self.set_default_background(CellStyle::default().background);
+        self.set_default_background(self.color_theme.background);
     }
 
     fn effective_cursor_color(&self) -> Rgba {
@@ -2431,7 +2509,9 @@ impl BasicTerminalState {
     }
 
     fn reset_cursor_color(&mut self) {
-        if self.cursor_color.take().is_some() {
+        let cursor_color = self.color_theme.cursor_color;
+        if self.cursor_color != cursor_color {
+            self.cursor_color = cursor_color;
             self.mark_row_dirty(self.cursor().position.row);
         }
     }
@@ -2440,7 +2520,10 @@ impl BasicTerminalState {
         self.palette_overrides
             .get(&index)
             .copied()
-            .unwrap_or_else(|| default_ansi_256_color(index))
+            .unwrap_or_else(|| match index {
+                0..=15 => self.color_theme.palette[index as usize],
+                _ => default_ansi_256_color(index),
+            })
     }
 
     fn resolve_style(&self, style: &BasicCellStyle) -> CellStyle {
@@ -4691,6 +4774,119 @@ mod tests {
         assert_eq!(normal.foreground, Rgba::rgb(205, 0, 0));
         assert_eq!(normal.background, Rgba::rgb(0, 0, 238));
         assert!(!normal.flags.reverse);
+    }
+
+    #[test]
+    fn parse_terminal_color_accepts_xterm_color_syntax() {
+        assert_eq!(
+            parse_terminal_color("#abc"),
+            Some(Rgba::rgb(0xaa, 0xbb, 0xcc))
+        );
+        assert_eq!(
+            parse_terminal_color("#112233"),
+            Some(Rgba::rgb(0x11, 0x22, 0x33))
+        );
+        assert_eq!(
+            parse_terminal_color("rgb:1111/2222/3333"),
+            Some(Rgba::rgb(0x11, 0x22, 0x33))
+        );
+        assert_eq!(parse_terminal_color("blue"), None);
+    }
+
+    #[test]
+    fn configured_color_theme_applies_default_indexed_and_cursor_colors() {
+        let mut theme = TerminalColorTheme::default();
+        theme.foreground = Rgba::rgb(1, 2, 3);
+        theme.background = Rgba::rgb(4, 5, 6);
+        theme.cursor_color = Some(Rgba::rgb(7, 8, 9));
+        theme.palette[1] = Rgba::rgb(0x11, 0x22, 0x33);
+
+        let mut terminal = BasicTerminal::new(GridSize::new(1, 8));
+        terminal.set_color_theme(theme);
+        terminal.feed(b"D\x1b[31mR\x1b[mN");
+        let snapshot = terminal.snapshot();
+
+        assert_eq!(snapshot.default_background, Rgba::rgb(4, 5, 6));
+        assert_eq!(snapshot.cursor_color, Some(Rgba::rgb(7, 8, 9)));
+        assert_eq!(
+            snapshot.rows[0].cells[0].style.foreground,
+            Rgba::rgb(1, 2, 3)
+        );
+        assert_eq!(
+            snapshot.rows[0].cells[0].style.background,
+            Rgba::rgb(4, 5, 6)
+        );
+        assert_eq!(
+            snapshot.rows[0].cells[1].style.foreground,
+            Rgba::rgb(0x11, 0x22, 0x33)
+        );
+        assert_eq!(
+            snapshot.rows[0].cells[2].style.foreground,
+            Rgba::rgb(1, 2, 3)
+        );
+    }
+
+    #[test]
+    fn color_control_resets_restore_configured_theme() {
+        let mut theme = TerminalColorTheme::default();
+        theme.foreground = Rgba::rgb(1, 2, 3);
+        theme.background = Rgba::rgb(4, 5, 6);
+        theme.cursor_color = Some(Rgba::rgb(7, 8, 9));
+        theme.palette[1] = Rgba::rgb(0x11, 0x22, 0x33);
+
+        let mut terminal = BasicTerminal::new(GridSize::new(1, 8));
+        terminal.set_color_theme(theme);
+        terminal.feed(
+            b"\x1b]4;1;#445566\x1b\\\
+              \x1b]10;#0a0b0c\x1b\\\
+              \x1b]11;#0d0e0f\x1b\\\
+              \x1b]12;#101112\x1b\\",
+        );
+        terminal.feed(b"\x1b]104\x1b\\\x1b]110\x1b\\\x1b]111\x1b\\\x1b]112\x1b\\\x1b[31mR\x1b[mD");
+        let snapshot = terminal.snapshot();
+
+        assert_eq!(
+            snapshot.rows[0].cells[0].style.foreground,
+            Rgba::rgb(0x11, 0x22, 0x33)
+        );
+        assert_eq!(
+            snapshot.rows[0].cells[1].style.foreground,
+            Rgba::rgb(1, 2, 3)
+        );
+        assert_eq!(
+            snapshot.rows[0].cells[1].style.background,
+            Rgba::rgb(4, 5, 6)
+        );
+        assert_eq!(snapshot.cursor_color, Some(Rgba::rgb(7, 8, 9)));
+    }
+
+    #[test]
+    fn full_reset_restores_configured_color_theme() {
+        let mut theme = TerminalColorTheme::default();
+        theme.foreground = Rgba::rgb(1, 2, 3);
+        theme.background = Rgba::rgb(4, 5, 6);
+        theme.cursor_color = Some(Rgba::rgb(7, 8, 9));
+        theme.palette[1] = Rgba::rgb(0x11, 0x22, 0x33);
+
+        let mut terminal = BasicTerminal::new(GridSize::new(1, 8));
+        terminal.set_color_theme(theme);
+        terminal.feed(b"\x1b]4;1;#445566\x1b\\\x1b]10;#0a0b0c\x1b\\\x1b]11;#0d0e0f\x1b\\\x1b]12;#101112\x1b\\");
+        terminal.feed(b"\x1bc\x1b[31mR\x1b[mD");
+        let snapshot = terminal.snapshot();
+
+        assert_eq!(
+            snapshot.rows[0].cells[0].style.foreground,
+            Rgba::rgb(0x11, 0x22, 0x33)
+        );
+        assert_eq!(
+            snapshot.rows[0].cells[1].style.foreground,
+            Rgba::rgb(1, 2, 3)
+        );
+        assert_eq!(
+            snapshot.rows[0].cells[1].style.background,
+            Rgba::rgb(4, 5, 6)
+        );
+        assert_eq!(snapshot.cursor_color, Some(Rgba::rgb(7, 8, 9)));
     }
 
     #[test]

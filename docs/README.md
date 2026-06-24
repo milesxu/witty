@@ -37,6 +37,22 @@ bundled starter template is:
 
 ```toml
 font-family = "Maple Mono NF CN"
+font-size = 14
+terminal-padding = 0
+background-opacity = 1.0
+background-image = "null"
+background-image-fit = "cover"
+background-overlay-color = "#000000"
+background-overlay-opacity = 0.0
+theme-foreground = "#ffffff"
+theme-background = "#000000"
+theme-cursor = "null"
+theme-palette = [
+  "#000000", "#cd0000", "#00cd00", "#cdcd00",
+  "#0000ee", "#cd00cd", "#00cdcd", "#e5e5e5",
+  "#7f7f7f", "#ff0000", "#00ff00", "#ffff00",
+  "#5c5cff", "#ff00ff", "#00ffff", "#ffffff",
+]
 ```
 
 Use the non-GUI helpers for setup and inspection:
@@ -59,6 +75,12 @@ scrollback, and related defaults.
 Set `cursor-style-source = "config"` when Witty should keep the configured
 cursor shape/blink even if a full-screen terminal program sends its own cursor
 style escape sequences.
+Use `theme-foreground`, `theme-background`, `theme-cursor`, and a 16-entry
+`theme-palette` to theme default terminal colors and ANSI indexed colors from
+`.wittyrc`; truecolor application output remains direct.
+Use `background-overlay-color` and `background-overlay-opacity` to dim or tint
+busy desktop/image backgrounds behind terminal cells without rewriting
+application colors.
 
 ## PTY And Local Shell
 
