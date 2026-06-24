@@ -180,7 +180,7 @@ fn to_pty_size(size: GridSize) -> PtySize {
 }
 
 fn read_pty(mut reader: Box<dyn Read + Send>, sender: Sender<TransportEvent>) {
-    let mut buffer = [0_u8; 8192];
+    let mut buffer = [0_u8; 65_536];
     loop {
         match reader.read(&mut buffer) {
             Ok(0) => break,

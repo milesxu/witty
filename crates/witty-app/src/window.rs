@@ -81,6 +81,9 @@ pub(crate) const DEFAULT_WINDOW_TITLE: &str = "Witty Rust/wgpu Prototype";
 const WITTY_LINUX_APP_ID: &str = "dev.witty.Witty";
 const SEARCH_SCROLL_BUFFER_ROWS: u16 = 1;
 const SYNCHRONIZED_OUTPUT_TIMEOUT: Duration = Duration::from_millis(150);
+const TERMINAL_OUTPUT_QUIET_REDRAW_DELAY: Duration = Duration::from_millis(8);
+const TERMINAL_OUTPUT_MAX_REDRAW_DELAY: Duration = Duration::from_millis(33);
+const TERMINAL_TRANSPORT_POLL_EVENT_LIMIT: usize = 1024;
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const CURSOR_BLINK_SLOW_INTERVAL: Duration = Duration::from_millis(750);
 const CURSOR_BLINK_VARIABLE_VISIBLE: [Duration; 4] = [
@@ -647,6 +650,16 @@ fn earliest_deadline(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> 
         (None, Some(b)) => Some(b),
         (None, None) => None,
     }
+}
+
+fn terminal_output_redraw_deadline_after_poll(
+    burst_started: Option<Instant>,
+    now: Instant,
+) -> Option<(Instant, Instant)> {
+    let started = burst_started.unwrap_or(now);
+    let quiet_deadline = now.checked_add(TERMINAL_OUTPUT_QUIET_REDRAW_DELAY)?;
+    let max_deadline = started.checked_add(TERMINAL_OUTPUT_MAX_REDRAW_DELAY)?;
+    Some((started, quiet_deadline.min(max_deadline)))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3343,6 +3356,8 @@ struct TerminalWindowApp {
     default_window_title: String,
     window_title: String,
     synchronized_output_deadline: Option<Instant>,
+    terminal_output_redraw_deadline: Option<Instant>,
+    terminal_output_burst_started: Option<Instant>,
     cursor_blink: CursorBlinkState,
     configured_cursor_shape: CursorShape,
     configured_cursor_blink: bool,
@@ -3560,6 +3575,8 @@ impl TerminalWindowApp {
             window_title: default_window_title.clone(),
             default_window_title,
             synchronized_output_deadline: None,
+            terminal_output_redraw_deadline: None,
+            terminal_output_burst_started: None,
             cursor_blink: CursorBlinkState::new(cursor_blink_rate),
             configured_cursor_shape: cursor_shape,
             configured_cursor_blink: cursor_blink,
@@ -4331,6 +4348,7 @@ impl TerminalWindowApp {
         self.profile_action_session_runtimes.clear();
         self.shell_integration = ShellIntegrationState::default();
         self.synchronized_output_deadline = None;
+        self.clear_terminal_output_redraw_deadline();
         self.cursor_blink.reset();
         self.text_blink = TextBlinkState::default();
         let _ = self.refresh_empty_session_welcome_hover_for_current_pointer();
@@ -4377,6 +4395,7 @@ impl TerminalWindowApp {
         self.hovered_command_block_id = None;
         self.exited = false;
         self.synchronized_output_deadline = None;
+        self.clear_terminal_output_redraw_deadline();
         self.cursor_blink.reset();
         self.text_blink = TextBlinkState::default();
         self.clear_empty_session_welcome();
@@ -4415,6 +4434,7 @@ impl TerminalWindowApp {
                 self.hovered_command_block_id = None;
                 self.exited = false;
                 self.synchronized_output_deadline = None;
+                self.clear_terminal_output_redraw_deadline();
                 self.cursor_blink.reset();
                 self.text_blink = TextBlinkState::default();
                 self.clear_empty_session_welcome();
@@ -4465,6 +4485,7 @@ impl TerminalWindowApp {
                 self.hovered_command_block_id = None;
                 self.exited = false;
                 self.synchronized_output_deadline = None;
+                self.clear_terminal_output_redraw_deadline();
                 self.cursor_blink.reset();
                 self.text_blink = TextBlinkState::default();
                 self.clear_empty_session_welcome();
@@ -4514,12 +4535,14 @@ impl TerminalWindowApp {
             self.hovered_command_block_id = None;
             self.exited = false;
             self.synchronized_output_deadline = None;
+            self.clear_terminal_output_redraw_deadline();
             self.cursor_blink.reset();
             self.text_blink = TextBlinkState::default();
         } else if close_result == NativeSessionCloseResult::BlockedLastActive {
             self.enter_empty_session_welcome();
         } else if requests.any() {
             self.synchronized_output_deadline = None;
+            self.clear_terminal_output_redraw_deadline();
         }
 
         close_result
@@ -4528,7 +4551,7 @@ impl TerminalWindowApp {
     fn poll_transport(&mut self) -> bool {
         let mut changed = false;
         let mut force_render = false;
-        for _ in 0..256 {
+        for _ in 0..TERMINAL_TRANSPORT_POLL_EVENT_LIMIT {
             match self.app.poll_transport() {
                 Ok(Some(TransportEvent::Output(bytes))) => {
                     self.terminal.feed(&bytes);
@@ -4561,14 +4584,53 @@ impl TerminalWindowApp {
             self.refresh_search_after_terminal_change();
             if force_render || !self.terminal.synchronized_output_enabled() {
                 self.synchronized_output_deadline = None;
-                self.rebuild_frame();
-                return true;
+                if force_render {
+                    self.clear_terminal_output_redraw_deadline();
+                    self.rebuild_frame();
+                    return true;
+                }
+                self.schedule_terminal_output_redraw(Instant::now());
+                return false;
             }
+            self.clear_terminal_output_redraw_deadline();
             self.synchronized_output_deadline = synchronized_output_deadline_after_poll(
                 self.synchronized_output_deadline,
                 Instant::now(),
             );
         }
+        false
+    }
+
+    fn schedule_terminal_output_redraw(&mut self, now: Instant) {
+        if let Some((started, deadline)) =
+            terminal_output_redraw_deadline_after_poll(self.terminal_output_burst_started, now)
+        {
+            self.terminal_output_burst_started = Some(started);
+            self.terminal_output_redraw_deadline = Some(deadline);
+        } else {
+            self.terminal_output_burst_started = None;
+            self.terminal_output_redraw_deadline = Some(now);
+        }
+    }
+
+    fn clear_terminal_output_redraw_deadline(&mut self) {
+        self.terminal_output_redraw_deadline = None;
+        self.terminal_output_burst_started = None;
+    }
+
+    fn apply_terminal_output_redraw_timeout(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        let Some(deadline) = self.terminal_output_redraw_deadline else {
+            return false;
+        };
+
+        if Instant::now() >= deadline {
+            self.clear_terminal_output_redraw_deadline();
+            self.rebuild_frame();
+            self.request_redraw();
+            return true;
+        }
+
+        event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         false
     }
 
@@ -6004,6 +6066,7 @@ impl TerminalWindowApp {
             self.hovered_empty_session_welcome = None;
             self.hovered_profile_action = None;
             self.synchronized_output_deadline = None;
+            self.clear_terminal_output_redraw_deadline();
             self.cursor_blink.reset();
             self.text_blink = TextBlinkState::default();
         }
@@ -6423,6 +6486,7 @@ impl TerminalWindowApp {
         self.hovered_command_block_id = None;
         self.exited = false;
         self.synchronized_output_deadline = None;
+        self.clear_terminal_output_redraw_deadline();
         self.cursor_blink.reset();
         self.text_blink = TextBlinkState::default();
         self.clear_empty_session_welcome();
@@ -6466,6 +6530,7 @@ impl TerminalWindowApp {
             self.hovered_command_block_id = None;
             self.exited = false;
             self.synchronized_output_deadline = None;
+            self.clear_terminal_output_redraw_deadline();
             self.cursor_blink.reset();
             self.text_blink = TextBlinkState::default();
             self.clear_empty_session_welcome();
@@ -7316,6 +7381,14 @@ impl ApplicationHandler<NativeWindowEvent> for TerminalWindowApp {
             return;
         }
         if self.synchronized_output_deadline.is_some() {
+            self.schedule_background_image_result_poll(event_loop);
+            return;
+        }
+        if self.apply_terminal_output_redraw_timeout(event_loop) {
+            self.schedule_background_image_result_poll(event_loop);
+            return;
+        }
+        if self.terminal_output_redraw_deadline.is_some() {
             self.schedule_background_image_result_poll(event_loop);
             return;
         }
@@ -16650,6 +16723,27 @@ mod tests {
         assert_eq!(
             synchronized_output_deadline_after_poll(Some(existing), now),
             Some(existing)
+        );
+    }
+
+    #[test]
+    fn terminal_output_redraw_deadline_waits_for_quiet_period() {
+        let now = Instant::now();
+
+        assert_eq!(
+            terminal_output_redraw_deadline_after_poll(None, now),
+            Some((now, now + TERMINAL_OUTPUT_QUIET_REDRAW_DELAY))
+        );
+    }
+
+    #[test]
+    fn terminal_output_redraw_deadline_caps_long_bursts() {
+        let now = Instant::now();
+        let started = now - Duration::from_millis(30);
+
+        assert_eq!(
+            terminal_output_redraw_deadline_after_poll(Some(started), now),
+            Some((started, started + TERMINAL_OUTPUT_MAX_REDRAW_DELAY))
         );
     }
 
