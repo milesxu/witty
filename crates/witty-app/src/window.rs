@@ -3315,6 +3315,7 @@ struct TerminalWindowApp {
     ime_composition: ImeComposition,
     metrics: CellMetrics,
     size: GridSize,
+    render_surface_size: Option<PhysicalSize<u32>>,
     modifiers: Modifiers,
     pointer_position: Option<PhysicalPosition<f64>>,
     native_cursor_icon: Option<CursorIcon>,
@@ -3534,6 +3535,7 @@ impl TerminalWindowApp {
             ime_composition: ImeComposition::default(),
             metrics,
             size: startup.size,
+            render_surface_size: None,
             modifiers: Modifiers::default(),
             pointer_position: None,
             native_cursor_icon: None,
@@ -3619,6 +3621,21 @@ impl TerminalWindowApp {
         self.rebuild_frame();
     }
 
+    fn resize_grid_to_render_surface(&mut self) {
+        if let Some(size) = self.layout_surface_size() {
+            self.resize_grid(size);
+        } else {
+            self.rebuild_frame();
+        }
+    }
+
+    fn layout_surface_size(&self) -> Option<PhysicalSize<u32>> {
+        layout_surface_size(
+            self.render_surface_size,
+            self.window.as_ref().map(|window| window.inner_size()),
+        )
+    }
+
     fn sync_all_session_runtime_sizes(&mut self) {
         let size = self.size;
         self.terminal.resize(size);
@@ -3665,9 +3682,7 @@ impl TerminalWindowApp {
             renderer.set_font_config(self.font_config.clone());
         }
 
-        if let Some(physical_size) = self.window.as_ref().map(|window| window.inner_size()) {
-            self.resize_grid(physical_size);
-        }
+        self.resize_grid_to_render_surface();
         self.refresh_search_after_terminal_change();
         let _ = self.refresh_session_tab_hover_for_current_pointer();
         let _ = self.refresh_profile_action_hover_for_current_pointer();
@@ -3881,11 +3896,10 @@ impl TerminalWindowApp {
         let titlebar_reserved_height = self.titlebar_reserved_height();
         titlebar_reserved_height
             + self
-                .window
-                .as_ref()
-                .map(|window| {
+                .layout_surface_size()
+                .map(|surface_size| {
                     terminal_bottom_align_y_offset(
-                        window.inner_size(),
+                        surface_size,
                         self.metrics,
                         self.size,
                         titlebar_reserved_height,
@@ -3895,9 +3909,8 @@ impl TerminalWindowApp {
     }
 
     fn titlebar_window_width(&self) -> f32 {
-        self.window
-            .as_ref()
-            .map(|window| window.inner_size().width as f32)
+        self.layout_surface_size()
+            .map(|size| size.width as f32)
             .unwrap_or_else(|| {
                 self.metrics.padding.x * 2.0 + f32::from(self.size.cols) * self.metrics.cell.width
             })
@@ -5044,8 +5057,7 @@ impl TerminalWindowApp {
             self.exit_fullscreen(&window);
         }
 
-        let size = window.inner_size();
-        self.resize_grid(size);
+        self.resize_grid_to_render_surface();
         self.rebuild_frame();
     }
 
@@ -7145,6 +7157,7 @@ impl ApplicationHandler<NativeWindowEvent> for TerminalWindowApp {
 
         self.renderer = Some(renderer);
         self.window = Some(window);
+        self.render_surface_size = Some(size);
         self.resize_grid(size);
         self.ensure_background_image_load(event_loop, size);
         self.sync_ime_cursor_area(self.active_ime_cursor(self.terminal.snapshot().cursor.position));
@@ -7252,6 +7265,7 @@ impl ApplicationHandler<NativeWindowEvent> for TerminalWindowApp {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size.width, size.height);
                 }
+                self.render_surface_size = Some(size);
                 self.resize_grid(size);
                 self.ensure_background_image_load(event_loop, size);
                 if scale_changed {
@@ -7286,6 +7300,7 @@ impl ApplicationHandler<NativeWindowEvent> for TerminalWindowApp {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size.width, size.height);
                 }
+                self.render_surface_size = Some(size);
                 self.resize_grid(size);
                 self.ensure_background_image_load(event_loop, size);
                 if scale_changed {
@@ -7696,6 +7711,13 @@ fn synchronized_output_deadline_after_poll(
     now: Instant,
 ) -> Option<Instant> {
     existing_deadline.or_else(|| now.checked_add(SYNCHRONIZED_OUTPUT_TIMEOUT))
+}
+
+fn layout_surface_size(
+    render_surface_size: Option<PhysicalSize<u32>>,
+    window_inner_size: Option<PhysicalSize<u32>>,
+) -> Option<PhysicalSize<u32>> {
+    render_surface_size.or(window_inner_size)
 }
 
 #[cfg(test)]
@@ -13014,6 +13036,21 @@ mod tests {
         );
 
         assert_eq!(offset, 10.0);
+    }
+
+    #[test]
+    fn layout_surface_size_prefers_renderer_size_over_window_inner_size() {
+        assert_eq!(
+            layout_surface_size(
+                Some(PhysicalSize::new(1920, 1080)),
+                Some(PhysicalSize::new(960, 540))
+            ),
+            Some(PhysicalSize::new(1920, 1080))
+        );
+        assert_eq!(
+            layout_surface_size(None, Some(PhysicalSize::new(960, 540))),
+            Some(PhysicalSize::new(960, 540))
+        );
     }
 
     #[test]
