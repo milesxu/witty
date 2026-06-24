@@ -34,6 +34,7 @@ pub const MAX_OSC52_DECODED_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_SCROLLBACK_LINES: usize = 10_000;
 pub const KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES: u16 = 1;
 pub const KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES: u16 = 8;
+pub const KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT: u16 = 16;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExternalUrlError {

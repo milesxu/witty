@@ -21,6 +21,7 @@ Supported flags:
 
 - `1`: `DISAMBIGUATE_ESC_CODES`
 - `8`: `REPORT_ALL_KEYS_AS_ESC_CODES`
+- `16`: `REPORT_ASSOCIATED_TEXT`
 
 Unsupported flags are masked out. Main and alternate screens have separate
 flag values and stacks. Soft reset and full reset clear both stacks and active
@@ -48,6 +49,17 @@ With flag `8`, Witty additionally reports text-producing keys plus `Enter`,
 - `Shift-Tab` -> `CSI 9;2u`
 - `Ctrl-Backspace` -> `CSI 127;5u`
 
+With flags `8|16`, Witty adds safe associated text as the third CSI-u
+parameter for text-producing character keys:
+
+- `a` -> `CSI 97;;97u`
+- `Shift-A` -> `CSI 97;2;65u`
+- `Alt-é` -> `CSI 233;3;233u`
+
+Associated text is omitted for `Ctrl`/`Meta` key combinations and omitted when
+the text contains C0, DEL, or C1 control codepoints. `REPORT_ASSOCIATED_TEXT`
+has no effect unless `REPORT_ALL_KEYS_AS_ESC_CODES` is also active.
+
 Navigation, function, and keypad keys continue through the existing xterm/VT
 escape-code encoders. Modified navigation/function keys keep xterm modifier
 parameters such as `CSI 1;5A`.
@@ -56,7 +68,6 @@ parameters such as `CSI 1;5A`.
 
 - Event type reporting.
 - Alternate key reporting.
-- Associated text reporting.
 - Precise physical-key fallback for shifted symbols.
 - Kitty graphics/image protocol.
 

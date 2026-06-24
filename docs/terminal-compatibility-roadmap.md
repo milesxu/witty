@@ -2731,6 +2731,15 @@ client surface while preserving the native/browser transport split.
      plus browser key encoders share the same flag boundary. Named browser keys
      are guarded against accidental first-character CSI-u encoding. See
      `terminal-kitty-keyboard-protocol.md`.
+371. `m688-terminal-kitty-associated-text`
+   - done. Added Kitty keyboard protocol flag `16`
+     (`REPORT_ASSOCIATED_TEXT`) to the core flag state and native/browser input
+     encoders. When flags `8|16` are active, text-producing character keys now
+     include safe associated text codepoints as the third CSI-u parameter, while
+     `Ctrl`/`Meta` combinations and text containing C0, DEL, or C1 control
+     codepoints omit that field. This keeps associated text tied to all-keys
+     CSI-u mode and avoids adding release/repeat event-type semantics before
+     the platform event path is ready. See `terminal-kitty-keyboard-protocol.md`.
 
 ## Non-Goals For This Line
 

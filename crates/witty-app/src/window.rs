@@ -29,7 +29,7 @@ use witty_core::{
     PixelMousePosition, RenderSnapshot, Rgba, SearchHighlight, TerminalClipboardSelection,
     TerminalClipboardWrite, TerminalColorTheme, TerminalHostAction, TerminalHyperlink,
     TerminalInputModes, TerminalMouseEvent, KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
-    KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES,
+    KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES, KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT,
 };
 use witty_launcher::open_external_url;
 use witty_plugin_api::{CommandRegistration, PluginAction, PluginEvent};
@@ -12269,7 +12269,9 @@ fn encode_terminal_key_input(
     }
 
     if kitty_keyboard_report_all_keys_enabled(modes) {
-        if let Some(bytes) = kitty_all_keys_sequence(input) {
+        if let Some(bytes) =
+            kitty_all_keys_sequence(input, kitty_keyboard_report_associated_text_enabled(modes))
+        {
             return Some(bytes);
         }
     }
@@ -12332,14 +12334,42 @@ fn kitty_keyboard_report_all_keys_enabled(modes: TerminalInputModes) -> bool {
     modes.kitty_keyboard_flags & KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES != 0
 }
 
-fn kitty_all_keys_sequence(input: TerminalKeyInput<'_>) -> Option<Vec<u8>> {
+fn kitty_keyboard_report_associated_text_enabled(modes: TerminalInputModes) -> bool {
+    modes.kitty_keyboard_flags & KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT != 0
+}
+
+fn kitty_all_keys_sequence(
+    input: TerminalKeyInput<'_>,
+    report_associated_text: bool,
+) -> Option<Vec<u8>> {
     match input.logical_key {
-        Key::Named(NamedKey::Escape) => Some(kitty_csi_u_sequence(27, input.modifiers)),
-        Key::Named(NamedKey::Enter) => Some(kitty_csi_u_sequence(13, input.modifiers)),
-        Key::Named(NamedKey::Tab) => Some(kitty_csi_u_sequence(9, input.modifiers)),
-        Key::Named(NamedKey::Backspace) => Some(kitty_csi_u_sequence(127, input.modifiers)),
-        Key::Character(value) => kitty_character_key_code(value)
-            .map(|key_code| kitty_csi_u_sequence(key_code, input.modifiers)),
+        Key::Named(NamedKey::Escape) => Some(kitty_csi_u_sequence_with_text(
+            27,
+            input.modifiers,
+            kitty_associated_text(input, report_associated_text, false),
+        )),
+        Key::Named(NamedKey::Enter) => Some(kitty_csi_u_sequence_with_text(
+            13,
+            input.modifiers,
+            kitty_associated_text(input, report_associated_text, false),
+        )),
+        Key::Named(NamedKey::Tab) => Some(kitty_csi_u_sequence_with_text(
+            9,
+            input.modifiers,
+            kitty_associated_text(input, report_associated_text, false),
+        )),
+        Key::Named(NamedKey::Backspace) => Some(kitty_csi_u_sequence_with_text(
+            127,
+            input.modifiers,
+            kitty_associated_text(input, report_associated_text, false),
+        )),
+        Key::Character(value) => kitty_character_key_code(value).map(|key_code| {
+            kitty_csi_u_sequence_with_text(
+                key_code,
+                input.modifiers,
+                kitty_associated_text(input, report_associated_text, true),
+            )
+        }),
         _ => None,
     }
 }
@@ -12372,12 +12402,53 @@ fn kitty_character_key_code(value: &str) -> Option<u32> {
 }
 
 fn kitty_csi_u_sequence(key_code: u32, modifiers: TerminalKeyModifiers) -> Vec<u8> {
+    kitty_csi_u_sequence_with_text(key_code, modifiers, None)
+}
+
+fn kitty_csi_u_sequence_with_text(
+    key_code: u32,
+    modifiers: TerminalKeyModifiers,
+    associated_text: Option<String>,
+) -> Vec<u8> {
     let modifier_parameter = modifiers.kitty_parameter();
-    if modifier_parameter == 1 {
+    if let Some(text) = associated_text {
+        if modifier_parameter == 1 {
+            format!("\x1b[{key_code};;{text}u").into_bytes()
+        } else {
+            format!("\x1b[{key_code};{modifier_parameter};{text}u").into_bytes()
+        }
+    } else if modifier_parameter == 1 {
         format!("\x1b[{key_code}u").into_bytes()
     } else {
         format!("\x1b[{key_code};{modifier_parameter}u").into_bytes()
     }
+}
+
+fn kitty_associated_text(
+    input: TerminalKeyInput<'_>,
+    report_associated_text: bool,
+    text_key: bool,
+) -> Option<String> {
+    if !report_associated_text || !text_key || input.modifiers.control || input.modifiers.meta {
+        return None;
+    }
+    let text = input.text?;
+    if text.is_empty() {
+        return None;
+    }
+    kitty_associated_text_parameter(text)
+}
+
+fn kitty_associated_text_parameter(text: &str) -> Option<String> {
+    let mut codes = Vec::new();
+    for ch in text.chars() {
+        let code = ch as u32;
+        if code <= 0x1f || code == 0x7f || (0x80..=0x9f).contains(&code) {
+            return None;
+        }
+        codes.push(code.to_string());
+    }
+    (!codes.is_empty()).then(|| codes.join(":"))
 }
 
 fn backspace_sequence(modes: TerminalInputModes) -> Vec<u8> {
@@ -17383,6 +17454,58 @@ mod tests {
         assert_eq!(
             encode_key_input_with_modifiers(&Key::Named(NamedKey::Backspace), None, control, modes),
             Some(b"\x1b[127;5u".to_vec())
+        );
+    }
+
+    #[test]
+    fn key_encoder_reports_kitty_associated_text_when_enabled() {
+        let modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES
+                | KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT,
+            ..TerminalInputModes::default()
+        };
+        let shift = TerminalKeyModifiers {
+            shift: true,
+            ..TerminalKeyModifiers::default()
+        };
+        let alt = TerminalKeyModifiers {
+            alt: true,
+            ..TerminalKeyModifiers::default()
+        };
+        let control = TerminalKeyModifiers {
+            control: true,
+            ..TerminalKeyModifiers::default()
+        };
+
+        assert_eq!(
+            encode_key_input_with_modifiers(
+                &Key::Character("a".into()),
+                Some("a"),
+                TerminalKeyModifiers::default(),
+                modes,
+            ),
+            Some(b"\x1b[97;;97u".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_modifiers(&Key::Character("A".into()), Some("A"), shift, modes),
+            Some(b"\x1b[97;2;65u".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_modifiers(&Key::Character("é".into()), Some("é"), alt, modes),
+            Some(b"\x1b[233;3;233u".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_modifiers(&Key::Character("i".into()), Some("i"), control, modes),
+            Some(b"\x1b[105;5u".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_modifiers(
+                &Key::Character("\u{7f}".into()),
+                Some("\u{7f}"),
+                TerminalKeyModifiers::default(),
+                modes,
+            ),
+            Some(b"\x1b[127u".to_vec())
         );
     }
 
