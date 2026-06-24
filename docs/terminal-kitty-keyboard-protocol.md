@@ -48,6 +48,7 @@ With flag `8`, Witty additionally reports text-producing keys plus `Enter`,
 - `Ctrl-Enter` -> `CSI 13;5u`
 - `Shift-Tab` -> `CSI 9;2u`
 - `Ctrl-Backspace` -> `CSI 127;5u`
+- text with no single known key -> `CSI 0u`
 
 With flags `8|16`, Witty adds safe associated text as the third CSI-u
 parameter for text-producing character keys:
@@ -55,6 +56,7 @@ parameter for text-producing character keys:
 - `a` -> `CSI 97;;97u`
 - `Shift-A` -> `CSI 97;2;65u`
 - `Alt-é` -> `CSI 233;3;233u`
+- text with no single known key, such as `ab` -> `CSI 0;;97:98u`
 
 Associated text is omitted for `Ctrl`/`Meta` key combinations and omitted when
 the text contains C0, DEL, or C1 control codepoints. `REPORT_ASSOCIATED_TEXT`

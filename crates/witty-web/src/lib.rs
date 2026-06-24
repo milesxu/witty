@@ -3061,13 +3061,16 @@ fn browser_kitty_all_keys_sequence(
             input.modifiers,
             browser_kitty_associated_text(input, report_associated_text, false),
         )),
-        _ => browser_kitty_character_key_code(input.key).map(|key_code| {
-            browser_kitty_csi_u_sequence_with_text(
+        _ => {
+            let text = browser_kitty_associated_text(input, report_associated_text, true);
+            let key_code = browser_kitty_character_key_code(input.key)
+                .or_else(|| (!input.text.is_empty()).then_some(0))?;
+            Some(browser_kitty_csi_u_sequence_with_text(
                 key_code,
                 input.modifiers,
-                browser_kitty_associated_text(input, report_associated_text, true),
-            )
-        }),
+                text,
+            ))
+        }
     }
 }
 
@@ -6141,6 +6144,17 @@ mod tests {
             Some(b"\x1b[97;2u".to_vec())
         );
         assert_eq!(
+            encode_browser_key_input_with_metadata(
+                "ab",
+                "ab",
+                BrowserKeyModifiers::default(),
+                "",
+                0,
+                modes,
+            ),
+            Some(b"\x1b[0u".to_vec())
+        );
+        assert_eq!(
             encode_browser_key_input_with_metadata("Enter", "", control, "", 0, modes),
             Some(b"\x1b[13;5u".to_vec())
         );
@@ -6196,6 +6210,17 @@ mod tests {
         assert_eq!(
             encode_browser_key_input_with_metadata("é", "é", alt, "", 0, modes),
             Some(b"\x1b[233;3;233u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata(
+                "ab",
+                "ab",
+                BrowserKeyModifiers::default(),
+                "",
+                0,
+                modes,
+            ),
+            Some(b"\x1b[0;;97:98u".to_vec())
         );
         assert_eq!(
             encode_browser_key_input_with_metadata("i", "i", control, "", 0, modes),

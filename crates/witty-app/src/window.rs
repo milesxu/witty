@@ -12363,13 +12363,15 @@ fn kitty_all_keys_sequence(
             input.modifiers,
             kitty_associated_text(input, report_associated_text, false),
         )),
-        Key::Character(value) => kitty_character_key_code(value).map(|key_code| {
-            kitty_csi_u_sequence_with_text(
+        Key::Character(value) => {
+            let text = kitty_associated_text(input, report_associated_text, true);
+            let key_code = kitty_character_key_code(value).unwrap_or(0);
+            Some(kitty_csi_u_sequence_with_text(
                 key_code,
                 input.modifiers,
-                kitty_associated_text(input, report_associated_text, true),
-            )
-        }),
+                text,
+            ))
+        }
         _ => None,
     }
 }
@@ -17444,6 +17446,15 @@ mod tests {
             Some(b"\x1b[97;2u".to_vec())
         );
         assert_eq!(
+            encode_key_input_with_modifiers(
+                &Key::Character("ab".into()),
+                Some("ab"),
+                TerminalKeyModifiers::default(),
+                modes,
+            ),
+            Some(b"\x1b[0u".to_vec())
+        );
+        assert_eq!(
             encode_key_input_with_modifiers(&Key::Named(NamedKey::Enter), None, control, modes),
             Some(b"\x1b[13;5u".to_vec())
         );
@@ -17493,6 +17504,15 @@ mod tests {
         assert_eq!(
             encode_key_input_with_modifiers(&Key::Character("é".into()), Some("é"), alt, modes),
             Some(b"\x1b[233;3;233u".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_modifiers(
+                &Key::Character("ab".into()),
+                Some("ab"),
+                TerminalKeyModifiers::default(),
+                modes,
+            ),
+            Some(b"\x1b[0;;97:98u".to_vec())
         );
         assert_eq!(
             encode_key_input_with_modifiers(&Key::Character("i".into()), Some("i"), control, modes),
