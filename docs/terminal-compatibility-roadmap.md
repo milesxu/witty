@@ -2722,6 +2722,15 @@ client surface while preserving the native/browser transport split.
      highest-precedence font overrides. The helpers do not open a window,
      create a surface, request an adapter, start a PTY, or touch
      browser/WebGPU/Vulkan paths.
+370. `m686-terminal-kitty-keyboard-protocol-flags`
+   - done. Corrected Witty's Kitty keyboard protocol subset so flag `1`
+     (`DISAMBIGUATE_ESC_CODES`) keeps `Enter`, `Tab`, and `Backspace` on legacy
+     byte sequences, while flag `8` (`REPORT_ALL_KEYS_AS_ESC_CODES`) adds CSI-u
+     reporting for text-producing keys and those legacy C0 keys. `witty-core`
+     now tracks both supported flags in query/push/set/pop state, and native
+     plus browser key encoders share the same flag boundary. Named browser keys
+     are guarded against accidental first-character CSI-u encoding. See
+     `terminal-kitty-keyboard-protocol.md`.
 
 ## Non-Goals For This Line
 

@@ -255,6 +255,15 @@ to change cursor shape/blink. Use `"config"` to keep the configured
 `cursor-shape` and `cursor-blink` visually fixed even inside full-screen TUIs.
 The CLI spelling is `--cursor-style-source program|config`.
 
+Witty supports a focused Kitty keyboard protocol / CSI-u subset for programs
+such as Neovim. It tracks Kitty keyboard flags and supports
+`DISAMBIGUATE_ESC_CODES` (`1`) plus `REPORT_ALL_KEYS_AS_ESC_CODES` (`8`) across
+native and browser input paths. Flag `1` disambiguates combinations such as
+`Ctrl-I` without changing legacy `Enter`, `Tab`, and `Backspace`; flag `8`
+also reports text keys and those legacy C0 keys as CSI-u. Kitty graphics/image
+protocols are not part of this support. See
+`docs/terminal-kitty-keyboard-protocol.md`.
+
 The session tab strip is hidden by default so it never covers shell output or a
 tmux status line. Set `session-tab-show-single = true` or
 `session-tab-show-multiple = true` to render it, and use

@@ -29,6 +29,7 @@ use witty_core::{
     PixelMousePosition, RenderSnapshot, Rgba, SearchHighlight, TerminalClipboardSelection,
     TerminalClipboardWrite, TerminalColorTheme, TerminalHostAction, TerminalHyperlink,
     TerminalInputModes, TerminalMouseEvent, KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+    KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES,
 };
 use witty_launcher::open_external_url;
 use witty_plugin_api::{CommandRegistration, PluginAction, PluginEvent};
@@ -12201,10 +12202,6 @@ impl TerminalKeyModifiers {
         !self.control && !self.shift && !self.alt && !self.meta
     }
 
-    fn is_empty(self) -> bool {
-        !self.control && !self.shift && !self.alt && !self.meta
-    }
-
     fn xterm_parameter(self) -> Option<u8> {
         if self.meta {
             return None;
@@ -12271,6 +12268,12 @@ fn encode_terminal_key_input(
         return None;
     }
 
+    if kitty_keyboard_report_all_keys_enabled(modes) {
+        if let Some(bytes) = kitty_all_keys_sequence(input) {
+            return Some(bytes);
+        }
+    }
+
     if kitty_keyboard_disambiguate_enabled(modes) {
         if let Some(bytes) = kitty_disambiguated_key_sequence(input) {
             return Some(bytes);
@@ -12325,18 +12328,25 @@ fn kitty_keyboard_disambiguate_enabled(modes: TerminalInputModes) -> bool {
     modes.kitty_keyboard_flags & KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES != 0
 }
 
+fn kitty_keyboard_report_all_keys_enabled(modes: TerminalInputModes) -> bool {
+    modes.kitty_keyboard_flags & KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES != 0
+}
+
+fn kitty_all_keys_sequence(input: TerminalKeyInput<'_>) -> Option<Vec<u8>> {
+    match input.logical_key {
+        Key::Named(NamedKey::Escape) => Some(kitty_csi_u_sequence(27, input.modifiers)),
+        Key::Named(NamedKey::Enter) => Some(kitty_csi_u_sequence(13, input.modifiers)),
+        Key::Named(NamedKey::Tab) => Some(kitty_csi_u_sequence(9, input.modifiers)),
+        Key::Named(NamedKey::Backspace) => Some(kitty_csi_u_sequence(127, input.modifiers)),
+        Key::Character(value) => kitty_character_key_code(value)
+            .map(|key_code| kitty_csi_u_sequence(key_code, input.modifiers)),
+        _ => None,
+    }
+}
+
 fn kitty_disambiguated_key_sequence(input: TerminalKeyInput<'_>) -> Option<Vec<u8>> {
     match input.logical_key {
         Key::Named(NamedKey::Escape) => Some(kitty_csi_u_sequence(27, input.modifiers)),
-        Key::Named(NamedKey::Enter) if !input.modifiers.is_empty() => {
-            Some(kitty_csi_u_sequence(13, input.modifiers))
-        }
-        Key::Named(NamedKey::Tab) if !input.modifiers.is_empty() => {
-            Some(kitty_csi_u_sequence(9, input.modifiers))
-        }
-        Key::Named(NamedKey::Backspace) if !input.modifiers.is_empty() => {
-            Some(kitty_csi_u_sequence(127, input.modifiers))
-        }
         Key::Character(value)
             if input.modifiers.control || input.modifiers.alt || input.modifiers.meta =>
         {
@@ -12348,7 +12358,11 @@ fn kitty_disambiguated_key_sequence(input: TerminalKeyInput<'_>) -> Option<Vec<u
 }
 
 fn kitty_character_key_code(value: &str) -> Option<u32> {
-    let ch = value.chars().next()?;
+    let mut chars = value.chars();
+    let ch = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
     let ch = if ch.is_ascii_alphabetic() {
         ch.to_ascii_lowercase()
     } else {
@@ -17306,6 +17320,57 @@ mod tests {
         assert_eq!(
             encode_key_input_with_modifiers(&Key::Named(NamedKey::Escape), None, shift, modes),
             Some(b"\x1b[27;2u".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_modifiers(&Key::Named(NamedKey::Enter), None, control, modes),
+            Some(b"\r".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_modifiers(&Key::Named(NamedKey::Tab), None, shift, modes),
+            Some(b"\t".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_modifiers(&Key::Named(NamedKey::Backspace), None, control, modes),
+            Some(b"\x7f".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_modifiers(
+                &Key::Named(NamedKey::ArrowUp),
+                None,
+                control,
+                modes
+            ),
+            Some(b"\x1b[1;5A".to_vec())
+        );
+    }
+
+    #[test]
+    fn key_encoder_uses_kitty_csi_u_when_report_all_keys_is_enabled() {
+        let modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES,
+            ..TerminalInputModes::default()
+        };
+        let shift = TerminalKeyModifiers {
+            shift: true,
+            ..TerminalKeyModifiers::default()
+        };
+        let control = TerminalKeyModifiers {
+            control: true,
+            ..TerminalKeyModifiers::default()
+        };
+
+        assert_eq!(
+            encode_key_input_with_modifiers(
+                &Key::Character("a".into()),
+                Some("a"),
+                TerminalKeyModifiers::default(),
+                modes,
+            ),
+            Some(b"\x1b[97u".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_modifiers(&Key::Character("A".into()), Some("A"), shift, modes),
+            Some(b"\x1b[97;2u".to_vec())
         );
         assert_eq!(
             encode_key_input_with_modifiers(&Key::Named(NamedKey::Enter), None, control, modes),

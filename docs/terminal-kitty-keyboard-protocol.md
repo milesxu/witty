@@ -1,0 +1,70 @@
+# Terminal Kitty Keyboard Protocol
+
+Updated: 2026-06-24
+
+Witty supports a focused subset of the Kitty keyboard protocol for native and
+browser terminal input. This is the keyboard protocol / CSI-u line, not the
+Kitty graphics protocol.
+
+Reference: <https://sw.kovidgoyal.net/kitty/keyboard-protocol/>
+
+## Core State
+
+`witty-core` tracks Kitty keyboard flags per active terminal screen:
+
+- `CSI ? u`: query active flags.
+- `CSI > flags u`: push current flags and set active flags.
+- `CSI = flags ; mode u`: replace, add, or clear active flags.
+- `CSI < count u`: pop saved flags.
+
+Supported flags:
+
+- `1`: `DISAMBIGUATE_ESC_CODES`
+- `8`: `REPORT_ALL_KEYS_AS_ESC_CODES`
+
+Unsupported flags are masked out. Main and alternate screens have separate
+flag values and stacks. Soft reset and full reset clear both stacks and active
+flag values.
+
+## Encoding Scope
+
+With flag `1`, Witty emits CSI-u for ambiguous character-key combinations:
+
+- `Ctrl-I` -> `CSI 105;5u`
+- `Ctrl-Shift-I` -> `CSI 105;6u`
+- `Alt-A` -> `CSI 97;3u`
+- `Esc` -> `CSI 27u` or `CSI 27;Nu`
+
+Per the Kitty protocol, flag `1` keeps `Enter`, `Tab`, and `Backspace` on their
+legacy byte sequences. This means `Ctrl-Enter`, `Shift-Tab`, and
+`Ctrl-Backspace` do not become CSI-u unless flag `8` is also active.
+
+With flag `8`, Witty additionally reports text-producing keys plus `Enter`,
+`Tab`, `Backspace`, and `Esc` as CSI-u:
+
+- `a` -> `CSI 97u`
+- `Shift-A` -> `CSI 97;2u`
+- `Ctrl-Enter` -> `CSI 13;5u`
+- `Shift-Tab` -> `CSI 9;2u`
+- `Ctrl-Backspace` -> `CSI 127;5u`
+
+Navigation, function, and keypad keys continue through the existing xterm/VT
+escape-code encoders. Modified navigation/function keys keep xterm modifier
+parameters such as `CSI 1;5A`.
+
+## Deferred
+
+- Event type reporting.
+- Alternate key reporting.
+- Associated text reporting.
+- Precise physical-key fallback for shifted symbols.
+- Kitty graphics/image protocol.
+
+## Verification
+
+```bash
+cargo test -p witty-core kitty_keyboard_protocol --lib
+cargo test -p witty-app key_encoder_ --bin witty
+cargo test -p witty-web browser_key_input_ --lib
+cargo check --workspace
+```
