@@ -82,6 +82,19 @@ const WITTY_LINUX_APP_ID: &str = "dev.witty.Witty";
 const SEARCH_SCROLL_BUFFER_ROWS: u16 = 1;
 const SYNCHRONIZED_OUTPUT_TIMEOUT: Duration = Duration::from_millis(150);
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
+const CURSOR_BLINK_SLOW_INTERVAL: Duration = Duration::from_millis(750);
+const CURSOR_BLINK_VARIABLE_VISIBLE: [Duration; 4] = [
+    Duration::from_millis(850),
+    Duration::from_millis(650),
+    Duration::from_millis(1_000),
+    Duration::from_millis(700),
+];
+const CURSOR_BLINK_VARIABLE_HIDDEN: [Duration; 4] = [
+    Duration::from_millis(280),
+    Duration::from_millis(420),
+    Duration::from_millis(220),
+    Duration::from_millis(360),
+];
 const TEXT_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const FULLSCREEN_MONITOR_SIZE_TOLERANCE_PX: u32 = 8;
 const FULLSCREEN_REAFFIRM_INTERVAL: Duration = Duration::from_millis(120);
@@ -313,8 +326,10 @@ struct CursorBlinkKey {
 
 #[derive(Clone, Debug, Default)]
 struct CursorBlinkState {
+    rate: CursorBlinkRate,
     key: Option<CursorBlinkKey>,
     visible_phase: bool,
+    phase_index: usize,
     next_deadline: Option<Instant>,
 }
 
@@ -372,6 +387,18 @@ fn wrapping_row_index(current: usize, direction: i32, len: usize) -> usize {
 }
 
 impl CursorBlinkState {
+    fn new(rate: CursorBlinkRate) -> Self {
+        Self {
+            rate,
+            ..Self::default()
+        }
+    }
+
+    fn reset(&mut self) {
+        let rate = self.rate;
+        *self = Self::new(rate);
+    }
+
     fn apply_to_frame(
         &mut self,
         frame: &mut FramePlan,
@@ -383,13 +410,15 @@ impl CursorBlinkState {
         if self.key != key {
             self.key = key;
             self.visible_phase = true;
-            self.next_deadline = key.and_then(|_| now.checked_add(CURSOR_BLINK_INTERVAL));
+            self.phase_index = 0;
+            self.next_deadline = key.and_then(|_| self.next_phase_deadline(now));
         } else if key.is_some() && self.next_deadline.is_none() {
-            self.next_deadline = now.checked_add(CURSOR_BLINK_INTERVAL);
+            self.next_deadline = self.next_phase_deadline(now);
         }
 
         if key.is_none() {
             self.visible_phase = true;
+            self.phase_index = 0;
             self.next_deadline = None;
         } else if !self.visible_phase {
             frame.cursor = None;
@@ -406,7 +435,8 @@ impl CursorBlinkState {
         if self.key != key {
             self.key = key;
             self.visible_phase = true;
-            self.next_deadline = key.and_then(|_| now.checked_add(CURSOR_BLINK_INTERVAL));
+            self.phase_index = 0;
+            self.next_deadline = key.and_then(|_| self.next_phase_deadline(now));
             return false;
         }
 
@@ -418,13 +448,103 @@ impl CursorBlinkState {
         }
 
         self.visible_phase = !self.visible_phase;
-        self.next_deadline = now.checked_add(CURSOR_BLINK_INTERVAL);
+        self.phase_index = self.phase_index.wrapping_add(1);
+        self.next_deadline = self.next_phase_deadline(now);
         true
     }
 
     fn next_deadline(&self) -> Option<Instant> {
         self.next_deadline
     }
+
+    fn next_phase_deadline(&self, now: Instant) -> Option<Instant> {
+        now.checked_add(self.rate.phase_duration(self.visible_phase, self.phase_index))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum CursorBlinkRate {
+    #[default]
+    Normal,
+    Slow,
+    Variable,
+}
+
+impl CursorBlinkRate {
+    pub(crate) fn parse_config_value(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "normal" | "default" => Ok(Self::Normal),
+            "slow" => Ok(Self::Slow),
+            "variable" | "var" | "breathing" | "breath" => Ok(Self::Variable),
+            _ => bail!(
+                "unknown cursor blink rate {value:?}; expected normal, slow, or variable"
+            ),
+        }
+    }
+
+    pub(crate) fn as_config_value(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Slow => "slow",
+            Self::Variable => "variable",
+        }
+    }
+
+    fn phase_duration(self, visible_phase: bool, phase_index: usize) -> Duration {
+        match self {
+            Self::Normal => CURSOR_BLINK_INTERVAL,
+            Self::Slow => CURSOR_BLINK_SLOW_INTERVAL,
+            Self::Variable if visible_phase => {
+                let index = phase_index / 2;
+                CURSOR_BLINK_VARIABLE_VISIBLE[index % CURSOR_BLINK_VARIABLE_VISIBLE.len()]
+            }
+            Self::Variable => {
+                let index = phase_index / 2;
+                CURSOR_BLINK_VARIABLE_HIDDEN[index % CURSOR_BLINK_VARIABLE_HIDDEN.len()]
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum CursorStyleSource {
+    #[default]
+    Program,
+    Config,
+}
+
+impl CursorStyleSource {
+    pub(crate) fn parse_config_value(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "program" | "application" | "app" | "terminal" => Ok(Self::Program),
+            "config" | "configuration" | "wittyrc" | "fixed" | "lock" | "locked" => {
+                Ok(Self::Config)
+            }
+            _ => bail!(
+                "unknown cursor style source {value:?}; expected program or config"
+            ),
+        }
+    }
+
+    pub(crate) fn as_config_value(self) -> &'static str {
+        match self {
+            Self::Program => "program",
+            Self::Config => "config",
+        }
+    }
+}
+
+fn cursor_state_for_style_source(
+    mut cursor: CursorState,
+    source: CursorStyleSource,
+    configured_shape: CursorShape,
+    configured_blink: bool,
+) -> CursorState {
+    if source == CursorStyleSource::Config {
+        cursor.shape = configured_shape;
+        cursor.blink = configured_blink;
+    }
+    cursor
 }
 
 #[derive(Clone, Debug)]
@@ -2234,6 +2354,10 @@ fn pending_profile_action_feedback(snapshot: &NativeProfileActionSnapshot) -> Op
     ))
 }
 
+fn format_startup_notice(notice: &str) -> String {
+    format!("\r\n[Witty startup notice]\r\n{notice}\r\n\r\n")
+}
+
 fn plugin_actions_request_profile_action(actions: &[PluginAction]) -> bool {
     actions.iter().any(|action| {
         matches!(
@@ -2270,6 +2394,7 @@ struct NativeImeEventResult {
 pub fn run(
     wasm_plugins: Vec<PathBuf>,
     smoke: WindowSmokeOptions,
+    startup_notices: Vec<String>,
     default_window_title: Option<String>,
     launch_program: Option<String>,
     launch_args: Vec<String>,
@@ -2286,6 +2411,8 @@ pub fn run(
     background_image_fit: Option<RendererBackgroundImageFit>,
     cursor_shape: CursorShape,
     cursor_blink: bool,
+    cursor_blink_rate: CursorBlinkRate,
+    cursor_style_source: CursorStyleSource,
     session_tab_position: NativeSessionTabPosition,
     session_tab_label_style: NativeSessionTabLabelStyle,
     session_tab_display_policy: NativeSessionTabDisplayPolicy,
@@ -2299,6 +2426,7 @@ pub fn run(
         Some(event_loop_proxy),
         wasm_plugins,
         smoke,
+        startup_notices,
         default_window_title,
         launch_program,
         launch_args,
@@ -2315,6 +2443,8 @@ pub fn run(
         background_image_fit,
         cursor_shape,
         cursor_blink,
+        cursor_blink_rate,
+        cursor_style_source,
         session_tab_position,
         session_tab_label_style,
         session_tab_display_policy,
@@ -2324,6 +2454,9 @@ pub fn run(
     event_loop
         .run_app(&mut app)
         .context("run Witty native window event loop")?;
+    if let Some(error) = app.fatal_startup_error.take() {
+        bail!("{error}");
+    }
     Ok(())
 }
 
@@ -3184,6 +3317,9 @@ struct TerminalWindowApp {
     window_title: String,
     synchronized_output_deadline: Option<Instant>,
     cursor_blink: CursorBlinkState,
+    configured_cursor_shape: CursorShape,
+    configured_cursor_blink: bool,
+    cursor_style_source: CursorStyleSource,
     text_blink: TextBlinkState,
     font_config: RendererFontConfig,
     visual_config: RendererVisualConfig,
@@ -3199,6 +3335,7 @@ struct TerminalWindowApp {
     first_frame_reported: bool,
     update_monitor: NativeUpdateMonitor,
     update_notice: Option<NativeUpdateNotice>,
+    fatal_startup_error: Option<String>,
 }
 
 impl TerminalWindowApp {
@@ -3206,6 +3343,7 @@ impl TerminalWindowApp {
         event_loop_proxy: Option<EventLoopProxy<NativeWindowEvent>>,
         wasm_plugins: Vec<PathBuf>,
         smoke: WindowSmokeOptions,
+        startup_notices: Vec<String>,
         default_window_title: Option<String>,
         launch_program: Option<String>,
         launch_args: Vec<String>,
@@ -3222,6 +3360,8 @@ impl TerminalWindowApp {
         background_image_fit: Option<RendererBackgroundImageFit>,
         cursor_shape: CursorShape,
         cursor_blink: bool,
+        cursor_blink_rate: CursorBlinkRate,
+        cursor_style_source: CursorStyleSource,
         session_tab_position: NativeSessionTabPosition,
         session_tab_label_style: NativeSessionTabLabelStyle,
         session_tab_display_policy: NativeSessionTabDisplayPolicy,
@@ -3258,6 +3398,11 @@ impl TerminalWindowApp {
                 cursor_blink,
             )?,
         };
+        let mut startup_terminal = startup.terminal;
+        for notice in startup_notices {
+            startup_terminal.feed(format_startup_notice(&notice).as_bytes());
+        }
+
         let mut app = TerminalApp::new(startup.transport, startup.size);
         app.install_builtin_plugin(BuiltInCommandsPlugin)?;
         for command in native_window_command_registrations() {
@@ -3312,7 +3457,7 @@ impl TerminalWindowApp {
             window: None,
             renderer: None,
             app,
-            terminal: startup.terminal,
+            terminal: startup_terminal,
             frame: FramePlan::default(),
             command_palette,
             command_block_action_menu: CommandBlockActionMenu::default(),
@@ -3375,7 +3520,10 @@ impl TerminalWindowApp {
             window_title: default_window_title.clone(),
             default_window_title,
             synchronized_output_deadline: None,
-            cursor_blink: CursorBlinkState::default(),
+            cursor_blink: CursorBlinkState::new(cursor_blink_rate),
+            configured_cursor_shape: cursor_shape,
+            configured_cursor_blink: cursor_blink,
+            cursor_style_source,
             text_blink: TextBlinkState::default(),
             font_config,
             visual_config,
@@ -3391,6 +3539,7 @@ impl TerminalWindowApp {
             first_frame_reported: false,
             update_monitor,
             update_notice,
+            fatal_startup_error: None,
         };
         let _ = window_app.refresh_pending_profile_actions();
         window_app.rebuild_frame();
@@ -3474,6 +3623,12 @@ impl TerminalWindowApp {
         let mut snapshot = self.terminal.take_snapshot();
         snapshot.search_highlights = self.visible_search_highlights();
         snapshot.hovered_hyperlink = self.hovered_hyperlink;
+        snapshot.cursor = cursor_state_for_style_source(
+            snapshot.cursor,
+            self.cursor_style_source,
+            self.configured_cursor_shape,
+            self.configured_cursor_blink,
+        );
         let cursor = snapshot.cursor;
         let blink_visible = self.text_blink.apply_to_snapshot(&snapshot, Instant::now());
         self.app.set_blink_visible(blink_visible);
@@ -4136,7 +4291,7 @@ impl TerminalWindowApp {
         self.profile_action_session_runtimes.clear();
         self.shell_integration = ShellIntegrationState::default();
         self.synchronized_output_deadline = None;
-        self.cursor_blink = CursorBlinkState::default();
+        self.cursor_blink.reset();
         self.text_blink = TextBlinkState::default();
         let _ = self.refresh_empty_session_welcome_hover_for_current_pointer();
     }
@@ -4182,7 +4337,7 @@ impl TerminalWindowApp {
         self.hovered_command_block_id = None;
         self.exited = false;
         self.synchronized_output_deadline = None;
-        self.cursor_blink = CursorBlinkState::default();
+        self.cursor_blink.reset();
         self.text_blink = TextBlinkState::default();
         self.clear_empty_session_welcome();
         self.rebuild_frame();
@@ -4220,7 +4375,7 @@ impl TerminalWindowApp {
                 self.hovered_command_block_id = None;
                 self.exited = false;
                 self.synchronized_output_deadline = None;
-                self.cursor_blink = CursorBlinkState::default();
+                self.cursor_blink.reset();
                 self.text_blink = TextBlinkState::default();
                 self.clear_empty_session_welcome();
                 self.rebuild_frame();
@@ -4270,7 +4425,7 @@ impl TerminalWindowApp {
                 self.hovered_command_block_id = None;
                 self.exited = false;
                 self.synchronized_output_deadline = None;
-                self.cursor_blink = CursorBlinkState::default();
+                self.cursor_blink.reset();
                 self.text_blink = TextBlinkState::default();
                 self.clear_empty_session_welcome();
                 self.rebuild_frame();
@@ -4319,7 +4474,7 @@ impl TerminalWindowApp {
             self.hovered_command_block_id = None;
             self.exited = false;
             self.synchronized_output_deadline = None;
-            self.cursor_blink = CursorBlinkState::default();
+            self.cursor_blink.reset();
             self.text_blink = TextBlinkState::default();
         } else if close_result == NativeSessionCloseResult::BlockedLastActive {
             self.enter_empty_session_welcome();
@@ -4442,7 +4597,12 @@ impl TerminalWindowApp {
 
     fn apply_blink_timeouts(&mut self, event_loop: &ActiveEventLoop) -> bool {
         let now = Instant::now();
-        let cursor = self.terminal.snapshot().cursor;
+        let cursor = cursor_state_for_style_source(
+            self.terminal.snapshot().cursor,
+            self.cursor_style_source,
+            self.configured_cursor_shape,
+            self.configured_cursor_blink,
+        );
         let cursor_changed = self
             .cursor_blink
             .toggle_if_due(cursor, self.text_input_target(), now);
@@ -5804,7 +5964,7 @@ impl TerminalWindowApp {
             self.hovered_empty_session_welcome = None;
             self.hovered_profile_action = None;
             self.synchronized_output_deadline = None;
-            self.cursor_blink = CursorBlinkState::default();
+            self.cursor_blink.reset();
             self.text_blink = TextBlinkState::default();
         }
         if switched || closed || blocked || requests.fallback_local_session {
@@ -6223,7 +6383,7 @@ impl TerminalWindowApp {
         self.hovered_command_block_id = None;
         self.exited = false;
         self.synchronized_output_deadline = None;
-        self.cursor_blink = CursorBlinkState::default();
+        self.cursor_blink.reset();
         self.text_blink = TextBlinkState::default();
         self.clear_empty_session_welcome();
         self.profile_actions
@@ -6266,7 +6426,7 @@ impl TerminalWindowApp {
             self.hovered_command_block_id = None;
             self.exited = false;
             self.synchronized_output_deadline = None;
-            self.cursor_blink = CursorBlinkState::default();
+            self.cursor_blink.reset();
             self.text_blink = TextBlinkState::default();
             self.clear_empty_session_welcome();
             self.rebuild_frame();
@@ -6835,7 +6995,9 @@ impl ApplicationHandler<NativeWindowEvent> for TerminalWindowApp {
         let window = match event_loop.create_window(attrs) {
             Ok(window) => Arc::new(window),
             Err(err) => {
-                eprintln!("failed to create window: {err:#}");
+                let message = format!("failed to create window: {err:#}");
+                eprintln!("{message}");
+                self.fatal_startup_error = Some(message);
                 event_loop.exit();
                 return;
             }
@@ -6868,7 +7030,9 @@ impl ApplicationHandler<NativeWindowEvent> for TerminalWindowApp {
             )) {
                 Ok(renderer) => renderer,
                 Err(err) => {
-                    eprintln!("{}", native_renderer_startup_error_message(&err));
+                    let message = native_renderer_startup_error_message(&err);
+                    eprintln!("{message}");
+                    self.fatal_startup_error = Some(message);
                     event_loop.exit();
                     return;
                 }
@@ -7389,6 +7553,21 @@ fn native_renderer_startup_error_message(err: &anyhow::Error) -> String {
         policy.is_opengl_only(),
         policy.honors_wgpu_backend_env(),
     )
+}
+
+pub(crate) fn show_startup_error_dialog(title: &str, message: &str) {
+    if try_spawn_startup_error_dialog("zenity", &["--error", "--title", title, "--text", message])
+    {
+        return;
+    }
+    if try_spawn_startup_error_dialog("kdialog", &["--title", title, "--error", message]) {
+        return;
+    }
+    let _ = try_spawn_startup_error_dialog("notify-send", &[title, message]);
+}
+
+fn try_spawn_startup_error_dialog(program: &str, args: &[&str]) -> bool {
+    process::Command::new(program).args(args).spawn().is_ok()
 }
 
 fn synchronized_output_deadline_after_poll(
@@ -15136,6 +15315,7 @@ mod tests {
             None,
             Vec::new(),
             WindowSmokeOptions::default(),
+            Vec::new(),
             None,
             Some("/bin/sh".to_owned()),
             vec!["-lc".to_owned(), "exit 7".to_owned()],
@@ -15152,6 +15332,8 @@ mod tests {
             None,
             CursorShape::Block,
             true,
+            CursorBlinkRate::Normal,
+            CursorStyleSource::Program,
             NativeSessionTabPosition::Bottom,
             NativeSessionTabLabelStyle::Index,
             NativeSessionTabDisplayPolicy::default(),
@@ -15193,6 +15375,7 @@ mod tests {
             None,
             Vec::new(),
             smoke,
+            Vec::new(),
             None,
             Some("/bin/sh".to_owned()),
             vec!["-lc".to_owned(), "exit 0".to_owned()],
@@ -15209,6 +15392,8 @@ mod tests {
             None,
             CursorShape::Block,
             true,
+            CursorBlinkRate::Normal,
+            CursorStyleSource::Program,
             NativeSessionTabPosition::Bottom,
             NativeSessionTabLabelStyle::Index,
             NativeSessionTabDisplayPolicy::default(),
@@ -16151,6 +16336,98 @@ mod tests {
         );
 
         assert!(restored_frame.cursor.is_some());
+    }
+
+    #[test]
+    fn cursor_blink_state_uses_configured_rate() {
+        let now = Instant::now();
+        let cursor = CursorState::default();
+        let mut slow = CursorBlinkState::new(CursorBlinkRate::Slow);
+
+        slow.apply_to_frame(&mut frame_with_cursor(), cursor, TextInputTarget::Terminal, now);
+
+        assert_eq!(
+            slow.next_deadline(),
+            Some(now + CURSOR_BLINK_SLOW_INTERVAL)
+        );
+
+        let mut variable = CursorBlinkState::new(CursorBlinkRate::Variable);
+        variable.apply_to_frame(
+            &mut frame_with_cursor(),
+            cursor,
+            TextInputTarget::Terminal,
+            now,
+        );
+
+        assert_eq!(
+            variable.next_deadline(),
+            Some(now + CURSOR_BLINK_VARIABLE_VISIBLE[0])
+        );
+        assert!(variable.toggle_if_due(
+            cursor,
+            TextInputTarget::Terminal,
+            now + CURSOR_BLINK_VARIABLE_VISIBLE[0]
+        ));
+        assert_eq!(
+            variable.next_deadline(),
+            Some(now + CURSOR_BLINK_VARIABLE_VISIBLE[0] + CURSOR_BLINK_VARIABLE_HIDDEN[0])
+        );
+    }
+
+    #[test]
+    fn cursor_style_source_config_overrides_program_cursor_visuals() {
+        let program_cursor = CursorState {
+            shape: CursorShape::Block,
+            blink: false,
+            ..CursorState::default()
+        };
+
+        let default_visual = cursor_state_for_style_source(
+            program_cursor,
+            CursorStyleSource::Program,
+            CursorShape::Underline,
+            true,
+        );
+        let configured_visual = cursor_state_for_style_source(
+            program_cursor,
+            CursorStyleSource::Config,
+            CursorShape::Underline,
+            true,
+        );
+
+        assert_eq!(default_visual.shape, CursorShape::Block);
+        assert!(!default_visual.blink);
+        assert_eq!(configured_visual.shape, CursorShape::Underline);
+        assert!(configured_visual.blink);
+    }
+
+    #[test]
+    fn cursor_style_source_config_keeps_cursor_blink_timer_active() {
+        let now = Instant::now();
+        let program_cursor = CursorState {
+            shape: CursorShape::Block,
+            blink: false,
+            ..CursorState::default()
+        };
+        let visual_cursor = cursor_state_for_style_source(
+            program_cursor,
+            CursorStyleSource::Config,
+            CursorShape::Underline,
+            true,
+        );
+        let mut blink = CursorBlinkState::new(CursorBlinkRate::Slow);
+
+        blink.apply_to_frame(
+            &mut frame_with_cursor(),
+            visual_cursor,
+            TextInputTarget::Terminal,
+            now,
+        );
+
+        assert_eq!(
+            blink.next_deadline(),
+            Some(now + CURSOR_BLINK_SLOW_INTERVAL)
+        );
     }
 
     #[test]

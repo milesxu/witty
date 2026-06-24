@@ -17,8 +17,9 @@ use anyhow::{bail, Context as _, Result};
 use serde::Deserialize;
 use update_state::read_restart_snapshot;
 use window::{
-    MouseSelectionOverridePolicy, NativeSessionTabDisplayPolicy, NativeSessionTabLabelStyle,
-    NativeSessionTabPosition, WindowLastActiveClosePolicy, WindowSmokeOptions,
+    CursorBlinkRate, CursorStyleSource, MouseSelectionOverridePolicy,
+    NativeSessionTabDisplayPolicy, NativeSessionTabLabelStyle, NativeSessionTabPosition,
+    WindowLastActiveClosePolicy, WindowSmokeOptions,
     DEFAULT_WINDOW_TITLE,
 };
 use witty_core::{
@@ -68,7 +69,20 @@ const MAX_WINDOW_COLS: u16 = 400;
 const RECOMMENDED_TERMINAL_FONT_FAMILY: &str = "Maple Mono NF CN";
 
 fn main() -> anyhow::Result<()> {
-    let mut options = AppOptions::parse(std::env::args().skip(1))?;
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    match run_main(args.clone()) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if startup_dialog_requested(&args) {
+                window::show_startup_error_dialog("Witty could not start", &format!("{err:#}"));
+            }
+            Err(err)
+        }
+    }
+}
+
+fn run_main(args: Vec<String>) -> anyhow::Result<()> {
+    let mut options = AppOptions::parse(args)?;
     let _logging_guard = if options.mode == AppMode::Window {
         match logging::init_window_logging() {
             Ok(guard) => Some(guard),
@@ -80,8 +94,28 @@ fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    let mut startup_notices = Vec::new();
     let wittyrc_config_load =
-        options.apply_wittyrc_defaults(default_wittyrc_path, read_wittyrc_config)?;
+        match options.apply_wittyrc_defaults(default_wittyrc_path, read_wittyrc_config) {
+            Ok(load) => load,
+            Err(err) if options.mode == AppMode::Window => {
+                let config_ref = options.wittyrc_config_ref(default_wittyrc_path).ok();
+                let notice = wittyrc_startup_error_notice(config_ref.as_ref(), &err);
+                tracing::error!(
+                    target: "witty_app::config",
+                    error = %err,
+                    "ignored invalid wittyrc and continued with defaults"
+                );
+                eprintln!("{notice}");
+                startup_notices.push(notice);
+                WittyrcConfigLoadReport {
+                    path: config_ref.as_ref().map(|config_ref| config_ref.path.clone()),
+                    required: config_ref.as_ref().is_some_and(|config_ref| config_ref.required),
+                    status: WittyrcConfigLoadStatus::Failed,
+                }
+            }
+            Err(err) => return Err(err),
+        };
     let native_window_config_load = options.apply_native_window_config_defaults(
         |name| env::var_os(name),
         default_native_window_config_path,
@@ -194,6 +228,7 @@ fn main() -> anyhow::Result<()> {
         let result = window::run(
             options.wasm_plugins,
             options.window_smoke,
+            startup_notices,
             options.window_title,
             options.program,
             options.args,
@@ -210,6 +245,8 @@ fn main() -> anyhow::Result<()> {
             options.background_image_fit,
             options.cursor_shape,
             options.cursor_blink,
+            options.cursor_blink_rate,
+            options.cursor_style_source,
             options.session_tab_position,
             options.session_tab_label_style,
             options.session_tab_display_policy,
@@ -292,6 +329,22 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn startup_dialog_requested(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--window") || env::var_os("WITTY_STARTUP_DIALOG").is_some()
+}
+
+fn wittyrc_startup_error_notice(
+    config_ref: Option<&WittyrcConfigRef>,
+    err: &anyhow::Error,
+) -> String {
+    let path = config_ref
+        .map(|config_ref| config_ref.path.display().to_string())
+        .unwrap_or_else(|| "<unknown>".to_owned());
+    format!(
+        "Ignored .wittyrc because it could not be loaded.\r\nPath: {path}\r\nError: {err:#}\r\nWitty continued with built-in defaults and command-line settings.\r\nFix the file, then run: witty --wittyrc-check\r\nAfter the check passes, restart Witty to reload the config."
+    )
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct AppOptions {
     mode: AppMode,
@@ -313,6 +366,8 @@ struct AppOptions {
     background_image_fit: Option<RendererBackgroundImageFit>,
     cursor_shape: CursorShape,
     cursor_blink: bool,
+    cursor_blink_rate: CursorBlinkRate,
+    cursor_style_source: CursorStyleSource,
     session_tab_position: NativeSessionTabPosition,
     session_tab_label_style: NativeSessionTabLabelStyle,
     session_tab_display_policy: NativeSessionTabDisplayPolicy,
@@ -347,6 +402,8 @@ struct AppOptionsExplicit {
     background_image_fit: bool,
     cursor_shape: bool,
     cursor_blink: bool,
+    cursor_blink_rate: bool,
+    cursor_style_source: bool,
     session_tab_position: bool,
     session_tab_label_style: bool,
     session_tab_show_single: bool,
@@ -388,6 +445,8 @@ impl AppOptions {
         let mut background_image_fit = None;
         let mut cursor_shape = CursorShape::Block;
         let mut cursor_blink = true;
+        let mut cursor_blink_rate = CursorBlinkRate::default();
+        let mut cursor_style_source = CursorStyleSource::default();
         let mut session_tab_position = NativeSessionTabPosition::default();
         let mut session_tab_label_style = NativeSessionTabLabelStyle::default();
         let mut session_tab_display_policy = NativeSessionTabDisplayPolicy::default();
@@ -733,6 +792,28 @@ impl AppOptions {
                     }
                     cursor_blink = parse_bool_config(&value, "--cursor-blink")?;
                     explicit.cursor_blink = true;
+                    window_only_args_seen = true;
+                }
+                "--cursor-blink-rate" => {
+                    let Some(value) = args.next() else {
+                        bail!("--cursor-blink-rate requires a value");
+                    };
+                    if explicit.cursor_blink_rate {
+                        bail!("only one --cursor-blink-rate value is allowed");
+                    }
+                    cursor_blink_rate = CursorBlinkRate::parse_config_value(&value)?;
+                    explicit.cursor_blink_rate = true;
+                    window_only_args_seen = true;
+                }
+                "--cursor-style-source" => {
+                    let Some(value) = args.next() else {
+                        bail!("--cursor-style-source requires a value");
+                    };
+                    if explicit.cursor_style_source {
+                        bail!("only one --cursor-style-source value is allowed");
+                    }
+                    cursor_style_source = CursorStyleSource::parse_config_value(&value)?;
+                    explicit.cursor_style_source = true;
                     window_only_args_seen = true;
                 }
                 "--session-tab-position" => {
@@ -1236,6 +1317,8 @@ impl AppOptions {
             background_image_fit,
             cursor_shape,
             cursor_blink,
+            cursor_blink_rate,
+            cursor_style_source,
             session_tab_position,
             session_tab_label_style,
             session_tab_display_policy,
@@ -1288,8 +1371,11 @@ impl AppOptions {
             });
         };
 
-        self.apply_native_window_config(config)
+        let mut applied = self.clone();
+        applied
+            .apply_native_window_config(config)
             .with_context(|| format!("apply native window config {}", config_ref.path.display()))?;
+        *self = applied;
         Ok(NativeWindowConfigLoadReport {
             path: Some(config_ref.path),
             required: config_ref.required,
@@ -1407,6 +1493,18 @@ impl AppOptions {
                 self.cursor_blink = value;
             }
         }
+        if !self.explicit.cursor_blink_rate {
+            if let Some(value) = config.cursor_blink_rate {
+                self.cursor_blink_rate = CursorBlinkRate::parse_config_value(&value)
+                    .with_context(|| "cursor_blink_rate")?;
+            }
+        }
+        if !self.explicit.cursor_style_source {
+            if let Some(value) = config.cursor_style_source {
+                self.cursor_style_source = CursorStyleSource::parse_config_value(&value)
+                    .with_context(|| "cursor_style_source")?;
+            }
+        }
         if !self.explicit.session_tab_position {
             if let Some(value) = config.session_tab_position {
                 self.session_tab_position =
@@ -1493,8 +1591,11 @@ impl AppOptions {
             });
         };
 
-        self.apply_wittyrc_config(config)
+        let mut applied = self.clone();
+        applied
+            .apply_wittyrc_config(config)
             .with_context(|| format!("apply wittyrc {}", config_ref.path.display()))?;
+        *self = applied;
         Ok(WittyrcConfigLoadReport {
             path: Some(config_ref.path),
             required: config_ref.required,
@@ -1565,6 +1666,24 @@ impl AppOptions {
             if let Some(value) = config.cursor_blink {
                 self.cursor_blink = value;
                 self.explicit.cursor_blink = true;
+            }
+        }
+        if !self.explicit.cursor_blink_rate {
+            if let Some(value) = config.cursor_blink_rate {
+                self.cursor_blink_rate =
+                    CursorBlinkRate::parse_config_value(&value).with_context(|| {
+                        "cursor-blink-rate"
+                    })?;
+                self.explicit.cursor_blink_rate = true;
+            }
+        }
+        if !self.explicit.cursor_style_source {
+            if let Some(value) = config.cursor_style_source {
+                self.cursor_style_source =
+                    CursorStyleSource::parse_config_value(&value).with_context(|| {
+                        "cursor-style-source"
+                    })?;
+                self.explicit.cursor_style_source = true;
             }
         }
         if !self.explicit.window_last_active_close_policy {
@@ -1700,6 +1819,7 @@ enum WittyrcConfigLoadStatus {
     Disabled,
     Missing,
     Loaded,
+    Failed,
 }
 
 impl WittyrcConfigLoadStatus {
@@ -1708,6 +1828,7 @@ impl WittyrcConfigLoadStatus {
             Self::Disabled => "disabled",
             Self::Missing => "missing",
             Self::Loaded => "loaded",
+            Self::Failed => "failed",
         }
     }
 }
@@ -1739,6 +1860,10 @@ struct NativeWindowConfig {
     cursor_shape: Option<String>,
     #[serde(default)]
     cursor_blink: Option<bool>,
+    #[serde(default)]
+    cursor_blink_rate: Option<String>,
+    #[serde(default)]
+    cursor_style_source: Option<String>,
     #[serde(default)]
     session_tab_position: Option<String>,
     #[serde(default)]
@@ -1786,6 +1911,10 @@ struct WittyrcConfig {
     cursor_shape: Option<String>,
     #[serde(default, rename = "cursor-blink")]
     cursor_blink: Option<bool>,
+    #[serde(default, rename = "cursor-blink-rate")]
+    cursor_blink_rate: Option<String>,
+    #[serde(default, rename = "cursor-style-source")]
+    cursor_style_source: Option<String>,
     #[serde(default, rename = "session-tab-position")]
     session_tab_position: Option<String>,
     #[serde(default, rename = "session-tab-label")]
@@ -1876,6 +2005,8 @@ fn native_window_config_template() -> String {
         "background_image_fit": "cover",
         "cursor_shape": "block",
         "cursor_blink": true,
+        "cursor_blink_rate": "normal",
+        "cursor_style_source": "program",
         "session_tab_position": "top",
         "session_tab_label": "index",
         "session_tab_show_single": false,
@@ -2120,6 +2251,8 @@ fn native_window_effective_config_summary(
         "background_image_fit": visual_config.background_image_fit().as_config_value(),
         "cursor_shape": cursor_shape_config_value(options.cursor_shape),
         "cursor_blink": options.cursor_blink,
+        "cursor_blink_rate": options.cursor_blink_rate.as_config_value(),
+        "cursor_style_source": options.cursor_style_source.as_config_value(),
         "session_tab_position": options.session_tab_position.as_config_value(),
         "session_tab_label": options.session_tab_label_style.as_config_value(),
         "session_tab_show_single": options.session_tab_display_policy.show_single,
@@ -2177,6 +2310,8 @@ fn wittyrc_effective_config_summary(
         "background_image_fit": visual_config.background_image_fit().as_config_value(),
         "cursor_shape": cursor_shape_config_value(options.cursor_shape),
         "cursor_blink": options.cursor_blink,
+        "cursor_blink_rate": options.cursor_blink_rate.as_config_value(),
+        "cursor_style_source": options.cursor_style_source.as_config_value(),
         "session_tab_position": options.session_tab_position.as_config_value(),
         "session_tab_label": options.session_tab_label_style.as_config_value(),
         "session_tab_show_single": options.session_tab_display_policy.show_single,
@@ -3922,6 +4057,10 @@ mod tests {
             "bar".to_owned(),
             "--cursor-blink".to_owned(),
             "false".to_owned(),
+            "--cursor-blink-rate".to_owned(),
+            "slow".to_owned(),
+            "--cursor-style-source".to_owned(),
+            "config".to_owned(),
             "--session-tab-position".to_owned(),
             "top".to_owned(),
             "--session-tab-label".to_owned(),
@@ -3966,6 +4105,8 @@ mod tests {
         );
         assert_eq!(options.cursor_shape, CursorShape::Bar);
         assert!(!options.cursor_blink);
+        assert_eq!(options.cursor_blink_rate, CursorBlinkRate::Slow);
+        assert_eq!(options.cursor_style_source, CursorStyleSource::Config);
         assert_eq!(options.session_tab_position, NativeSessionTabPosition::Top);
         assert_eq!(
             options.session_tab_label_style,
@@ -4019,6 +4160,8 @@ mod tests {
             background_image_fit: Some("cover".to_owned()),
             cursor_shape: Some("bar".to_owned()),
             cursor_blink: Some(false),
+            cursor_blink_rate: Some("slow".to_owned()),
+            cursor_style_source: Some("config".to_owned()),
             session_tab_position: Some("top".to_owned()),
             session_tab_label: Some("index-profile".to_owned()),
             session_tab_show_single: Some(true),
@@ -4068,6 +4211,7 @@ mod tests {
         );
         assert_eq!(options.cursor_shape, CursorShape::Bar);
         assert!(!options.cursor_blink);
+        assert_eq!(options.cursor_blink_rate, CursorBlinkRate::Slow);
         assert_eq!(options.session_tab_position, NativeSessionTabPosition::Top);
         assert_eq!(
             options.session_tab_label_style,
@@ -4168,6 +4312,8 @@ mod tests {
             background_image_fit: Some("cover".to_owned()),
             cursor_shape: Some("underline".to_owned()),
             cursor_blink: Some(true),
+            cursor_blink_rate: Some("variable".to_owned()),
+            cursor_style_source: Some("program".to_owned()),
             session_tab_position: Some("top".to_owned()),
             session_tab_label: Some("profile".to_owned()),
             session_tab_show_single: Some(true),
@@ -4217,6 +4363,7 @@ mod tests {
         );
         assert_eq!(options.cursor_shape, CursorShape::Underline);
         assert!(options.cursor_blink);
+        assert_eq!(options.cursor_blink_rate, CursorBlinkRate::Variable);
         assert_eq!(
             options.mouse_selection_override,
             MouseSelectionOverridePolicy::ShiftSelect
@@ -4286,6 +4433,8 @@ mod tests {
         assert_eq!(config.background_image_fit.as_deref(), Some("cover"));
         assert_eq!(config.cursor_shape.as_deref(), Some("block"));
         assert_eq!(config.cursor_blink, Some(true));
+        assert_eq!(config.cursor_blink_rate.as_deref(), Some("normal"));
+        assert_eq!(config.cursor_style_source.as_deref(), Some("program"));
         assert_eq!(config.session_tab_position.as_deref(), Some("top"));
         assert_eq!(config.session_tab_label.as_deref(), Some("index"));
         assert_eq!(config.session_tab_show_single, Some(false));
@@ -4299,6 +4448,8 @@ mod tests {
         assert!(template.contains("background-image-fit = \"cover\""));
         assert!(template.contains("cursor-shape = \"block\""));
         assert!(template.contains("cursor-blink = true"));
+        assert!(template.contains("cursor-blink-rate = \"normal\""));
+        assert!(template.contains("cursor-style-source = \"program\""));
         assert!(template.contains("session-tab-position = \"top\""));
         assert!(template.contains("session-tab-label = \"index\""));
         assert!(template.contains("session-tab-show-single = false"));
@@ -4336,6 +4487,8 @@ background-image = "/images/witty.png"
 background-image-fit = "scale-and-crop"
 cursor-shape = "underline"
 cursor-blink = false
+cursor-blink-rate = "slow"
+cursor-style-source = "config"
 osc52-clipboard = "allow""#,
         )
         .unwrap();
@@ -4359,6 +4512,8 @@ osc52-clipboard = "allow""#,
         );
         assert_eq!(config.cursor_shape.as_deref(), Some("underline"));
         assert_eq!(config.cursor_blink, Some(false));
+        assert_eq!(config.cursor_blink_rate.as_deref(), Some("slow"));
+        assert_eq!(config.cursor_style_source.as_deref(), Some("config"));
         assert_eq!(config.osc52_clipboard.as_deref(), Some("allow"));
         assert_eq!(config.window_last_active_close, None);
         assert!(read_wittyrc_config(&root.join("missing.wittyrc"))
@@ -4398,6 +4553,8 @@ osc52-clipboard = "allow""#,
                         window_last_active_close: Some("block".to_owned()),
                         cursor_shape: Some("bar".to_owned()),
                         cursor_blink: Some(false),
+                        cursor_blink_rate: Some("slow".to_owned()),
+                        cursor_style_source: Some("config".to_owned()),
                         session_tab_position: Some("bottom".to_owned()),
                         session_tab_label: Some("index".to_owned()),
                         session_tab_show_single: Some(false),
@@ -4449,6 +4606,7 @@ osc52-clipboard = "allow""#,
         );
         assert_eq!(options.cursor_shape, CursorShape::Bar);
         assert!(!options.cursor_blink);
+        assert_eq!(options.cursor_blink_rate, CursorBlinkRate::Slow);
         assert_eq!(options.osc52_clipboard_policy, Osc52ClipboardPolicy::Allow);
 
         let mut env_options = app_options_parse_with_env(
@@ -4503,6 +4661,47 @@ osc52-clipboard = "allow""#,
 
         assert_eq!(load, WittyrcConfigLoadReport::disabled());
         assert_eq!(options.font_family, None);
+    }
+
+    #[test]
+    fn app_options_wittyrc_apply_failure_preserves_existing_options() {
+        let mut options = AppOptions::parse([
+            "--window".to_owned(),
+            "--wittyrc".to_owned(),
+            "/configs/.wittyrc".to_owned(),
+        ])
+        .unwrap();
+
+        let error = options
+            .apply_wittyrc_defaults(
+                || unreachable!("explicit wittyrc should not use default path"),
+                |_| {
+                    Ok(Some(WittyrcConfig {
+                        font_size: Some(18),
+                        cursor_shape: Some("caret".to_owned()),
+                        ..WittyrcConfig::default()
+                    }))
+                },
+            )
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("cursor-shape"));
+        assert_eq!(options.font_size, None);
+        assert_eq!(options.cursor_shape, CursorShape::Block);
+    }
+
+    #[test]
+    fn wittyrc_startup_error_notice_points_to_check_command() {
+        let config_ref = WittyrcConfigRef {
+            path: PathBuf::from("/home/alice/.wittyrc"),
+            required: false,
+        };
+        let error = anyhow::anyhow!("parse failed");
+        let notice = wittyrc_startup_error_notice(Some(&config_ref), &error);
+
+        assert!(notice.contains("/home/alice/.wittyrc"));
+        assert!(notice.contains("witty --wittyrc-check"));
+        assert!(notice.contains("parse failed"));
     }
 
     #[test]
@@ -4679,6 +4878,7 @@ osc52-clipboard = "allow""#,
         assert_eq!(json["background_image_fit"], "cover");
         assert_eq!(json["cursor_shape"], "block");
         assert_eq!(json["cursor_blink"], true);
+        assert_eq!(json["cursor_blink_rate"], "normal");
     }
 
     #[test]
@@ -4865,6 +5065,8 @@ osc52-clipboard = "allow""#,
                     background_image_fit: Some("cover".to_owned()),
                     cursor_shape: Some("block".to_owned()),
                     cursor_blink: Some(true),
+                    cursor_blink_rate: Some("slow".to_owned()),
+                    cursor_style_source: Some("config".to_owned()),
                     session_tab_position: Some("bottom".to_owned()),
                     session_tab_label: Some("index".to_owned()),
                     session_tab_show_single: Some(false),
@@ -4956,6 +5158,8 @@ osc52-clipboard = "allow""#,
                         background_image_fit: Some("cover".to_owned()),
                         cursor_shape: Some("bar".to_owned()),
                         cursor_blink: Some(false),
+                        cursor_blink_rate: Some("variable".to_owned()),
+                        cursor_style_source: Some("config".to_owned()),
                         session_tab_position: Some("bottom".to_owned()),
                         session_tab_label: Some("index".to_owned()),
                         session_tab_show_single: Some(false),
@@ -5005,6 +5209,7 @@ osc52-clipboard = "allow""#,
         assert_eq!(json["background_image_fit"], "cover");
         assert_eq!(json["cursor_shape"], "bar");
         assert_eq!(json["cursor_blink"], false);
+        assert_eq!(json["cursor_blink_rate"], "variable");
         assert_eq!(json["font_source_count"], 1);
         assert_eq!(json["window_cols"], 100);
         assert_eq!(json["window_rows"], 36);
@@ -5218,6 +5423,8 @@ osc52-clipboard = "allow""#,
                 "background_image_fit": "cover",
                 "cursor_shape": "bar",
                 "cursor_blink": false,
+                "cursor_blink_rate": "slow",
+                "cursor_style_source": "config",
                 "font_paths": ["/fonts/Hack.ttf"],
                 "cwd": "/work/project",
                 "scrollback_lines": 12000,
@@ -5253,6 +5460,8 @@ osc52-clipboard = "allow""#,
         assert_eq!(config.background_image_fit.as_deref(), Some("cover"));
         assert_eq!(config.cursor_shape.as_deref(), Some("bar"));
         assert_eq!(config.cursor_blink, Some(false));
+        assert_eq!(config.cursor_blink_rate.as_deref(), Some("slow"));
+        assert_eq!(config.cursor_style_source.as_deref(), Some("config"));
         assert_eq!(config.font_paths, vec![PathBuf::from("/fonts/Hack.ttf")]);
         assert_eq!(config.cwd.as_deref(), Some(Path::new("/work/project")));
         assert_eq!(config.scrollback_lines, Some(12000));
@@ -5557,11 +5766,17 @@ osc52-clipboard = "allow""#,
             "vertical".to_owned(),
             "--cursor-blink".to_owned(),
             "no".to_owned(),
+            "--cursor-blink-rate".to_owned(),
+            "variable".to_owned(),
+            "--cursor-style-source".to_owned(),
+            "config".to_owned(),
         ])
         .unwrap();
 
         assert_eq!(options.cursor_shape, CursorShape::Bar);
         assert!(!options.cursor_blink);
+        assert_eq!(options.cursor_blink_rate, CursorBlinkRate::Variable);
+        assert_eq!(options.cursor_style_source, CursorStyleSource::Config);
 
         let underline = AppOptions::parse([
             "--window".to_owned(),
@@ -5571,6 +5786,8 @@ osc52-clipboard = "allow""#,
         .unwrap();
         assert_eq!(underline.cursor_shape, CursorShape::Underline);
         assert!(underline.cursor_blink);
+        assert_eq!(underline.cursor_blink_rate, CursorBlinkRate::Normal);
+        assert_eq!(underline.cursor_style_source, CursorStyleSource::Program);
     }
 
     #[test]
@@ -6897,6 +7114,8 @@ Host prod
         assert!(AppOptions::parse(["--background-image-fit".to_owned()]).is_err());
         assert!(AppOptions::parse(["--cursor-shape".to_owned()]).is_err());
         assert!(AppOptions::parse(["--cursor-blink".to_owned()]).is_err());
+        assert!(AppOptions::parse(["--cursor-blink-rate".to_owned()]).is_err());
+        assert!(AppOptions::parse(["--cursor-style-source".to_owned()]).is_err());
         assert!(AppOptions::parse(["--font-path".to_owned()]).is_err());
         assert!(AppOptions::parse(["--window-cols".to_owned()]).is_err());
         assert!(AppOptions::parse(["--window-rows".to_owned()]).is_err());
@@ -6925,6 +7144,12 @@ Host prod
         );
         assert!(AppOptions::parse(["--cursor-shape".to_owned(), "bar".to_owned()]).is_err());
         assert!(AppOptions::parse(["--cursor-blink".to_owned(), "false".to_owned()]).is_err());
+        assert!(AppOptions::parse(["--cursor-blink-rate".to_owned(), "slow".to_owned()]).is_err());
+        assert!(AppOptions::parse([
+            "--cursor-style-source".to_owned(),
+            "config".to_owned()
+        ])
+        .is_err());
         assert!(
             AppOptions::parse(["--font-path".to_owned(), "/fonts/Hack.ttf".to_owned()]).is_err()
         );
@@ -7054,6 +7279,34 @@ Host prod
             "true".to_owned(),
             "--cursor-blink".to_owned(),
             "false".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--window".to_owned(),
+            "--cursor-blink-rate".to_owned(),
+            "fast".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--window".to_owned(),
+            "--cursor-blink-rate".to_owned(),
+            "slow".to_owned(),
+            "--cursor-blink-rate".to_owned(),
+            "variable".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--window".to_owned(),
+            "--cursor-style-source".to_owned(),
+            "driver".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--window".to_owned(),
+            "--cursor-style-source".to_owned(),
+            "program".to_owned(),
+            "--cursor-style-source".to_owned(),
+            "config".to_owned(),
         ])
         .is_err());
         assert!(AppOptions::parse([

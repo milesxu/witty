@@ -153,6 +153,8 @@ background-image = "null"
 background-image-fit = "cover"
 cursor-shape = "block"
 cursor-blink = true
+cursor-blink-rate = "normal"
+cursor-style-source = "program"
 session-tab-position = "top"
 session-tab-label = "index"
 session-tab-show-single = false
@@ -172,9 +174,11 @@ scripts/run-witty-native-opengl.sh --wittyrc-effective
 
 Use `--wittyrc <path>` for an explicit TOML file and `--no-wittyrc` to bypass
 it. CLI flags and font environment variables take precedence over `.wittyrc`.
-The legacy native-window JSON config still loads after `.wittyrc` and remains
-useful for window size, title, launch command, cwd, env, scrollback, and other
-settings.
+In window mode, an invalid `.wittyrc` is ignored instead of aborting startup;
+Witty opens with defaults and prints a startup notice with the load error and
+the `witty --wittyrc-check` validation command. The legacy native-window JSON
+config still loads after `.wittyrc` and remains useful for window size, title,
+launch command, cwd, env, scrollback, and other settings.
 
 By default, exiting the last local shell, for example with Ctrl-D, closes the
 Witty window/program. Set `window-last-active-close = "block"` in `.wittyrc`
@@ -197,6 +201,8 @@ cargo run -p witty-app -- --window \
   --background-image-fit cover \
   --cursor-shape bar \
   --cursor-blink true \
+  --cursor-blink-rate slow \
+  --cursor-style-source config \
   --font-path /path/to/SymbolsNerdFontMono-Regular.ttf
 WITTY_FONT_FAMILY="Maple Mono NF CN" witty --window
 ```
@@ -215,7 +221,14 @@ center-crops any overflow. The CLI spelling is `--background-image-fit cover`.
 Cursor shape defaults to `block`; set `cursor-shape = "underline"` or
 `"bar"` for horizontal or vertical cursors. Set `cursor-blink = false` for a
 steady cursor. CLI spellings are `--cursor-shape block|underline|bar` and
-`--cursor-blink true|false`.
+`--cursor-blink true|false`. Cursor blink timing defaults to
+`cursor-blink-rate = "normal"`; use `"slow"` for a calmer fixed blink or
+`"variable"` for a nonuniform cadence. The CLI spelling is
+`--cursor-blink-rate normal|slow|variable`. Cursor style source defaults to
+`cursor-style-source = "program"`, which lets terminal programs use DECSCUSR
+to change cursor shape/blink. Use `"config"` to keep the configured
+`cursor-shape` and `cursor-blink` visually fixed even inside full-screen TUIs.
+The CLI spelling is `--cursor-style-source program|config`.
 
 The session tab strip is hidden by default so it never covers shell output or a
 tmux status line. Set `session-tab-show-single = true` or

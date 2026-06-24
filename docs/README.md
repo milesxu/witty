@@ -51,9 +51,14 @@ scripts/run-witty-native-opengl.sh --wittyrc-effective
 
 `--wittyrc <path>` selects an explicit TOML file and `--no-wittyrc` bypasses
 it. CLI flags and `WITTY_FONT_FAMILY` / `WITTY_FONT_PATHS` override config
-defaults. The existing `window.v1.json` under the Witty config directory
-remains compatible and loads after `.wittyrc`, so it can continue to provide
-window size, title, launch command, cwd, env, scrollback, and related defaults.
+defaults. In window mode, invalid `.wittyrc` files are ignored with an in-window
+startup notice instead of aborting startup. The existing `window.v1.json` under
+the Witty config directory remains compatible and loads after `.wittyrc`, so it
+can continue to provide window size, title, launch command, cwd, env,
+scrollback, and related defaults.
+Set `cursor-style-source = "config"` when Witty should keep the configured
+cursor shape/blink even if a full-screen terminal program sends its own cursor
+style escape sequences.
 
 ## PTY And Local Shell
 
