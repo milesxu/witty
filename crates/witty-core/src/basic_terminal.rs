@@ -13,7 +13,7 @@ use crate::{
     TerminalMouseModes, TerminalPointAnchor, TerminalRowAnchor, TerminalScreen,
     TerminalShellIntegrationEvent, TerminalShellIntegrationMarker, TerminalTextRange,
     TerminalVisibleRowAnchor, UnderlineStyle, DEFAULT_MAX_SCROLLBACK_LINES,
-    MAX_OSC52_DECODED_BYTES,
+    KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES, MAX_OSC52_DECODED_BYTES,
 };
 
 const MAX_OSC7_URI_BYTES: usize = 4096;
@@ -55,6 +55,8 @@ const DEVICE_STATUS_OK: u16 = 5;
 const CURSOR_POSITION_REPORT: u16 = 6;
 const REPORT_TEXT_AREA_SIZE_CHARS: u16 = 18;
 const REPORT_SCREEN_SIZE_CHARS: u16 = 19;
+const SUPPORTED_KITTY_KEYBOARD_FLAGS: u16 = KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES;
+const MAX_KITTY_KEYBOARD_STACK_DEPTH: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TerminalColorTheme {
@@ -572,6 +574,10 @@ struct BasicTerminalState {
     application_keypad: bool,
     application_cursor_keys: bool,
     backarrow_sends_backspace: bool,
+    main_kitty_keyboard_flags: u16,
+    alternate_kitty_keyboard_flags: u16,
+    main_kitty_keyboard_stack: Vec<u16>,
+    alternate_kitty_keyboard_stack: Vec<u16>,
     mouse_tracking: MouseTrackingMode,
     mouse_utf8_encoding: bool,
     mouse_urxvt_encoding: bool,
@@ -637,6 +643,10 @@ impl BasicTerminalState {
             application_keypad: false,
             application_cursor_keys: false,
             backarrow_sends_backspace: false,
+            main_kitty_keyboard_flags: 0,
+            alternate_kitty_keyboard_flags: 0,
+            main_kitty_keyboard_stack: Vec::new(),
+            alternate_kitty_keyboard_stack: Vec::new(),
             mouse_tracking: MouseTrackingMode::None,
             mouse_utf8_encoding: false,
             mouse_urxvt_encoding: false,
@@ -784,7 +794,30 @@ impl BasicTerminalState {
             application_keypad: self.application_keypad,
             keyboard_locked: self.keyboard_locked,
             backarrow_sends_backspace: self.backarrow_sends_backspace,
+            kitty_keyboard_flags: self.active_kitty_keyboard_flags(),
             mouse: self.mouse_modes(),
+        }
+    }
+
+    fn active_kitty_keyboard_flags(&self) -> u16 {
+        match self.active_screen {
+            ActiveScreen::Main => self.main_kitty_keyboard_flags,
+            ActiveScreen::Alternate => self.alternate_kitty_keyboard_flags,
+        }
+    }
+
+    fn set_active_kitty_keyboard_flags(&mut self, flags: u16) {
+        let flags = flags & SUPPORTED_KITTY_KEYBOARD_FLAGS;
+        match self.active_screen {
+            ActiveScreen::Main => self.main_kitty_keyboard_flags = flags,
+            ActiveScreen::Alternate => self.alternate_kitty_keyboard_flags = flags,
+        }
+    }
+
+    fn active_kitty_keyboard_stack_mut(&mut self) -> &mut Vec<u16> {
+        match self.active_screen {
+            ActiveScreen::Main => &mut self.main_kitty_keyboard_stack,
+            ActiveScreen::Alternate => &mut self.alternate_kitty_keyboard_stack,
         }
     }
 
@@ -1351,6 +1384,10 @@ impl BasicTerminalState {
         self.application_keypad = false;
         self.application_cursor_keys = false;
         self.backarrow_sends_backspace = false;
+        self.main_kitty_keyboard_flags = 0;
+        self.alternate_kitty_keyboard_flags = 0;
+        self.main_kitty_keyboard_stack.clear();
+        self.alternate_kitty_keyboard_stack.clear();
         self.scroll_region = None;
         self.pending_wrap = false;
         self.last_printed_graphic = None;
@@ -1398,6 +1435,10 @@ impl BasicTerminalState {
         self.application_keypad = false;
         self.application_cursor_keys = false;
         self.backarrow_sends_backspace = false;
+        self.main_kitty_keyboard_flags = 0;
+        self.alternate_kitty_keyboard_flags = 0;
+        self.main_kitty_keyboard_stack.clear();
+        self.alternate_kitty_keyboard_stack.clear();
         self.mouse_tracking = MouseTrackingMode::None;
         self.mouse_utf8_encoding = false;
         self.mouse_urxvt_encoding = false;
@@ -3102,6 +3143,50 @@ impl BasicTerminalState {
         self.push_terminal_reply(format!("\x1b[{private_marker}{mode};{status}$y").into_bytes());
     }
 
+    fn query_kitty_keyboard_flags(&mut self) {
+        self.push_terminal_reply(format!("\x1b[?{}u", self.active_kitty_keyboard_flags()));
+    }
+
+    fn push_kitty_keyboard_flags(&mut self, params: &Params) {
+        let current = self.active_kitty_keyboard_flags();
+        {
+            let stack = self.active_kitty_keyboard_stack_mut();
+            if stack.len() == MAX_KITTY_KEYBOARD_STACK_DEPTH {
+                stack.remove(0);
+            }
+            stack.push(current);
+        }
+        self.set_active_kitty_keyboard_flags(param(params, 0, 0));
+    }
+
+    fn pop_kitty_keyboard_flags(&mut self, params: &Params) {
+        let count = defaulting_zero_param(params, 0, 1);
+        let mut restored = None;
+        {
+            let stack = self.active_kitty_keyboard_stack_mut();
+            for _ in 0..count {
+                restored = stack.pop();
+                if restored.is_none() {
+                    break;
+                }
+            }
+        }
+        self.set_active_kitty_keyboard_flags(restored.unwrap_or(0));
+    }
+
+    fn set_kitty_keyboard_flags(&mut self, params: &Params) {
+        let flags = param(params, 0, 0) & SUPPORTED_KITTY_KEYBOARD_FLAGS;
+        let mode = defaulting_zero_param(params, 1, 1);
+        let current = self.active_kitty_keyboard_flags();
+        let next = match mode {
+            1 => flags,
+            2 => current | flags,
+            3 => current & !flags,
+            _ => current,
+        };
+        self.set_active_kitty_keyboard_flags(next);
+    }
+
     fn mode_report_status(&self, mode: u16) -> u16 {
         match mode {
             KEYBOARD_ACTION_MODE => mode_status(self.keyboard_locked),
@@ -3451,7 +3536,11 @@ impl Perform for BasicTerminalState {
             'p' if intermediates == [b'$'] => self.request_mode_report(params, false),
             'p' if intermediates == [b'?', b'$'] => self.request_mode_report(params, true),
             'p' if intermediates == [b'!'] => self.soft_reset(),
-            'p' if intermediates == [b'"'] => {}
+            'p' if intermediates == [b'"'] => {},
+            'u' if intermediates == [b'?'] => self.query_kitty_keyboard_flags(),
+            'u' if intermediates == [b'>'] => self.push_kitty_keyboard_flags(params),
+            'u' if intermediates == [b'='] => self.set_kitty_keyboard_flags(params),
+            'u' if intermediates == [b'<'] => self.pop_kitty_keyboard_flags(params),
             'q' if intermediates == [b'>'] => self.terminal_name_and_version(params),
             'q' if intermediates == [b' '] => match param(params, 0, 1) {
                 0 | 1 => self.set_cursor_style(CursorShape::Block, true),
@@ -6052,6 +6141,7 @@ mod tests {
                 application_keypad: true,
                 keyboard_locked: true,
                 backarrow_sends_backspace: true,
+                kitty_keyboard_flags: 0,
                 mouse: TerminalMouseModes::default(),
             }
         );
@@ -6099,6 +6189,81 @@ mod tests {
         let mut full = BasicTerminal::new(GridSize::new(1, 5));
         full.feed(b"\x1b[?67h\x1bc");
         assert!(!full.input_modes().backarrow_sends_backspace);
+    }
+
+    #[test]
+    fn kitty_keyboard_protocol_queries_and_pushes_supported_flags() {
+        let mut terminal = BasicTerminal::new(GridSize::new(1, 5));
+
+        terminal.feed(b"\x1b[?u");
+        assert_eq!(
+            terminal.drain_host_actions(),
+            vec![terminal_reply(b"\x1b[?0u")]
+        );
+
+        terminal.feed(b"\x1b[>1u\x1b[?u");
+        assert_eq!(
+            terminal.input_modes().kitty_keyboard_flags,
+            KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES
+        );
+        assert_eq!(
+            terminal.drain_host_actions(),
+            vec![terminal_reply(b"\x1b[?1u")]
+        );
+
+        terminal.feed(b"\x1b[<u");
+        assert_eq!(terminal.input_modes().kitty_keyboard_flags, 0);
+    }
+
+    #[test]
+    fn kitty_keyboard_protocol_set_mode_only_tracks_supported_flags() {
+        let mut terminal = BasicTerminal::new(GridSize::new(1, 5));
+
+        terminal.feed(b"\x1b[=2u");
+        assert_eq!(terminal.input_modes().kitty_keyboard_flags, 0);
+
+        terminal.feed(b"\x1b[=1u");
+        assert_eq!(
+            terminal.input_modes().kitty_keyboard_flags,
+            KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES
+        );
+
+        terminal.feed(b"\x1b[=1;3u");
+        assert_eq!(terminal.input_modes().kitty_keyboard_flags, 0);
+
+        terminal.feed(b"\x1b[=1;2u");
+        assert_eq!(
+            terminal.input_modes().kitty_keyboard_flags,
+            KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES
+        );
+    }
+
+    #[test]
+    fn kitty_keyboard_protocol_keeps_main_and_alternate_screen_state_separate() {
+        let mut terminal = BasicTerminal::new(GridSize::new(1, 5));
+
+        terminal.feed(b"\x1b[>1u\x1b[?1049h");
+        assert_eq!(terminal.input_modes().kitty_keyboard_flags, 0);
+
+        terminal.feed(b"\x1b[>1u\x1b[<u");
+        assert_eq!(terminal.input_modes().kitty_keyboard_flags, 0);
+
+        terminal.feed(b"\x1b[?1049l");
+        assert_eq!(
+            terminal.input_modes().kitty_keyboard_flags,
+            KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES
+        );
+    }
+
+    #[test]
+    fn kitty_keyboard_protocol_resets_with_soft_and_full_reset() {
+        let mut soft = BasicTerminal::new(GridSize::new(1, 5));
+        soft.feed(b"\x1b[>1u\x1b[!p");
+        assert_eq!(soft.input_modes().kitty_keyboard_flags, 0);
+
+        let mut full = BasicTerminal::new(GridSize::new(1, 5));
+        full.feed(b"\x1b[>1u\x1bc");
+        assert_eq!(full.input_modes().kitty_keyboard_flags, 0);
     }
 
     #[test]

@@ -32,6 +32,7 @@ pub fn paste_payload(text: &str, bracketed_paste: bool) -> Vec<u8> {
 pub const MAX_EXTERNAL_URL_BYTES: usize = 2048;
 pub const MAX_OSC52_DECODED_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_SCROLLBACK_LINES: usize = 10_000;
+pub const KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES: u16 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExternalUrlError {
@@ -206,6 +207,8 @@ pub struct TerminalInputModes {
     pub keyboard_locked: bool,
     #[serde(default)]
     pub backarrow_sends_backspace: bool,
+    #[serde(default)]
+    pub kitty_keyboard_flags: u16,
     pub mouse: TerminalMouseModes,
 }
 

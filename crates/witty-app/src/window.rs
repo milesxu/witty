@@ -28,7 +28,7 @@ use witty_core::{
     GridSize, HyperlinkId, MouseButtonCode, MouseEventKind, MouseModifiers, Osc52ClipboardPolicy,
     PixelMousePosition, RenderSnapshot, Rgba, SearchHighlight, TerminalClipboardSelection,
     TerminalClipboardWrite, TerminalColorTheme, TerminalHostAction, TerminalHyperlink,
-    TerminalInputModes, TerminalMouseEvent,
+    TerminalInputModes, TerminalMouseEvent, KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
 };
 use witty_launcher::open_external_url;
 use witty_plugin_api::{CommandRegistration, PluginAction, PluginEvent};
@@ -12201,6 +12201,10 @@ impl TerminalKeyModifiers {
         !self.control && !self.shift && !self.alt && !self.meta
     }
 
+    fn is_empty(self) -> bool {
+        !self.control && !self.shift && !self.alt && !self.meta
+    }
+
     fn xterm_parameter(self) -> Option<u8> {
         if self.meta {
             return None;
@@ -12218,6 +12222,23 @@ impl TerminalKeyModifiers {
         }
 
         (parameter > 1).then_some(parameter)
+    }
+
+    fn kitty_parameter(self) -> u16 {
+        let mut bits = 0;
+        if self.shift {
+            bits |= 1;
+        }
+        if self.alt {
+            bits |= 2;
+        }
+        if self.control {
+            bits |= 4;
+        }
+        if self.meta {
+            bits |= 8;
+        }
+        bits + 1
     }
 }
 
@@ -12248,6 +12269,12 @@ fn encode_terminal_key_input(
 ) -> Option<Vec<u8>> {
     if modes.keyboard_locked {
         return None;
+    }
+
+    if kitty_keyboard_disambiguate_enabled(modes) {
+        if let Some(bytes) = kitty_disambiguated_key_sequence(input) {
+            return Some(bytes);
+        }
     }
 
     if modes.application_keypad && input.modifiers.allows_application_keypad() {
@@ -12291,6 +12318,51 @@ fn encode_terminal_key_input(
         Key::Named(NamedKey::F12) => Some(csi_tilde_sequence(24)),
         Key::Character(value) if input.modifiers.control => encode_control_character(value),
         _ => input.text.and_then(non_empty_bytes),
+    }
+}
+
+fn kitty_keyboard_disambiguate_enabled(modes: TerminalInputModes) -> bool {
+    modes.kitty_keyboard_flags & KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES != 0
+}
+
+fn kitty_disambiguated_key_sequence(input: TerminalKeyInput<'_>) -> Option<Vec<u8>> {
+    match input.logical_key {
+        Key::Named(NamedKey::Escape) => Some(kitty_csi_u_sequence(27, input.modifiers)),
+        Key::Named(NamedKey::Enter) if !input.modifiers.is_empty() => {
+            Some(kitty_csi_u_sequence(13, input.modifiers))
+        }
+        Key::Named(NamedKey::Tab) if !input.modifiers.is_empty() => {
+            Some(kitty_csi_u_sequence(9, input.modifiers))
+        }
+        Key::Named(NamedKey::Backspace) if !input.modifiers.is_empty() => {
+            Some(kitty_csi_u_sequence(127, input.modifiers))
+        }
+        Key::Character(value)
+            if input.modifiers.control || input.modifiers.alt || input.modifiers.meta =>
+        {
+            kitty_character_key_code(value)
+                .map(|key_code| kitty_csi_u_sequence(key_code, input.modifiers))
+        }
+        _ => None,
+    }
+}
+
+fn kitty_character_key_code(value: &str) -> Option<u32> {
+    let ch = value.chars().next()?;
+    let ch = if ch.is_ascii_alphabetic() {
+        ch.to_ascii_lowercase()
+    } else {
+        ch
+    };
+    Some(ch as u32)
+}
+
+fn kitty_csi_u_sequence(key_code: u32, modifiers: TerminalKeyModifiers) -> Vec<u8> {
+    let modifier_parameter = modifiers.kitty_parameter();
+    if modifier_parameter == 1 {
+        format!("\x1b[{key_code}u").into_bytes()
+    } else {
+        format!("\x1b[{key_code};{modifier_parameter}u").into_bytes()
     }
 }
 
@@ -17187,6 +17259,78 @@ mod tests {
                 TerminalInputModes::default()
             ),
             Some(vec![0x1b])
+        );
+    }
+
+    #[test]
+    fn key_encoder_uses_kitty_csi_u_when_disambiguation_is_enabled() {
+        let modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+            ..TerminalInputModes::default()
+        };
+        let control = TerminalKeyModifiers {
+            control: true,
+            ..TerminalKeyModifiers::default()
+        };
+        let shift_control = TerminalKeyModifiers {
+            shift: true,
+            control: true,
+            ..TerminalKeyModifiers::default()
+        };
+        let alt = TerminalKeyModifiers {
+            alt: true,
+            ..TerminalKeyModifiers::default()
+        };
+        let shift = TerminalKeyModifiers {
+            shift: true,
+            ..TerminalKeyModifiers::default()
+        };
+
+        assert_eq!(
+            encode_key_input_with_modifiers(&Key::Character("i".into()), Some("i"), control, modes),
+            Some(b"\x1b[105;5u".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_modifiers(
+                &Key::Character("I".into()),
+                Some("I"),
+                shift_control,
+                modes,
+            ),
+            Some(b"\x1b[105;6u".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_modifiers(&Key::Character("a".into()), Some("a"), alt, modes),
+            Some(b"\x1b[97;3u".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_modifiers(&Key::Named(NamedKey::Escape), None, shift, modes),
+            Some(b"\x1b[27;2u".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_modifiers(&Key::Named(NamedKey::Enter), None, control, modes),
+            Some(b"\x1b[13;5u".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_modifiers(&Key::Named(NamedKey::Tab), None, shift, modes),
+            Some(b"\x1b[9;2u".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_modifiers(&Key::Named(NamedKey::Backspace), None, control, modes),
+            Some(b"\x1b[127;5u".to_vec())
+        );
+    }
+
+    #[test]
+    fn key_encoder_keeps_legacy_control_characters_until_kitty_protocol_is_enabled() {
+        assert_eq!(
+            encode_key_input(
+                &Key::Character("i".into()),
+                Some("i"),
+                true,
+                TerminalInputModes::default(),
+            ),
+            Some(vec![0x09])
         );
     }
 

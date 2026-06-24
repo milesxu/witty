@@ -22,7 +22,9 @@ use witty_core::{
     MouseButtonCode, MouseEventKind, MouseModifiers, PixelMousePosition, Rgba, TerminalHyperlink,
     TerminalMouseEvent, TerminalMouseModes, TerminalScreen,
 };
-use witty_core::{BasicTerminal, GridSize, TerminalInputModes};
+use witty_core::{
+    BasicTerminal, GridSize, TerminalInputModes, KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+};
 #[cfg(test)]
 use witty_core::{TerminalRowAnchor, TerminalVisibleRowAnchor};
 use witty_plugin_api::{
@@ -2892,6 +2894,10 @@ impl BrowserKeyModifiers {
         !self.control && !self.shift && !self.alt && !self.meta
     }
 
+    fn is_empty(self) -> bool {
+        !self.control && !self.shift && !self.alt && !self.meta
+    }
+
     fn xterm_parameter(self) -> Option<u8> {
         if self.meta {
             return None;
@@ -2909,6 +2915,23 @@ impl BrowserKeyModifiers {
         }
 
         (parameter > 1).then_some(parameter)
+    }
+
+    fn kitty_parameter(self) -> u16 {
+        let mut bits = 0;
+        if self.shift {
+            bits |= 1;
+        }
+        if self.alt {
+            bits |= 2;
+        }
+        if self.control {
+            bits |= 4;
+        }
+        if self.meta {
+            bits |= 8;
+        }
+        bits + 1
     }
 }
 
@@ -2939,6 +2962,12 @@ fn encode_browser_terminal_key_input(
 ) -> Option<Vec<u8>> {
     if modes.keyboard_locked {
         return None;
+    }
+
+    if browser_kitty_keyboard_disambiguate_enabled(modes) {
+        if let Some(bytes) = browser_kitty_disambiguated_key_sequence(input) {
+            return Some(bytes);
+        }
     }
 
     if modes.application_keypad && input.modifiers.allows_application_keypad() {
@@ -2986,6 +3015,49 @@ fn encode_browser_terminal_key_input(
         _ if input.modifiers.control => encode_browser_control_character(input.key),
         _ if !input.text.is_empty() => Some(input.text.as_bytes().to_vec()),
         _ => None,
+    }
+}
+
+fn browser_kitty_keyboard_disambiguate_enabled(modes: TerminalInputModes) -> bool {
+    modes.kitty_keyboard_flags & KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES != 0
+}
+
+fn browser_kitty_disambiguated_key_sequence(input: BrowserTerminalKeyInput<'_>) -> Option<Vec<u8>> {
+    match input.key {
+        "Escape" => Some(browser_kitty_csi_u_sequence(27, input.modifiers)),
+        "Enter" if !input.modifiers.is_empty() => {
+            Some(browser_kitty_csi_u_sequence(13, input.modifiers))
+        }
+        "Tab" if !input.modifiers.is_empty() => {
+            Some(browser_kitty_csi_u_sequence(9, input.modifiers))
+        }
+        "Backspace" if !input.modifiers.is_empty() => {
+            Some(browser_kitty_csi_u_sequence(127, input.modifiers))
+        }
+        _ if input.modifiers.control || input.modifiers.alt || input.modifiers.meta => {
+            browser_kitty_character_key_code(input.key)
+                .map(|key_code| browser_kitty_csi_u_sequence(key_code, input.modifiers))
+        }
+        _ => None,
+    }
+}
+
+fn browser_kitty_character_key_code(value: &str) -> Option<u32> {
+    let ch = value.chars().next()?;
+    let ch = if ch.is_ascii_alphabetic() {
+        ch.to_ascii_lowercase()
+    } else {
+        ch
+    };
+    Some(ch as u32)
+}
+
+fn browser_kitty_csi_u_sequence(key_code: u32, modifiers: BrowserKeyModifiers) -> Vec<u8> {
+    let modifier_parameter = modifiers.kitty_parameter();
+    if modifier_parameter == 1 {
+        format!("\x1b[{key_code}u").into_bytes()
+    } else {
+        format!("\x1b[{key_code};{modifier_parameter}u").into_bytes()
     }
 }
 
@@ -5893,6 +5965,68 @@ mod tests {
                 TerminalInputModes::default(),
             ),
             Some(b"\x1b[A".to_vec())
+        );
+    }
+
+    #[test]
+    fn browser_key_input_uses_kitty_csi_u_when_disambiguation_is_enabled() {
+        let modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+            ..TerminalInputModes::default()
+        };
+        let control = BrowserKeyModifiers {
+            control: true,
+            ..BrowserKeyModifiers::default()
+        };
+        let shift_control = BrowserKeyModifiers {
+            shift: true,
+            control: true,
+            ..BrowserKeyModifiers::default()
+        };
+        let alt = BrowserKeyModifiers {
+            alt: true,
+            ..BrowserKeyModifiers::default()
+        };
+        let shift = BrowserKeyModifiers {
+            shift: true,
+            ..BrowserKeyModifiers::default()
+        };
+
+        assert_eq!(
+            encode_browser_key_input_with_metadata("i", "i", control, "", 0, modes),
+            Some(b"\x1b[105;5u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata("I", "I", shift_control, "", 0, modes),
+            Some(b"\x1b[105;6u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata("a", "a", alt, "", 0, modes),
+            Some(b"\x1b[97;3u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata("Escape", "", shift, "", 0, modes),
+            Some(b"\x1b[27;2u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata("Enter", "", control, "", 0, modes),
+            Some(b"\x1b[13;5u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata("Tab", "", shift, "", 0, modes),
+            Some(b"\x1b[9;2u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata("Backspace", "", control, "", 0, modes),
+            Some(b"\x1b[127;5u".to_vec())
+        );
+    }
+
+    #[test]
+    fn browser_key_input_keeps_legacy_control_characters_until_kitty_protocol_is_enabled() {
+        assert_eq!(
+            encode_browser_key_input("i", "i", true, TerminalInputModes::default()),
+            Some(vec![0x09])
         );
     }
 
