@@ -2740,6 +2740,15 @@ client surface while preserving the native/browser transport split.
      codepoints omit that field. This keeps associated text tied to all-keys
      CSI-u mode and avoids adding release/repeat event-type semantics before
      the platform event path is ready. See `terminal-kitty-keyboard-protocol.md`.
+372. `m690-terminal-kitty-event-types`
+   - done. Added Kitty keyboard protocol flag `2` (`REPORT_EVENT_TYPES`) to
+     core flag state and native/browser input encoders. CSI-u keys now include
+     `:1`, `:2`, or `:3` in the modifier parameter for press, repeat, and
+     release events when the flag is active. `Enter`, `Tab`, and `Backspace`
+     release reporting stays gated by flag `8`, matching the existing boundary
+     where those keys remain legacy under flag `1` alone. Browser input now
+     forwards keydown repeat and keyup metadata into the shared encoder. See
+     `terminal-kitty-keyboard-protocol.md`.
 
 ## Non-Goals For This Line
 

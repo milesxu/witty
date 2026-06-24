@@ -2755,6 +2755,7 @@ async function main() {
       (event.shiftKey ? 1 : 0) |
       (event.altKey ? 2 : 0) |
       (event.metaKey ? 4 : 0);
+    const eventType = event.repeat ? 2 : 1;
     const handled = session.handle_key(
       event.key,
       text,
@@ -2762,6 +2763,7 @@ async function main() {
       event.code || "",
       event.location || 0,
       modifierMask,
+      eventType,
     );
     if (handled) {
       flushGatewayInput(session);
@@ -2777,8 +2779,51 @@ async function main() {
     }
   }
 
+  function handleTerminalKeyup(event) {
+    if (window.wittyImeComposing || event.isComposing || event.key === "Process") {
+      return;
+    }
+
+    if (
+      session.command_palette_is_open() ||
+      session.command_block_action_menu_is_open() ||
+      session.search_is_open() ||
+      isSearchShortcut(event) ||
+      isCommandPaletteShortcut(event) ||
+      isCopySelectionShortcut(event) ||
+      isPasteClipboardShortcut(event)
+    ) {
+      return;
+    }
+
+    const modifierMask =
+      (event.shiftKey ? 1 : 0) |
+      (event.altKey ? 2 : 0) |
+      (event.metaKey ? 4 : 0);
+    const handled = session.handle_key(
+      event.key,
+      "",
+      event.ctrlKey,
+      event.code || "",
+      event.location || 0,
+      modifierMask,
+      3,
+    );
+    if (handled) {
+      flushGatewayInput(session);
+      event.preventDefault();
+      syncImeInputPosition(session, canvas, imeInput);
+      setStatus(
+        "ok",
+        `rendered; glyph_chars=${glyphChars}; written_bytes=${session.written_bytes()}`,
+      );
+    }
+  }
+
   canvas.addEventListener("keydown", handleTerminalKeydown);
+  canvas.addEventListener("keyup", handleTerminalKeyup);
   imeInput.addEventListener("keydown", handleTerminalKeydown);
+  imeInput.addEventListener("keyup", handleTerminalKeyup);
 
   let localMouseSelectionActive = false;
 

@@ -20,6 +20,7 @@ Reference: <https://sw.kovidgoyal.net/kitty/keyboard-protocol/>
 Supported flags:
 
 - `1`: `DISAMBIGUATE_ESC_CODES`
+- `2`: `REPORT_EVENT_TYPES`
 - `8`: `REPORT_ALL_KEYS_AS_ESC_CODES`
 - `16`: `REPORT_ASSOCIATED_TEXT`
 
@@ -62,13 +63,33 @@ Associated text is omitted for `Ctrl`/`Meta` key combinations and omitted when
 the text contains C0, DEL, or C1 control codepoints. `REPORT_ASSOCIATED_TEXT`
 has no effect unless `REPORT_ALL_KEYS_AS_ESC_CODES` is also active.
 
+With flag `2`, Witty reports Kitty event types on the CSI-u keys it already
+encodes:
+
+- key press -> second parameter sub-field `:1`
+- key repeat -> second parameter sub-field `:2`
+- key release -> second parameter sub-field `:3`
+
+Examples:
+
+- flags `1|2`, `Ctrl-I` press -> `CSI 105;5:1u`
+- flags `1|2`, `Ctrl-I` repeat -> `CSI 105;5:2u`
+- flags `1|2`, `Ctrl-I` release -> `CSI 105;5:3u`
+- flags `8|2`, `a` press -> `CSI 97;1:1u`
+- flags `8|2`, `a` release -> `CSI 97;1:3u`
+- flags `8|2`, `Ctrl-Enter` release -> `CSI 13;5:3u`
+- flags `8|16|2`, `a` press -> `CSI 97;1:1;97u`
+
+`Enter`, `Tab`, and `Backspace` releases are reported only when flag `8` is
+also active, because flag `1` alone keeps those keys on legacy byte sequences.
+Plain text release events are likewise tied to flag `8`.
+
 Navigation, function, and keypad keys continue through the existing xterm/VT
 escape-code encoders. Modified navigation/function keys keep xterm modifier
 parameters such as `CSI 1;5A`.
 
 ## Deferred
 
-- Event type reporting.
 - Alternate key reporting.
 - Precise physical-key fallback for shifted symbols.
 - Kitty graphics/image protocol.
