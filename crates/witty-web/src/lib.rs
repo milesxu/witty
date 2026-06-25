@@ -3059,6 +3059,17 @@ enum BrowserKeypadKey {
     Divide,
     Enter,
     Equal,
+    Left,
+    Right,
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+    Insert,
+    Delete,
+    Begin,
 }
 
 impl BrowserKeypadKey {
@@ -3073,6 +3084,17 @@ impl BrowserKeypadKey {
             Self::Enter => 57414,
             Self::Equal => 57415,
             Self::Comma => 57416,
+            Self::Left => 57417,
+            Self::Right => 57418,
+            Self::Up => 57419,
+            Self::Down => 57420,
+            Self::PageUp => 57421,
+            Self::PageDown => 57422,
+            Self::Home => 57423,
+            Self::End => 57424,
+            Self::Insert => 57425,
+            Self::Delete => 57426,
+            Self::Begin => 57427,
         }
     }
 }
@@ -3917,6 +3939,12 @@ fn browser_keypad_key_from_event(
     code: &str,
     location: u32,
 ) -> Option<BrowserKeypadKey> {
+    if let Some(keypad_key) = browser_keypad_navigation_key(key) {
+        if location == 3 || browser_is_numpad_code(code) {
+            return Some(keypad_key);
+        }
+    }
+
     if let Some(keypad_key) = browser_keypad_key_from_code(code) {
         return Some(keypad_key);
     }
@@ -3926,6 +3954,42 @@ fn browser_keypad_key_from_event(
     }
 
     browser_keypad_key_from_text(key).or_else(|| browser_keypad_key_from_text(text))
+}
+
+fn browser_keypad_navigation_key(key: &str) -> Option<BrowserKeypadKey> {
+    match key {
+        "ArrowLeft" => Some(BrowserKeypadKey::Left),
+        "ArrowRight" => Some(BrowserKeypadKey::Right),
+        "ArrowUp" => Some(BrowserKeypadKey::Up),
+        "ArrowDown" => Some(BrowserKeypadKey::Down),
+        "PageUp" => Some(BrowserKeypadKey::PageUp),
+        "PageDown" => Some(BrowserKeypadKey::PageDown),
+        "Home" => Some(BrowserKeypadKey::Home),
+        "End" => Some(BrowserKeypadKey::End),
+        "Insert" => Some(BrowserKeypadKey::Insert),
+        "Delete" => Some(BrowserKeypadKey::Delete),
+        "Clear" => Some(BrowserKeypadKey::Begin),
+        _ => None,
+    }
+}
+
+fn browser_is_numpad_code(code: &str) -> bool {
+    browser_keypad_key_from_code(code).is_some()
+        || matches!(
+            code,
+            "NumpadBackspace"
+                | "NumpadClear"
+                | "NumpadClearEntry"
+                | "NumpadHash"
+                | "NumpadMemoryAdd"
+                | "NumpadMemoryClear"
+                | "NumpadMemoryRecall"
+                | "NumpadMemoryStore"
+                | "NumpadMemorySubtract"
+                | "NumpadParenLeft"
+                | "NumpadParenRight"
+                | "NumpadStar"
+        )
 }
 
 fn browser_keypad_key_from_code(code: &str) -> Option<BrowserKeypadKey> {
@@ -3995,7 +4059,19 @@ fn browser_application_keypad_sequence(keypad_key: BrowserKeypadKey) -> Option<V
         BrowserKeypadKey::Decimal => b'n',
         BrowserKeypadKey::Divide => b'o',
         BrowserKeypadKey::Enter => b'M',
-        BrowserKeypadKey::Equal | BrowserKeypadKey::Digit(_) => return None,
+        BrowserKeypadKey::Equal
+        | BrowserKeypadKey::Left
+        | BrowserKeypadKey::Right
+        | BrowserKeypadKey::Up
+        | BrowserKeypadKey::Down
+        | BrowserKeypadKey::PageUp
+        | BrowserKeypadKey::PageDown
+        | BrowserKeypadKey::Home
+        | BrowserKeypadKey::End
+        | BrowserKeypadKey::Insert
+        | BrowserKeypadKey::Delete
+        | BrowserKeypadKey::Begin
+        | BrowserKeypadKey::Digit(_) => return None,
     };
     Some(browser_ss3_sequence(final_byte))
 }
@@ -7565,6 +7641,28 @@ mod tests {
                 modes,
             ),
             Some(b"\x1b[57414u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata(
+                "ArrowLeft",
+                "",
+                BrowserKeyModifiers::default(),
+                "Numpad4",
+                3,
+                modes,
+            ),
+            Some(b"\x1b[57417u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata(
+                "ArrowLeft",
+                "",
+                BrowserKeyModifiers::default(),
+                "Numpad4",
+                3,
+                TerminalInputModes::default(),
+            ),
+            Some(b"\x1b[D".to_vec())
         );
     }
 

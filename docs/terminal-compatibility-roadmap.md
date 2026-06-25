@@ -2796,6 +2796,12 @@ client surface while preserving the native/browser transport split.
      `KeyboardEvent.code`/`location`; browser `Meta` continues to map to Kitty
      `Super`, preserving DOM semantics for Windows/Command keys. Generic
      modifier events without side metadata remain unreported.
+378. `m702-terminal-kitty-keypad-navigation-codes`
+   - done. Added Kitty keypad navigation reporting for native and browser
+     input. When flags `1` or `8` are active and the platform identifies a
+     numpad source, NumLock-off navigation keys now map to Kitty `KP_LEFT`
+     through `KP_BEGIN` codes, such as `KP_LEFT` -> `CSI 57417u`. Legacy xterm
+     navigation remains unchanged when Kitty keyboard mode is inactive.
 
 ## Non-Goals For This Line
 

@@ -261,15 +261,16 @@ such as Neovim. It tracks Kitty keyboard flags and supports
 `REPORT_ALTERNATE_KEYS` (`4`), `REPORT_ALL_KEYS_AS_ESC_CODES` (`8`), and
 `REPORT_ASSOCIATED_TEXT` (`16`) across native and browser input paths. Flag
 `1` disambiguates combinations such as `Ctrl-I` and keypad-vs-top-row keys
-without changing legacy `Enter`, `Tab`, and `Backspace`; flag `2` adds Kitty
+without changing legacy `Enter`, `Tab`, and `Backspace`; keypad reporting also
+distinguishes NumLock-off navigation such as `KP_LEFT`. Flag `2` adds Kitty
 press/repeat/release event sub-fields to CSI-u keys and functional-key escape
 forms; flag `4` adds shifted and physical base-key sub-fields for character
 keys; flag `8` also reports text keys and those legacy C0 keys plus left/right
 modifier-key events as CSI-u. Witty also reports Kitty PUA functional key codes
 for keys such as `F13`-`F35`, lock keys, media keys, volume keys, sided Hyper
-keys, native sided Meta keys, and `AltGraph` when Kitty keyboard mode is
-active. Flag `16` adds safe associated text codepoints when flag `8` is active.
-Kitty graphics/image protocols are not part of this support. See
+keys, native sided Meta keys, and `AltGraph` when Kitty keyboard mode is active.
+Flag `16` adds safe associated text codepoints when flag `8` is active. Kitty
+graphics/image protocols are not part of this support. See
 `docs/terminal-kitty-keyboard-protocol.md`.
 
 The session tab strip is hidden by default so it never covers shell output or a

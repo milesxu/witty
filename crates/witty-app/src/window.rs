@@ -12423,6 +12423,17 @@ enum KeypadKey {
     Divide,
     Enter,
     Equal,
+    Left,
+    Right,
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+    Insert,
+    Delete,
+    Begin,
 }
 
 impl KeypadKey {
@@ -12437,6 +12448,17 @@ impl KeypadKey {
             Self::Enter => 57414,
             Self::Equal => 57415,
             Self::Comma => 57416,
+            Self::Left => 57417,
+            Self::Right => 57418,
+            Self::Up => 57419,
+            Self::Down => 57420,
+            Self::PageUp => 57421,
+            Self::PageDown => 57422,
+            Self::Home => 57423,
+            Self::End => 57424,
+            Self::Insert => 57425,
+            Self::Delete => 57426,
+            Self::Begin => 57427,
         }
     }
 }
@@ -13245,6 +13267,14 @@ fn shifted_us_layout_key(base: char) -> Option<char> {
 }
 
 fn keypad_key_from_winit_event(event: &KeyEvent) -> Option<KeypadKey> {
+    if let Some(keypad_key) = keypad_navigation_key_from_named(&event.logical_key) {
+        if event.location == KeyLocation::Numpad
+            || matches!(event.physical_key, PhysicalKey::Code(code) if is_numpad_key_code(code))
+        {
+            return Some(keypad_key);
+        }
+    }
+
     if let PhysicalKey::Code(code) = &event.physical_key {
         if let Some(keypad_key) = keypad_key_from_winit_key_code(*code) {
             return Some(keypad_key);
@@ -13265,9 +13295,46 @@ fn keypad_key_from_winit_location(
 
     match logical_key {
         Key::Named(NamedKey::Enter) => Some(KeypadKey::Enter),
+        Key::Named(_) => keypad_navigation_key_from_named(logical_key),
         Key::Character(value) => keypad_key_from_text(value),
         _ => text.and_then(keypad_key_from_text),
     }
+}
+
+fn keypad_navigation_key_from_named(logical_key: &Key) -> Option<KeypadKey> {
+    match logical_key {
+        Key::Named(NamedKey::ArrowLeft) => Some(KeypadKey::Left),
+        Key::Named(NamedKey::ArrowRight) => Some(KeypadKey::Right),
+        Key::Named(NamedKey::ArrowUp) => Some(KeypadKey::Up),
+        Key::Named(NamedKey::ArrowDown) => Some(KeypadKey::Down),
+        Key::Named(NamedKey::PageUp) => Some(KeypadKey::PageUp),
+        Key::Named(NamedKey::PageDown) => Some(KeypadKey::PageDown),
+        Key::Named(NamedKey::Home) => Some(KeypadKey::Home),
+        Key::Named(NamedKey::End) => Some(KeypadKey::End),
+        Key::Named(NamedKey::Insert) => Some(KeypadKey::Insert),
+        Key::Named(NamedKey::Delete) => Some(KeypadKey::Delete),
+        Key::Named(NamedKey::Clear) => Some(KeypadKey::Begin),
+        _ => None,
+    }
+}
+
+fn is_numpad_key_code(code: KeyCode) -> bool {
+    keypad_key_from_winit_key_code(code).is_some()
+        || matches!(
+            code,
+            KeyCode::NumpadBackspace
+                | KeyCode::NumpadClear
+                | KeyCode::NumpadClearEntry
+                | KeyCode::NumpadHash
+                | KeyCode::NumpadMemoryAdd
+                | KeyCode::NumpadMemoryClear
+                | KeyCode::NumpadMemoryRecall
+                | KeyCode::NumpadMemoryStore
+                | KeyCode::NumpadMemorySubtract
+                | KeyCode::NumpadParenLeft
+                | KeyCode::NumpadParenRight
+                | KeyCode::NumpadStar
+        )
 }
 
 fn keypad_key_from_winit_key_code(code: KeyCode) -> Option<KeypadKey> {
@@ -13336,7 +13403,19 @@ fn application_keypad_sequence(keypad_key: KeypadKey) -> Option<Vec<u8>> {
         KeypadKey::Decimal => b'n',
         KeypadKey::Divide => b'o',
         KeypadKey::Enter => b'M',
-        KeypadKey::Equal | KeypadKey::Digit(_) => return None,
+        KeypadKey::Equal
+        | KeypadKey::Left
+        | KeypadKey::Right
+        | KeypadKey::Up
+        | KeypadKey::Down
+        | KeypadKey::PageUp
+        | KeypadKey::PageDown
+        | KeypadKey::Home
+        | KeypadKey::End
+        | KeypadKey::Insert
+        | KeypadKey::Delete
+        | KeypadKey::Begin
+        | KeypadKey::Digit(_) => return None,
     };
     Some(ss3_sequence(final_byte))
 }
@@ -18036,6 +18115,15 @@ mod tests {
             modifier_key: None,
             event_type: TerminalKeyEventType::Press,
         };
+        let keypad_left = TerminalKeyInput {
+            logical_key: &Key::Named(NamedKey::ArrowLeft),
+            text: None,
+            modifiers: TerminalKeyModifiers::default(),
+            keypad_key: Some(KeypadKey::Left),
+            base_layout_key: None,
+            modifier_key: None,
+            event_type: TerminalKeyEventType::Press,
+        };
 
         assert_eq!(
             encode_key_input_with_modifiers(
@@ -18053,6 +18141,14 @@ mod tests {
         assert_eq!(
             encode_terminal_key_input(keypad_enter, modes),
             Some(b"\x1b[57414u".to_vec())
+        );
+        assert_eq!(
+            encode_terminal_key_input(keypad_left, modes),
+            Some(b"\x1b[57417u".to_vec())
+        );
+        assert_eq!(
+            encode_terminal_key_input(keypad_left, TerminalInputModes::default()),
+            Some(b"\x1b[D".to_vec())
         );
     }
 
@@ -18176,6 +18272,22 @@ mod tests {
         assert_eq!(
             keypad_key_from_winit_location(&enter, None, KeyLocation::Numpad),
             Some(KeypadKey::Enter)
+        );
+        assert_eq!(
+            keypad_key_from_winit_location(
+                &Key::Named(NamedKey::ArrowLeft),
+                None,
+                KeyLocation::Numpad
+            ),
+            Some(KeypadKey::Left)
+        );
+        assert_eq!(
+            keypad_key_from_winit_location(
+                &Key::Named(NamedKey::ArrowLeft),
+                None,
+                KeyLocation::Standard
+            ),
+            None
         );
     }
 

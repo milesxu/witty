@@ -54,10 +54,14 @@ With flag `8`, Witty additionally reports text-producing keys plus `Enter`,
 - `Ctrl-Backspace` -> `CSI 127;5u`
 - text with no single known key -> `CSI 0u`
 - keypad decimal with flags `8|16` -> `CSI 57409;;46u`
+- keypad left arrow with flags `8` -> `CSI 57417u`
 
 Keypad keys that native `winit` or browser metadata identifies as numpad input
-use Kitty `KP_*` functional key codes under flags `1` or `8`. Ordinary top-row
-digits remain ordinary text unless another Kitty rule applies.
+use Kitty `KP_*` functional key codes under flags `1` or `8`. This includes
+numeric keypad digits/operators and NumLock-off navigation semantics such as
+`KP_LEFT`, `KP_PAGE_UP`, and `KP_BEGIN`. Ordinary top-row digits and main
+navigation keys remain ordinary text or xterm navigation unless another Kitty
+rule applies.
 
 Flag `8` also reports physical modifier keys when native `winit` or browser
 keyboard metadata identifies the left/right key:
