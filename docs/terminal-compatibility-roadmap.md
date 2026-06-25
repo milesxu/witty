@@ -2788,6 +2788,14 @@ client surface while preserving the native/browser transport split.
      Kitty keyboard mode is inactive; Meta-modified functional keys use Kitty
      functional forms when Kitty mode is active because the xterm fallback has
      no Meta modifier parameter.
+377. `m700-terminal-kitty-hyper-meta-modifiers`
+   - done. Extended Kitty modifier-key reporting for native and browser input.
+     Native input now reports sided `Hyper` and sided `NamedKey::Meta` when
+     `winit` supplies left/right `KeyLocation`, using Kitty modifier bits
+     `Hyper=16` and `Meta=32`. Browser input reports sided `Hyper` from
+     `KeyboardEvent.code`/`location`; browser `Meta` continues to map to Kitty
+     `Super`, preserving DOM semantics for Windows/Command keys. Generic
+     modifier events without side metadata remain unreported.
 
 ## Non-Goals For This Line
 

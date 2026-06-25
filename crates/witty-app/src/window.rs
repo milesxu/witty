@@ -12273,6 +12273,8 @@ struct TerminalKeyModifiers {
     shift: bool,
     alt: bool,
     meta: bool,
+    hyper: bool,
+    kitty_meta: bool,
 }
 
 impl TerminalKeyModifiers {
@@ -12282,6 +12284,8 @@ impl TerminalKeyModifiers {
             shift: modifiers.shift_key(),
             alt: modifiers.alt_key(),
             meta: modifiers.super_key(),
+            hyper: false,
+            kitty_meta: false,
         }
     }
 
@@ -12312,15 +12316,26 @@ impl TerminalKeyModifiers {
                 self.control = active
             }
             TerminalModifierKey::LeftSuper | TerminalModifierKey::RightSuper => self.meta = active,
+            TerminalModifierKey::LeftHyper | TerminalModifierKey::RightHyper => {
+                self.hyper = active
+            }
+            TerminalModifierKey::LeftMeta | TerminalModifierKey::RightMeta => {
+                self.kitty_meta = active
+            }
         }
     }
 
     fn allows_application_keypad(self) -> bool {
-        !self.control && !self.shift && !self.alt && !self.meta
+        !self.control
+            && !self.shift
+            && !self.alt
+            && !self.meta
+            && !self.hyper
+            && !self.kitty_meta
     }
 
     fn xterm_parameter(self) -> Option<u8> {
-        if self.meta {
+        if self.meta || self.hyper || self.kitty_meta {
             return None;
         }
 
@@ -12352,6 +12367,12 @@ impl TerminalKeyModifiers {
         if self.meta {
             bits |= 8;
         }
+        if self.hyper {
+            bits |= 16;
+        }
+        if self.kitty_meta {
+            bits |= 32;
+        }
         bits + 1
     }
 }
@@ -12366,6 +12387,10 @@ enum TerminalModifierKey {
     RightControl,
     LeftSuper,
     RightSuper,
+    LeftHyper,
+    RightHyper,
+    LeftMeta,
+    RightMeta,
 }
 
 impl TerminalModifierKey {
@@ -12375,10 +12400,14 @@ impl TerminalModifierKey {
             Self::LeftControl => 57442,
             Self::LeftAlt => 57443,
             Self::LeftSuper => 57444,
+            Self::LeftHyper => 57445,
+            Self::LeftMeta => 57446,
             Self::RightShift => 57447,
             Self::RightControl => 57448,
             Self::RightAlt => 57449,
             Self::RightSuper => 57450,
+            Self::RightHyper => 57451,
+            Self::RightMeta => 57452,
         }
     }
 }
@@ -13118,6 +13147,10 @@ fn modifier_key_from_winit_location(
         }
         (Key::Named(NamedKey::Super), KeyLocation::Left) => Some(TerminalModifierKey::LeftSuper),
         (Key::Named(NamedKey::Super), KeyLocation::Right) => Some(TerminalModifierKey::RightSuper),
+        (Key::Named(NamedKey::Hyper), KeyLocation::Left) => Some(TerminalModifierKey::LeftHyper),
+        (Key::Named(NamedKey::Hyper), KeyLocation::Right) => Some(TerminalModifierKey::RightHyper),
+        (Key::Named(NamedKey::Meta), KeyLocation::Left) => Some(TerminalModifierKey::LeftMeta),
+        (Key::Named(NamedKey::Meta), KeyLocation::Right) => Some(TerminalModifierKey::RightMeta),
         _ => None,
     }
 }
@@ -18166,6 +18199,14 @@ mod tests {
             Some(TerminalModifierKey::RightControl)
         );
         assert_eq!(
+            modifier_key_from_winit_location(&Key::Named(NamedKey::Hyper), KeyLocation::Left),
+            Some(TerminalModifierKey::LeftHyper)
+        );
+        assert_eq!(
+            modifier_key_from_winit_location(&Key::Named(NamedKey::Meta), KeyLocation::Right),
+            Some(TerminalModifierKey::RightMeta)
+        );
+        assert_eq!(
             modifier_key_from_winit_location(&Key::Named(NamedKey::Shift), KeyLocation::Standard),
             None
         );
@@ -18326,6 +18367,8 @@ mod tests {
         let shift_key = Key::Named(NamedKey::Shift);
         let control_key = Key::Named(NamedKey::Control);
         let super_key = Key::Named(NamedKey::Super);
+        let hyper_key = Key::Named(NamedKey::Hyper);
+        let meta_key = Key::Named(NamedKey::Meta);
 
         assert_eq!(
             encode_terminal_key_input(
@@ -18377,6 +18420,42 @@ mod tests {
                 event_type_modes,
             ),
             Some(b"\x1b[57450;1:3u".to_vec())
+        );
+        assert_eq!(
+            encode_terminal_key_input(
+                TerminalKeyInput {
+                    logical_key: &hyper_key,
+                    text: None,
+                    modifiers: TerminalKeyModifiers {
+                        hyper: true,
+                        ..TerminalKeyModifiers::default()
+                    },
+                    keypad_key: None,
+                    base_layout_key: None,
+                    modifier_key: Some(TerminalModifierKey::LeftHyper),
+                    event_type: TerminalKeyEventType::Press,
+                },
+                all_keys_modes,
+            ),
+            Some(b"\x1b[57445;17u".to_vec())
+        );
+        assert_eq!(
+            encode_terminal_key_input(
+                TerminalKeyInput {
+                    logical_key: &meta_key,
+                    text: None,
+                    modifiers: TerminalKeyModifiers {
+                        kitty_meta: true,
+                        ..TerminalKeyModifiers::default()
+                    },
+                    keypad_key: None,
+                    base_layout_key: None,
+                    modifier_key: Some(TerminalModifierKey::RightMeta),
+                    event_type: TerminalKeyEventType::Press,
+                },
+                all_keys_modes,
+            ),
+            Some(b"\x1b[57452;33u".to_vec())
         );
         assert_eq!(
             encode_terminal_key_input(

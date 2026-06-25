@@ -2933,6 +2933,7 @@ struct BrowserKeyModifiers {
     shift: bool,
     alt: bool,
     meta: bool,
+    hyper: bool,
 }
 
 impl BrowserKeyModifiers {
@@ -2943,11 +2944,16 @@ impl BrowserKeyModifiers {
             shift: mask & 0b001 != 0,
             alt: mask & 0b010 != 0,
             meta: mask & 0b100 != 0,
+            hyper: false,
         }
     }
 
     fn allows_application_keypad(self) -> bool {
-        !self.control && !self.shift && !self.alt && !self.meta
+        !self.control
+            && !self.shift
+            && !self.alt
+            && !self.meta
+            && !self.hyper
     }
 
     fn with_modifier_key_event_state(
@@ -2966,12 +2972,13 @@ impl BrowserKeyModifiers {
                 self.control = active
             }
             BrowserModifierKey::LeftSuper | BrowserModifierKey::RightSuper => self.meta = active,
+            BrowserModifierKey::LeftHyper | BrowserModifierKey::RightHyper => self.hyper = active,
         }
         self
     }
 
     fn xterm_parameter(self) -> Option<u8> {
-        if self.meta {
+        if self.meta || self.hyper {
             return None;
         }
 
@@ -3003,6 +3010,9 @@ impl BrowserKeyModifiers {
         if self.meta {
             bits |= 8;
         }
+        if self.hyper {
+            bits |= 16;
+        }
         bits + 1
     }
 }
@@ -3017,6 +3027,8 @@ enum BrowserModifierKey {
     RightControl,
     LeftSuper,
     RightSuper,
+    LeftHyper,
+    RightHyper,
 }
 
 impl BrowserModifierKey {
@@ -3026,10 +3038,12 @@ impl BrowserModifierKey {
             Self::LeftControl => 57442,
             Self::LeftAlt => 57443,
             Self::LeftSuper => 57444,
+            Self::LeftHyper => 57445,
             Self::RightShift => 57447,
             Self::RightControl => 57448,
             Self::RightAlt => 57449,
             Self::RightSuper => 57450,
+            Self::RightHyper => 57451,
         }
     }
 }
@@ -3793,6 +3807,8 @@ fn browser_modifier_key_from_code(code: &str) -> Option<BrowserModifierKey> {
         "ControlRight" => Some(BrowserModifierKey::RightControl),
         "MetaLeft" => Some(BrowserModifierKey::LeftSuper),
         "MetaRight" => Some(BrowserModifierKey::RightSuper),
+        "HyperLeft" => Some(BrowserModifierKey::LeftHyper),
+        "HyperRight" => Some(BrowserModifierKey::RightHyper),
         _ => None,
     }
 }
@@ -3807,6 +3823,8 @@ fn browser_modifier_key_from_location(key: &str, location: u32) -> Option<Browse
         ("Control", 2) => Some(BrowserModifierKey::RightControl),
         ("Meta", 1) | ("Super", 1) => Some(BrowserModifierKey::LeftSuper),
         ("Meta", 2) | ("Super", 2) => Some(BrowserModifierKey::RightSuper),
+        ("Hyper", 1) => Some(BrowserModifierKey::LeftHyper),
+        ("Hyper", 2) => Some(BrowserModifierKey::RightHyper),
         _ => None,
     }
 }
@@ -6889,6 +6907,17 @@ mod tests {
         );
         assert_eq!(
             encode_browser_key_input_with_metadata(
+                "Hyper",
+                "",
+                BrowserKeyModifiers::default(),
+                "HyperLeft",
+                1,
+                all_keys_modes,
+            ),
+            Some(b"\x1b[57445;17u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata(
                 "Shift",
                 "",
                 BrowserKeyModifiers::default(),
@@ -7378,6 +7407,7 @@ mod tests {
                 shift: true,
                 alt: true,
                 meta: true,
+                hyper: false,
             }
         );
         assert_eq!(
@@ -7399,6 +7429,10 @@ mod tests {
             browser_modifier_key_from_code("MetaRight"),
             Some(BrowserModifierKey::RightSuper)
         );
+        assert_eq!(
+            browser_modifier_key_from_code("HyperLeft"),
+            Some(BrowserModifierKey::LeftHyper)
+        );
         assert_eq!(browser_modifier_key_from_code("KeyA"), None);
         assert_eq!(
             browser_modifier_key_from_location("Alt", 1),
@@ -7407,6 +7441,10 @@ mod tests {
         assert_eq!(
             browser_modifier_key_from_location("Control", 2),
             Some(BrowserModifierKey::RightControl)
+        );
+        assert_eq!(
+            browser_modifier_key_from_location("Hyper", 2),
+            Some(BrowserModifierKey::RightHyper)
         );
         assert_eq!(browser_modifier_key_from_location("Shift", 0), None);
     }

@@ -65,11 +65,16 @@ keyboard metadata identifies the left/right key:
 - left `Shift` press -> `CSI 57441;2u`
 - right `Ctrl` press -> `CSI 57448;5u`
 - right `Super` release with flags `8|2` -> `CSI 57450;1:3u`
+- left `Hyper` press -> `CSI 57445;17u`
+- native right `Meta` press -> `CSI 57452;33u`
 
 Witty uses native `KeyLocation` / physical `KeyCode` and browser
 `KeyboardEvent.location` / `KeyboardEvent.code` for left/right detection. If
 the platform only reports a generic modifier key, Witty leaves it unreported
-rather than aliasing it to the left-side key code.
+rather than aliasing it to the left-side key code. Browser `Meta` remains
+mapped to Kitty `Super`, matching DOM semantics for Windows/Command keys;
+native `NamedKey::Meta` maps to Kitty `Meta` when left/right location metadata
+is available.
 
 With flags `8|16`, Witty adds safe associated text as the third CSI-u
 parameter for text-producing character keys:
@@ -139,7 +144,8 @@ legacy xterm sequence when flags `1` or `8` are active:
 
 The supported native/browser PUA set includes `CapsLock`, `ScrollLock`,
 `NumLock`, `PrintScreen`, `Pause`, `ContextMenu`, `F13` through `F35`, common
-media keys, volume keys, and `AltGraph`.
+media keys, volume keys, `Hyper` modifier keys when side metadata is available,
+native `Meta` modifier keys when side metadata is available, and `AltGraph`.
 
 Keypad keys use legacy text or application keypad SS3 sequences until Kitty
 flags `1` or `8` request disambiguated keypad reporting.
@@ -147,8 +153,8 @@ flags `1` or `8` request disambiguated keypad reporting.
 ## Deferred
 
 - Full layout-aware alternate-key reporting beyond the US physical base map.
-- Less common Kitty functional-key codes such as Hyper, Meta, ISO level shifts
-  beyond `AltGraph`, and platform-specific media/application keys.
+- Less common Kitty functional-key codes such as ISO level shifts beyond
+  `AltGraph` and platform-specific media/application keys.
 - Kitty graphics/image protocol.
 
 ## Verification
