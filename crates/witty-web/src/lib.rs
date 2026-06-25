@@ -3200,6 +3200,9 @@ fn browser_kitty_all_keys_sequence(
     {
         return Some(bytes);
     }
+    if let Some(bytes) = browser_kitty_functional_key_sequence(input, report_event_type) {
+        return Some(bytes);
+    }
 
     match input.key {
         "Escape" => Some(browser_kitty_csi_u_sequence_with_text(
@@ -3257,6 +3260,9 @@ fn browser_kitty_disambiguated_key_sequence(
     if let Some(bytes) = browser_kitty_keypad_sequence(input, false, report_event_type) {
         return Some(bytes);
     }
+    if let Some(bytes) = browser_kitty_functional_key_sequence(input, report_event_type) {
+        return Some(bytes);
+    }
 
     match input.key {
         "Escape" => Some(browser_kitty_csi_u_sequence(
@@ -3294,6 +3300,219 @@ fn browser_kitty_keypad_sequence(
         report_event_type,
         browser_kitty_associated_text(input, report_associated_text, true),
     ))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrowserKittyFunctionalKey {
+    Final { base_parameter: u8, final_byte: u8 },
+    Tilde(u8),
+    CsiU(u32),
+}
+
+impl BrowserKittyFunctionalKey {
+    fn sequence(
+        self,
+        modifiers: BrowserKeyModifiers,
+        event_type: BrowserKeyEventType,
+        report_event_type: bool,
+    ) -> Vec<u8> {
+        match self {
+            Self::Final {
+                base_parameter,
+                final_byte,
+            } => browser_kitty_functional_final_sequence(
+                base_parameter,
+                final_byte,
+                modifiers,
+                event_type,
+                report_event_type,
+            ),
+            Self::Tilde(base_parameter) => browser_kitty_functional_tilde_sequence(
+                base_parameter,
+                modifiers,
+                event_type,
+                report_event_type,
+            ),
+            Self::CsiU(code) => browser_kitty_csi_u_sequence(
+                BrowserKittyKeyCodes::new(code),
+                modifiers,
+                event_type,
+                report_event_type,
+            ),
+        }
+    }
+
+    fn has_legacy_fallback(self) -> bool {
+        !matches!(self, Self::CsiU(_))
+    }
+}
+
+fn browser_kitty_functional_key_sequence(
+    input: BrowserTerminalKeyInput<'_>,
+    report_event_type: bool,
+) -> Option<Vec<u8>> {
+    let key = browser_kitty_functional_key(input.key)?;
+    if key.has_legacy_fallback() && !report_event_type && !input.modifiers.meta {
+        return None;
+    }
+
+    Some(key.sequence(input.modifiers, input.event_type, report_event_type))
+}
+
+fn browser_kitty_functional_key(key: &str) -> Option<BrowserKittyFunctionalKey> {
+    match key {
+        "ArrowUp" => Some(BrowserKittyFunctionalKey::Final {
+            base_parameter: 1,
+            final_byte: b'A',
+        }),
+        "ArrowDown" => Some(BrowserKittyFunctionalKey::Final {
+            base_parameter: 1,
+            final_byte: b'B',
+        }),
+        "ArrowRight" => Some(BrowserKittyFunctionalKey::Final {
+            base_parameter: 1,
+            final_byte: b'C',
+        }),
+        "ArrowLeft" => Some(BrowserKittyFunctionalKey::Final {
+            base_parameter: 1,
+            final_byte: b'D',
+        }),
+        "Home" => Some(BrowserKittyFunctionalKey::Final {
+            base_parameter: 1,
+            final_byte: b'H',
+        }),
+        "End" => Some(BrowserKittyFunctionalKey::Final {
+            base_parameter: 1,
+            final_byte: b'F',
+        }),
+        "Insert" => Some(BrowserKittyFunctionalKey::Tilde(2)),
+        "Delete" => Some(BrowserKittyFunctionalKey::Tilde(3)),
+        "PageUp" => Some(BrowserKittyFunctionalKey::Tilde(5)),
+        "PageDown" => Some(BrowserKittyFunctionalKey::Tilde(6)),
+        "F1" => Some(BrowserKittyFunctionalKey::Final {
+            base_parameter: 1,
+            final_byte: b'P',
+        }),
+        "F2" => Some(BrowserKittyFunctionalKey::Final {
+            base_parameter: 1,
+            final_byte: b'Q',
+        }),
+        "F3" => Some(BrowserKittyFunctionalKey::Tilde(13)),
+        "F4" => Some(BrowserKittyFunctionalKey::Final {
+            base_parameter: 1,
+            final_byte: b'S',
+        }),
+        "F5" => Some(BrowserKittyFunctionalKey::Tilde(15)),
+        "F6" => Some(BrowserKittyFunctionalKey::Tilde(17)),
+        "F7" => Some(BrowserKittyFunctionalKey::Tilde(18)),
+        "F8" => Some(BrowserKittyFunctionalKey::Tilde(19)),
+        "F9" => Some(BrowserKittyFunctionalKey::Tilde(20)),
+        "F10" => Some(BrowserKittyFunctionalKey::Tilde(21)),
+        "F11" => Some(BrowserKittyFunctionalKey::Tilde(23)),
+        "F12" => Some(BrowserKittyFunctionalKey::Tilde(24)),
+        _ => browser_kitty_pua_functional_key_code(key).map(BrowserKittyFunctionalKey::CsiU),
+    }
+}
+
+fn browser_kitty_pua_functional_key_code(key: &str) -> Option<u32> {
+    match key {
+        "CapsLock" => Some(57358),
+        "ScrollLock" => Some(57359),
+        "NumLock" => Some(57360),
+        "PrintScreen" => Some(57361),
+        "Pause" => Some(57362),
+        "ContextMenu" => Some(57363),
+        "F13" => Some(57376),
+        "F14" => Some(57377),
+        "F15" => Some(57378),
+        "F16" => Some(57379),
+        "F17" => Some(57380),
+        "F18" => Some(57381),
+        "F19" => Some(57382),
+        "F20" => Some(57383),
+        "F21" => Some(57384),
+        "F22" => Some(57385),
+        "F23" => Some(57386),
+        "F24" => Some(57387),
+        "F25" => Some(57388),
+        "F26" => Some(57389),
+        "F27" => Some(57390),
+        "F28" => Some(57391),
+        "F29" => Some(57392),
+        "F30" => Some(57393),
+        "F31" => Some(57394),
+        "F32" => Some(57395),
+        "F33" => Some(57396),
+        "F34" => Some(57397),
+        "F35" => Some(57398),
+        "MediaPlay" => Some(57428),
+        "MediaPause" => Some(57429),
+        "MediaPlayPause" => Some(57430),
+        "MediaStop" => Some(57432),
+        "MediaFastForward" => Some(57433),
+        "MediaRewind" => Some(57434),
+        "MediaTrackNext" => Some(57435),
+        "MediaTrackPrevious" => Some(57436),
+        "MediaRecord" => Some(57437),
+        "AudioVolumeDown" => Some(57438),
+        "AudioVolumeUp" => Some(57439),
+        "AudioVolumeMute" => Some(57440),
+        "AltGraph" => Some(57453),
+        _ => None,
+    }
+}
+
+fn browser_kitty_functional_modifier_field(
+    modifiers: BrowserKeyModifiers,
+    event_type: BrowserKeyEventType,
+    report_event_type: bool,
+) -> Option<String> {
+    let modifier_parameter = modifiers.kitty_parameter();
+    if report_event_type {
+        Some(format!(
+            "{modifier_parameter}:{}",
+            event_type.kitty_parameter()
+        ))
+    } else if modifier_parameter != 1 {
+        Some(modifier_parameter.to_string())
+    } else {
+        None
+    }
+}
+
+fn browser_kitty_functional_final_sequence(
+    base_parameter: u8,
+    final_byte: u8,
+    modifiers: BrowserKeyModifiers,
+    event_type: BrowserKeyEventType,
+    report_event_type: bool,
+) -> Vec<u8> {
+    let mut bytes = if let Some(modifier) =
+        browser_kitty_functional_modifier_field(modifiers, event_type, report_event_type)
+    {
+        format!("\x1b[{base_parameter};{modifier}").into_bytes()
+    } else if base_parameter == 1 {
+        b"\x1b[".to_vec()
+    } else {
+        format!("\x1b[{base_parameter}").into_bytes()
+    };
+    bytes.push(final_byte);
+    bytes
+}
+
+fn browser_kitty_functional_tilde_sequence(
+    base_parameter: u8,
+    modifiers: BrowserKeyModifiers,
+    event_type: BrowserKeyEventType,
+    report_event_type: bool,
+) -> Vec<u8> {
+    if let Some(modifier) =
+        browser_kitty_functional_modifier_field(modifiers, event_type, report_event_type)
+    {
+        format!("\x1b[{base_parameter};{modifier}~").into_bytes()
+    } else {
+        format!("\x1b[{base_parameter}~").into_bytes()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6942,6 +7161,148 @@ mod tests {
                 modes,
             ),
             Some(b"\x1b[13;5:3u".to_vec())
+        );
+    }
+
+    #[test]
+    fn browser_key_input_reports_kitty_event_types_for_functional_keys() {
+        let modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES
+                | KITTY_KEYBOARD_REPORT_EVENT_TYPES,
+            ..TerminalInputModes::default()
+        };
+        let control = BrowserKeyModifiers {
+            control: true,
+            ..BrowserKeyModifiers::default()
+        };
+
+        assert_eq!(
+            encode_browser_key_input_with_metadata_and_event_type(
+                "ArrowUp",
+                "",
+                BrowserKeyModifiers::default(),
+                "",
+                0,
+                BrowserKeyEventType::Press,
+                modes,
+            ),
+            Some(b"\x1b[1;1:1A".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata_and_event_type(
+                "ArrowUp",
+                "",
+                control,
+                "",
+                0,
+                BrowserKeyEventType::Repeat,
+                modes,
+            ),
+            Some(b"\x1b[1;5:2A".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata_and_event_type(
+                "F3",
+                "",
+                BrowserKeyModifiers::default(),
+                "",
+                0,
+                BrowserKeyEventType::Release,
+                modes,
+            ),
+            Some(b"\x1b[13;1:3~".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata_and_event_type(
+                "F5",
+                "",
+                control,
+                "",
+                0,
+                BrowserKeyEventType::Release,
+                modes,
+            ),
+            Some(b"\x1b[15;5:3~".to_vec())
+        );
+    }
+
+    #[test]
+    fn browser_key_input_reports_kitty_pua_functional_keys_when_protocol_is_enabled() {
+        let disambiguate_modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+            ..TerminalInputModes::default()
+        };
+        let event_type_modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES
+                | KITTY_KEYBOARD_REPORT_EVENT_TYPES,
+            ..TerminalInputModes::default()
+        };
+
+        assert_eq!(
+            encode_browser_key_input_with_metadata(
+                "F13",
+                "",
+                BrowserKeyModifiers::default(),
+                "",
+                0,
+                disambiguate_modes,
+            ),
+            Some(b"\x1b[57376u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata(
+                "CapsLock",
+                "",
+                BrowserKeyModifiers::default(),
+                "",
+                0,
+                disambiguate_modes,
+            ),
+            Some(b"\x1b[57358u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata_and_event_type(
+                "MediaTrackNext",
+                "",
+                BrowserKeyModifiers::default(),
+                "",
+                0,
+                BrowserKeyEventType::Release,
+                event_type_modes,
+            ),
+            Some(b"\x1b[57435;1:3u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata(
+                "F13",
+                "",
+                BrowserKeyModifiers::default(),
+                "",
+                0,
+                TerminalInputModes::default(),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn browser_key_input_reports_kitty_meta_modified_functional_keys() {
+        let modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+            ..TerminalInputModes::default()
+        };
+        let meta = BrowserKeyModifiers {
+            meta: true,
+            ..BrowserKeyModifiers::default()
+        };
+
+        assert_eq!(
+            encode_browser_key_input_with_metadata("ArrowUp", "", meta, "", 0, modes),
+            Some(b"\x1b[1;9A".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata("F3", "", meta, "", 0, modes),
+            Some(b"\x1b[13;9~".to_vec())
         );
     }
 

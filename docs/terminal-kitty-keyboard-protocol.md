@@ -84,7 +84,7 @@ the text contains C0, DEL, or C1 control codepoints. `REPORT_ASSOCIATED_TEXT`
 has no effect unless `REPORT_ALL_KEYS_AS_ESC_CODES` is also active.
 
 With flag `2`, Witty reports Kitty event types on the CSI-u keys it already
-encodes:
+encodes and on functional-key escape forms when Kitty protocol mode is active:
 
 - key press -> second parameter sub-field `:1`
 - key repeat -> second parameter sub-field `:2`
@@ -99,6 +99,9 @@ Examples:
 - flags `8|2`, `a` release -> `CSI 97;1:3u`
 - flags `8|2`, `Ctrl-Enter` release -> `CSI 13;5:3u`
 - flags `8|16|2`, `a` press -> `CSI 97;1:1;97u`
+- flags `1|2`, `ArrowUp` press -> `CSI 1;1:1A`
+- flags `1|2`, `Ctrl-ArrowUp` repeat -> `CSI 1;5:2A`
+- flags `1|2`, `F5` release -> `CSI 15;1:3~`
 
 `Enter`, `Tab`, and `Backspace` releases are reported only when flag `8` is
 also active, because flag `1` alone keeps those keys on legacy byte sequences.
@@ -118,17 +121,34 @@ physical US-layout base key when native `winit` or browser `KeyboardEvent.code`
 metadata identifies one. The base key is omitted when it matches the normalized
 key.
 
-Navigation and function keys continue through the existing xterm/VT
-escape-code encoders. Modified navigation/function keys keep xterm modifier
-parameters such as `CSI 1;5A`. Keypad keys use legacy text or application
-keypad SS3 sequences until Kitty flags `1` or `8` request disambiguated keypad
-reporting.
+Navigation and function keys continue through the existing xterm/VT escape-code
+encoders when Kitty event-type reporting is not requested. Modified
+navigation/function keys keep xterm modifier parameters such as `CSI 1;5A`.
+Meta-modified navigation/function keys use Kitty functional forms because the
+xterm fallback has no Meta modifier parameter. When flags `1|2` or `8|2` are
+active, those functional-key forms include Kitty event-type sub-fields for
+press, repeat, and release events.
+
+Witty also reports Kitty PUA functional key codes for keys that do not have a
+legacy xterm sequence when flags `1` or `8` are active:
+
+- `F13` -> `CSI 57376u`
+- `CapsLock` -> `CSI 57358u`
+- `MediaTrackNext` release with flags `1|2` -> `CSI 57435;1:3u`
+- `AltGraph` -> `CSI 57453u`
+
+The supported native/browser PUA set includes `CapsLock`, `ScrollLock`,
+`NumLock`, `PrintScreen`, `Pause`, `ContextMenu`, `F13` through `F35`, common
+media keys, volume keys, and `AltGraph`.
+
+Keypad keys use legacy text or application keypad SS3 sequences until Kitty
+flags `1` or `8` request disambiguated keypad reporting.
 
 ## Deferred
 
 - Full layout-aware alternate-key reporting beyond the US physical base map.
-- Additional Kitty functional-key codes such as Hyper, Meta, ISO level shifts,
-  lock keys, media keys, and extended function keys.
+- Less common Kitty functional-key codes such as Hyper, Meta, ISO level shifts
+  beyond `AltGraph`, and platform-specific media/application keys.
 - Kitty graphics/image protocol.
 
 ## Verification

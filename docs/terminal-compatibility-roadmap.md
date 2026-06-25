@@ -2776,6 +2776,18 @@ client surface while preserving the native/browser transport split.
      keypad behavior stay unchanged outside Kitty protocol mode. Associated
      text and event-type sub-fields compose with the existing flags `16` and
      `2`. See `terminal-kitty-keyboard-protocol.md`.
+376. `m698-terminal-kitty-functional-key-codes`
+   - done. Added Kitty functional-key event-type reporting for native and
+     browser navigation/function-key encoders. When flags `1|2` or `8|2` are
+     active, keys such as `ArrowUp` and `F5` include Kitty press/repeat/release
+     sub-fields in their functional escape forms. Witty also reports Kitty PUA
+     functional key codes under flags `1` or `8` for keys without legacy xterm
+     sequences, including `F13`-`F35`, lock keys, `PrintScreen`, `Pause`,
+     `ContextMenu`, common media keys, volume keys, and `AltGraph`. Legacy
+     xterm/VT navigation and function-key behavior remains unchanged when
+     Kitty keyboard mode is inactive; Meta-modified functional keys use Kitty
+     functional forms when Kitty mode is active because the xterm fallback has
+     no Meta modifier parameter.
 
 ## Non-Goals For This Line
 

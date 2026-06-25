@@ -12542,6 +12542,9 @@ fn kitty_all_keys_sequence(
     if let Some(bytes) = kitty_keypad_sequence(input, report_associated_text, report_event_type) {
         return Some(bytes);
     }
+    if let Some(bytes) = kitty_functional_key_sequence(input, report_event_type) {
+        return Some(bytes);
+    }
 
     match input.logical_key {
         Key::Named(NamedKey::Escape) => Some(kitty_csi_u_sequence_with_text(
@@ -12596,6 +12599,9 @@ fn kitty_disambiguated_key_sequence(
     if let Some(bytes) = kitty_keypad_sequence(input, false, report_event_type) {
         return Some(bytes);
     }
+    if let Some(bytes) = kitty_functional_key_sequence(input, report_event_type) {
+        return Some(bytes);
+    }
 
     match input.logical_key {
         Key::Named(NamedKey::Escape) => Some(kitty_csi_u_sequence(
@@ -12633,6 +12639,221 @@ fn kitty_keypad_sequence(
         report_event_type,
         kitty_associated_text(input, report_associated_text, true),
     ))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KittyFunctionalKey {
+    Final { base_parameter: u8, final_byte: u8 },
+    Tilde(u8),
+    CsiU(u32),
+}
+
+impl KittyFunctionalKey {
+    fn sequence(
+        self,
+        modifiers: TerminalKeyModifiers,
+        event_type: TerminalKeyEventType,
+        report_event_type: bool,
+    ) -> Vec<u8> {
+        match self {
+            Self::Final {
+                base_parameter,
+                final_byte,
+            } => kitty_functional_final_sequence(
+                base_parameter,
+                final_byte,
+                modifiers,
+                event_type,
+                report_event_type,
+            ),
+            Self::Tilde(base_parameter) => kitty_functional_tilde_sequence(
+                base_parameter,
+                modifiers,
+                event_type,
+                report_event_type,
+            ),
+            Self::CsiU(code) => kitty_csi_u_sequence(
+                KittyKeyCodes::new(code),
+                modifiers,
+                event_type,
+                report_event_type,
+            ),
+        }
+    }
+
+    fn has_legacy_fallback(self) -> bool {
+        !matches!(self, Self::CsiU(_))
+    }
+}
+
+fn kitty_functional_key_sequence(
+    input: TerminalKeyInput<'_>,
+    report_event_type: bool,
+) -> Option<Vec<u8>> {
+    let key = kitty_functional_key(input.logical_key)?;
+    if key.has_legacy_fallback() && !report_event_type && !input.modifiers.meta {
+        return None;
+    }
+
+    Some(key.sequence(input.modifiers, input.event_type, report_event_type))
+}
+
+fn kitty_functional_key(logical_key: &Key) -> Option<KittyFunctionalKey> {
+    match logical_key {
+        Key::Named(NamedKey::ArrowUp) => Some(KittyFunctionalKey::Final {
+            base_parameter: 1,
+            final_byte: b'A',
+        }),
+        Key::Named(NamedKey::ArrowDown) => Some(KittyFunctionalKey::Final {
+            base_parameter: 1,
+            final_byte: b'B',
+        }),
+        Key::Named(NamedKey::ArrowRight) => Some(KittyFunctionalKey::Final {
+            base_parameter: 1,
+            final_byte: b'C',
+        }),
+        Key::Named(NamedKey::ArrowLeft) => Some(KittyFunctionalKey::Final {
+            base_parameter: 1,
+            final_byte: b'D',
+        }),
+        Key::Named(NamedKey::Home) => Some(KittyFunctionalKey::Final {
+            base_parameter: 1,
+            final_byte: b'H',
+        }),
+        Key::Named(NamedKey::End) => Some(KittyFunctionalKey::Final {
+            base_parameter: 1,
+            final_byte: b'F',
+        }),
+        Key::Named(NamedKey::Insert) => Some(KittyFunctionalKey::Tilde(2)),
+        Key::Named(NamedKey::Delete) => Some(KittyFunctionalKey::Tilde(3)),
+        Key::Named(NamedKey::PageUp) => Some(KittyFunctionalKey::Tilde(5)),
+        Key::Named(NamedKey::PageDown) => Some(KittyFunctionalKey::Tilde(6)),
+        Key::Named(NamedKey::F1) => Some(KittyFunctionalKey::Final {
+            base_parameter: 1,
+            final_byte: b'P',
+        }),
+        Key::Named(NamedKey::F2) => Some(KittyFunctionalKey::Final {
+            base_parameter: 1,
+            final_byte: b'Q',
+        }),
+        Key::Named(NamedKey::F3) => Some(KittyFunctionalKey::Tilde(13)),
+        Key::Named(NamedKey::F4) => Some(KittyFunctionalKey::Final {
+            base_parameter: 1,
+            final_byte: b'S',
+        }),
+        Key::Named(NamedKey::F5) => Some(KittyFunctionalKey::Tilde(15)),
+        Key::Named(NamedKey::F6) => Some(KittyFunctionalKey::Tilde(17)),
+        Key::Named(NamedKey::F7) => Some(KittyFunctionalKey::Tilde(18)),
+        Key::Named(NamedKey::F8) => Some(KittyFunctionalKey::Tilde(19)),
+        Key::Named(NamedKey::F9) => Some(KittyFunctionalKey::Tilde(20)),
+        Key::Named(NamedKey::F10) => Some(KittyFunctionalKey::Tilde(21)),
+        Key::Named(NamedKey::F11) => Some(KittyFunctionalKey::Tilde(23)),
+        Key::Named(NamedKey::F12) => Some(KittyFunctionalKey::Tilde(24)),
+        Key::Named(named_key) => kitty_pua_functional_key_code(*named_key)
+            .map(KittyFunctionalKey::CsiU),
+        _ => None,
+    }
+}
+
+fn kitty_pua_functional_key_code(named_key: NamedKey) -> Option<u32> {
+    match named_key {
+        NamedKey::CapsLock => Some(57358),
+        NamedKey::ScrollLock => Some(57359),
+        NamedKey::NumLock => Some(57360),
+        NamedKey::PrintScreen => Some(57361),
+        NamedKey::Pause => Some(57362),
+        NamedKey::ContextMenu => Some(57363),
+        NamedKey::F13 => Some(57376),
+        NamedKey::F14 => Some(57377),
+        NamedKey::F15 => Some(57378),
+        NamedKey::F16 => Some(57379),
+        NamedKey::F17 => Some(57380),
+        NamedKey::F18 => Some(57381),
+        NamedKey::F19 => Some(57382),
+        NamedKey::F20 => Some(57383),
+        NamedKey::F21 => Some(57384),
+        NamedKey::F22 => Some(57385),
+        NamedKey::F23 => Some(57386),
+        NamedKey::F24 => Some(57387),
+        NamedKey::F25 => Some(57388),
+        NamedKey::F26 => Some(57389),
+        NamedKey::F27 => Some(57390),
+        NamedKey::F28 => Some(57391),
+        NamedKey::F29 => Some(57392),
+        NamedKey::F30 => Some(57393),
+        NamedKey::F31 => Some(57394),
+        NamedKey::F32 => Some(57395),
+        NamedKey::F33 => Some(57396),
+        NamedKey::F34 => Some(57397),
+        NamedKey::F35 => Some(57398),
+        NamedKey::MediaPlay => Some(57428),
+        NamedKey::MediaPause => Some(57429),
+        NamedKey::MediaPlayPause => Some(57430),
+        NamedKey::MediaStop => Some(57432),
+        NamedKey::MediaFastForward => Some(57433),
+        NamedKey::MediaRewind => Some(57434),
+        NamedKey::MediaTrackNext => Some(57435),
+        NamedKey::MediaTrackPrevious => Some(57436),
+        NamedKey::MediaRecord => Some(57437),
+        NamedKey::AudioVolumeDown => Some(57438),
+        NamedKey::AudioVolumeUp => Some(57439),
+        NamedKey::AudioVolumeMute => Some(57440),
+        NamedKey::AltGraph => Some(57453),
+        _ => None,
+    }
+}
+
+fn kitty_functional_modifier_field(
+    modifiers: TerminalKeyModifiers,
+    event_type: TerminalKeyEventType,
+    report_event_type: bool,
+) -> Option<String> {
+    let modifier_parameter = modifiers.kitty_parameter();
+    if report_event_type {
+        Some(format!(
+            "{modifier_parameter}:{}",
+            event_type.kitty_parameter()
+        ))
+    } else if modifier_parameter != 1 {
+        Some(modifier_parameter.to_string())
+    } else {
+        None
+    }
+}
+
+fn kitty_functional_final_sequence(
+    base_parameter: u8,
+    final_byte: u8,
+    modifiers: TerminalKeyModifiers,
+    event_type: TerminalKeyEventType,
+    report_event_type: bool,
+) -> Vec<u8> {
+    let mut bytes = if let Some(modifier) =
+        kitty_functional_modifier_field(modifiers, event_type, report_event_type)
+    {
+        format!("\x1b[{base_parameter};{modifier}").into_bytes()
+    } else if base_parameter == 1 {
+        b"\x1b[".to_vec()
+    } else {
+        format!("\x1b[{base_parameter}").into_bytes()
+    };
+    bytes.push(final_byte);
+    bytes
+}
+
+fn kitty_functional_tilde_sequence(
+    base_parameter: u8,
+    modifiers: TerminalKeyModifiers,
+    event_type: TerminalKeyEventType,
+    report_event_type: bool,
+) -> Vec<u8> {
+    if let Some(modifier) =
+        kitty_functional_modifier_field(modifiers, event_type, report_event_type)
+    {
+        format!("\x1b[{base_parameter};{modifier}~").into_bytes()
+    } else {
+        format!("\x1b[{base_parameter}~").into_bytes()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -18448,6 +18669,132 @@ mod tests {
                 modes,
             ),
             Some(b"\x1b[13;5:3u".to_vec())
+        );
+    }
+
+    #[test]
+    fn key_encoder_reports_kitty_event_types_for_functional_keys() {
+        let modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES
+                | KITTY_KEYBOARD_REPORT_EVENT_TYPES,
+            ..TerminalInputModes::default()
+        };
+        let control = TerminalKeyModifiers {
+            control: true,
+            ..TerminalKeyModifiers::default()
+        };
+
+        assert_eq!(
+            encode_key_input_with_event_type(
+                &Key::Named(NamedKey::ArrowUp),
+                None,
+                TerminalKeyModifiers::default(),
+                TerminalKeyEventType::Press,
+                modes,
+            ),
+            Some(b"\x1b[1;1:1A".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_event_type(
+                &Key::Named(NamedKey::ArrowUp),
+                None,
+                control,
+                TerminalKeyEventType::Repeat,
+                modes,
+            ),
+            Some(b"\x1b[1;5:2A".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_event_type(
+                &Key::Named(NamedKey::F3),
+                None,
+                TerminalKeyModifiers::default(),
+                TerminalKeyEventType::Release,
+                modes,
+            ),
+            Some(b"\x1b[13;1:3~".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_event_type(
+                &Key::Named(NamedKey::F5),
+                None,
+                control,
+                TerminalKeyEventType::Release,
+                modes,
+            ),
+            Some(b"\x1b[15;5:3~".to_vec())
+        );
+    }
+
+    #[test]
+    fn key_encoder_reports_kitty_pua_functional_keys_when_protocol_is_enabled() {
+        let disambiguate_modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+            ..TerminalInputModes::default()
+        };
+        let event_type_modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES
+                | KITTY_KEYBOARD_REPORT_EVENT_TYPES,
+            ..TerminalInputModes::default()
+        };
+
+        assert_eq!(
+            encode_key_input_with_modifiers(
+                &Key::Named(NamedKey::F13),
+                None,
+                TerminalKeyModifiers::default(),
+                disambiguate_modes,
+            ),
+            Some(b"\x1b[57376u".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_modifiers(
+                &Key::Named(NamedKey::CapsLock),
+                None,
+                TerminalKeyModifiers::default(),
+                disambiguate_modes,
+            ),
+            Some(b"\x1b[57358u".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_event_type(
+                &Key::Named(NamedKey::MediaTrackNext),
+                None,
+                TerminalKeyModifiers::default(),
+                TerminalKeyEventType::Release,
+                event_type_modes,
+            ),
+            Some(b"\x1b[57435;1:3u".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_modifiers(
+                &Key::Named(NamedKey::F13),
+                None,
+                TerminalKeyModifiers::default(),
+                TerminalInputModes::default(),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn key_encoder_reports_kitty_meta_modified_functional_keys() {
+        let modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+            ..TerminalInputModes::default()
+        };
+        let meta = TerminalKeyModifiers {
+            meta: true,
+            ..TerminalKeyModifiers::default()
+        };
+
+        assert_eq!(
+            encode_key_input_with_modifiers(&Key::Named(NamedKey::ArrowUp), None, meta, modes),
+            Some(b"\x1b[1;9A".to_vec())
+        );
+        assert_eq!(
+            encode_key_input_with_modifiers(&Key::Named(NamedKey::F3), None, meta, modes),
+            Some(b"\x1b[13;9~".to_vec())
         );
     }
 
