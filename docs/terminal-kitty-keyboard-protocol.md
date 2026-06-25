@@ -37,6 +37,8 @@ With flag `1`, Witty emits CSI-u for ambiguous character-key combinations:
 - `Ctrl-Shift-I` -> `CSI 105;6u`
 - `Alt-A` -> `CSI 97;3u`
 - `Esc` -> `CSI 27u` or `CSI 27;Nu`
+- keypad `1` -> `CSI 57400u`
+- keypad `Enter` -> `CSI 57414u`
 
 Per the Kitty protocol, flag `1` keeps `Enter`, `Tab`, and `Backspace` on their
 legacy byte sequences. This means `Ctrl-Enter`, `Shift-Tab`, and
@@ -51,6 +53,11 @@ With flag `8`, Witty additionally reports text-producing keys plus `Enter`,
 - `Shift-Tab` -> `CSI 9;2u`
 - `Ctrl-Backspace` -> `CSI 127;5u`
 - text with no single known key -> `CSI 0u`
+- keypad decimal with flags `8|16` -> `CSI 57409;;46u`
+
+Keypad keys that native `winit` or browser metadata identifies as numpad input
+use Kitty `KP_*` functional key codes under flags `1` or `8`. Ordinary top-row
+digits remain ordinary text unless another Kitty rule applies.
 
 Flag `8` also reports physical modifier keys when native `winit` or browser
 keyboard metadata identifies the left/right key:
@@ -111,9 +118,11 @@ physical US-layout base key when native `winit` or browser `KeyboardEvent.code`
 metadata identifies one. The base key is omitted when it matches the normalized
 key.
 
-Navigation, function, and keypad keys continue through the existing xterm/VT
+Navigation and function keys continue through the existing xterm/VT
 escape-code encoders. Modified navigation/function keys keep xterm modifier
-parameters such as `CSI 1;5A`.
+parameters such as `CSI 1;5A`. Keypad keys use legacy text or application
+keypad SS3 sequences until Kitty flags `1` or `8` request disambiguated keypad
+reporting.
 
 ## Deferred
 

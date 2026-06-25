@@ -3047,6 +3047,22 @@ enum BrowserKeypadKey {
     Equal,
 }
 
+impl BrowserKeypadKey {
+    fn kitty_key_code(self) -> u32 {
+        match self {
+            Self::Digit(value) => 57399 + u32::from(value),
+            Self::Decimal => 57409,
+            Self::Divide => 57410,
+            Self::Multiply => 57411,
+            Self::Subtract => 57412,
+            Self::Add => 57413,
+            Self::Enter => 57414,
+            Self::Equal => 57415,
+            Self::Comma => 57416,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct BrowserTerminalKeyInput<'a> {
     key: &'a str,
@@ -3179,6 +3195,11 @@ fn browser_kitty_all_keys_sequence(
             report_event_type,
         ));
     }
+    if let Some(bytes) =
+        browser_kitty_keypad_sequence(input, report_associated_text, report_event_type)
+    {
+        return Some(bytes);
+    }
 
     match input.key {
         "Escape" => Some(browser_kitty_csi_u_sequence_with_text(
@@ -3233,6 +3254,10 @@ fn browser_kitty_disambiguated_key_sequence(
     report_alternate_keys: bool,
     report_event_type: bool,
 ) -> Option<Vec<u8>> {
+    if let Some(bytes) = browser_kitty_keypad_sequence(input, false, report_event_type) {
+        return Some(bytes);
+    }
+
     match input.key {
         "Escape" => Some(browser_kitty_csi_u_sequence(
             BrowserKittyKeyCodes::new(27),
@@ -3254,6 +3279,21 @@ fn browser_kitty_disambiguated_key_sequence(
         }
         _ => None,
     }
+}
+
+fn browser_kitty_keypad_sequence(
+    input: BrowserTerminalKeyInput<'_>,
+    report_associated_text: bool,
+    report_event_type: bool,
+) -> Option<Vec<u8>> {
+    let keypad_key = input.keypad_key?;
+    Some(browser_kitty_csi_u_sequence_with_text(
+        BrowserKittyKeyCodes::new(keypad_key.kitty_key_code()),
+        input.modifiers,
+        input.event_type,
+        report_event_type,
+        browser_kitty_associated_text(input, report_associated_text, true),
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7085,6 +7125,86 @@ mod tests {
                 Some(expected.to_vec())
             );
         }
+    }
+
+    #[test]
+    fn browser_key_input_reports_kitty_keypad_keys_when_disambiguation_is_enabled() {
+        let modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+            ..TerminalInputModes::default()
+        };
+
+        assert_eq!(
+            encode_browser_key_input_with_metadata(
+                "1",
+                "1",
+                BrowserKeyModifiers::default(),
+                "Digit1",
+                0,
+                modes,
+            ),
+            Some(b"1".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata(
+                "1",
+                "1",
+                BrowserKeyModifiers::default(),
+                "Numpad1",
+                3,
+                modes,
+            ),
+            Some(b"\x1b[57400u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata(
+                "Enter",
+                "",
+                BrowserKeyModifiers::default(),
+                "NumpadEnter",
+                3,
+                modes,
+            ),
+            Some(b"\x1b[57414u".to_vec())
+        );
+    }
+
+    #[test]
+    fn browser_key_input_reports_kitty_keypad_associated_text_and_event_types() {
+        let associated_text_modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES
+                | KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT,
+            ..TerminalInputModes::default()
+        };
+        let event_type_modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES
+                | KITTY_KEYBOARD_REPORT_EVENT_TYPES,
+            ..TerminalInputModes::default()
+        };
+
+        assert_eq!(
+            encode_browser_key_input_with_metadata(
+                ".",
+                ".",
+                BrowserKeyModifiers::default(),
+                "NumpadDecimal",
+                3,
+                associated_text_modes,
+            ),
+            Some(b"\x1b[57409;;46u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata_and_event_type(
+                "+",
+                "",
+                BrowserKeyModifiers::default(),
+                "NumpadAdd",
+                3,
+                BrowserKeyEventType::Release,
+                event_type_modes,
+            ),
+            Some(b"\x1b[57413;1:3u".to_vec())
+        );
     }
 
     #[test]

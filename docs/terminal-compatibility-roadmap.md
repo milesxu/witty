@@ -2768,6 +2768,14 @@ client surface while preserving the native/browser transport split.
      active. Generic modifier events without side metadata remain unreported
      rather than being aliased to a left/right key. See
      `terminal-kitty-keyboard-protocol.md`.
+375. `m696-terminal-kitty-keypad-codes`
+   - done. Added Kitty keypad functional key reporting in native and browser
+     encoders. When flags `1` or `8` are active, Witty maps detected numpad
+     input to Kitty `KP_*` PUA codes, such as `KP_1` -> `CSI 57400u` and
+     `KP_ENTER` -> `CSI 57414u`, while top-row digits and legacy/application
+     keypad behavior stay unchanged outside Kitty protocol mode. Associated
+     text and event-type sub-fields compose with the existing flags `16` and
+     `2`. See `terminal-kitty-keyboard-protocol.md`.
 
 ## Non-Goals For This Line
 
