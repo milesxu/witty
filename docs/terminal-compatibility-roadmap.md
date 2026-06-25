@@ -2759,6 +2759,15 @@ client surface while preserving the native/browser transport split.
      metadata -> `CSI primary::base u`. Navigation, function, and keypad keys
      remain on the existing xterm/VT encoder path. See
      `terminal-kitty-keyboard-protocol.md`.
+374. `m694-terminal-kitty-modifier-key-codes`
+   - done. Added Kitty all-keys CSI-u reporting for physical modifier-key
+     events in native and browser encoders. Witty now maps left/right
+     Shift/Ctrl/Alt/Super from native `KeyLocation` / physical `KeyCode` and
+     browser `KeyboardEvent.location` / `KeyboardEvent.code` into Kitty PUA
+     functional key codes, including release event typing when flag `2` is
+     active. Generic modifier events without side metadata remain unreported
+     rather than being aliased to a left/right key. See
+     `terminal-kitty-keyboard-protocol.md`.
 
 ## Non-Goals For This Line
 

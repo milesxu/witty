@@ -2884,13 +2884,15 @@ fn encode_browser_key_input_with_metadata_and_event_type(
     event_type: BrowserKeyEventType,
     modes: TerminalInputModes,
 ) -> Option<Vec<u8>> {
+    let modifier_key = browser_modifier_key_from_event(key, code, location);
     encode_browser_terminal_key_input(
         BrowserTerminalKeyInput {
             key,
             text,
-            modifiers,
+            modifiers: modifiers.with_modifier_key_event_state(modifier_key, event_type),
             keypad_key: browser_keypad_key_from_event(key, text, code, location),
             base_layout_key: browser_base_layout_key_from_code(code),
+            modifier_key,
             event_type,
         },
         modes,
@@ -2948,6 +2950,26 @@ impl BrowserKeyModifiers {
         !self.control && !self.shift && !self.alt && !self.meta
     }
 
+    fn with_modifier_key_event_state(
+        mut self,
+        modifier_key: Option<BrowserModifierKey>,
+        event_type: BrowserKeyEventType,
+    ) -> Self {
+        let Some(modifier_key) = modifier_key else {
+            return self;
+        };
+        let active = event_type != BrowserKeyEventType::Release;
+        match modifier_key {
+            BrowserModifierKey::LeftShift | BrowserModifierKey::RightShift => self.shift = active,
+            BrowserModifierKey::LeftAlt | BrowserModifierKey::RightAlt => self.alt = active,
+            BrowserModifierKey::LeftControl | BrowserModifierKey::RightControl => {
+                self.control = active
+            }
+            BrowserModifierKey::LeftSuper | BrowserModifierKey::RightSuper => self.meta = active,
+        }
+        self
+    }
+
     fn xterm_parameter(self) -> Option<u8> {
         if self.meta {
             return None;
@@ -2986,6 +3008,33 @@ impl BrowserKeyModifiers {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrowserModifierKey {
+    LeftShift,
+    RightShift,
+    LeftAlt,
+    RightAlt,
+    LeftControl,
+    RightControl,
+    LeftSuper,
+    RightSuper,
+}
+
+impl BrowserModifierKey {
+    fn kitty_key_code(self) -> u32 {
+        match self {
+            Self::LeftShift => 57441,
+            Self::LeftControl => 57442,
+            Self::LeftAlt => 57443,
+            Self::LeftSuper => 57444,
+            Self::RightShift => 57447,
+            Self::RightControl => 57448,
+            Self::RightAlt => 57449,
+            Self::RightSuper => 57450,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BrowserKeypadKey {
     Digit(u8),
     Decimal,
@@ -3005,6 +3054,7 @@ struct BrowserTerminalKeyInput<'a> {
     modifiers: BrowserKeyModifiers,
     keypad_key: Option<BrowserKeypadKey>,
     base_layout_key: Option<char>,
+    modifier_key: Option<BrowserModifierKey>,
     event_type: BrowserKeyEventType,
 }
 
@@ -3121,6 +3171,15 @@ fn browser_kitty_all_keys_sequence(
     report_alternate_keys: bool,
     report_event_type: bool,
 ) -> Option<Vec<u8>> {
+    if let Some(modifier_key) = input.modifier_key {
+        return Some(browser_kitty_csi_u_sequence(
+            BrowserKittyKeyCodes::new(modifier_key.kitty_key_code()),
+            input.modifiers,
+            input.event_type,
+            report_event_type,
+        ));
+    }
+
     match input.key {
         "Escape" => Some(browser_kitty_csi_u_sequence_with_text(
             BrowserKittyKeyCodes::new(27),
@@ -3449,6 +3508,46 @@ fn browser_modified_named_key_sequence(key: &str, modifier_parameter: u8) -> Opt
         "F10" => Some(browser_csi_modified_tilde_sequence(21, modifier_parameter)),
         "F11" => Some(browser_csi_modified_tilde_sequence(23, modifier_parameter)),
         "F12" => Some(browser_csi_modified_tilde_sequence(24, modifier_parameter)),
+        _ => None,
+    }
+}
+
+fn browser_modifier_key_from_event(
+    key: &str,
+    code: &str,
+    location: u32,
+) -> Option<BrowserModifierKey> {
+    if let Some(modifier_key) = browser_modifier_key_from_code(code) {
+        return Some(modifier_key);
+    }
+
+    browser_modifier_key_from_location(key, location)
+}
+
+fn browser_modifier_key_from_code(code: &str) -> Option<BrowserModifierKey> {
+    match code {
+        "ShiftLeft" => Some(BrowserModifierKey::LeftShift),
+        "ShiftRight" => Some(BrowserModifierKey::RightShift),
+        "AltLeft" => Some(BrowserModifierKey::LeftAlt),
+        "AltRight" => Some(BrowserModifierKey::RightAlt),
+        "ControlLeft" => Some(BrowserModifierKey::LeftControl),
+        "ControlRight" => Some(BrowserModifierKey::RightControl),
+        "MetaLeft" => Some(BrowserModifierKey::LeftSuper),
+        "MetaRight" => Some(BrowserModifierKey::RightSuper),
+        _ => None,
+    }
+}
+
+fn browser_modifier_key_from_location(key: &str, location: u32) -> Option<BrowserModifierKey> {
+    match (key, location) {
+        ("Shift", 1) => Some(BrowserModifierKey::LeftShift),
+        ("Shift", 2) => Some(BrowserModifierKey::RightShift),
+        ("Alt", 1) => Some(BrowserModifierKey::LeftAlt),
+        ("Alt", 2) => Some(BrowserModifierKey::RightAlt),
+        ("Control", 1) => Some(BrowserModifierKey::LeftControl),
+        ("Control", 2) => Some(BrowserModifierKey::RightControl),
+        ("Meta", 1) | ("Super", 1) => Some(BrowserModifierKey::LeftSuper),
+        ("Meta", 2) | ("Super", 2) => Some(BrowserModifierKey::RightSuper),
         _ => None,
     }
 }
@@ -6484,6 +6583,68 @@ mod tests {
     }
 
     #[test]
+    fn browser_key_input_reports_kitty_modifier_keys_when_all_keys_mode_is_enabled() {
+        let all_keys_modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES,
+            ..TerminalInputModes::default()
+        };
+        let event_type_modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES
+                | KITTY_KEYBOARD_REPORT_EVENT_TYPES,
+            ..TerminalInputModes::default()
+        };
+
+        assert_eq!(
+            encode_browser_key_input_with_metadata(
+                "Shift",
+                "",
+                BrowserKeyModifiers::default(),
+                "ShiftLeft",
+                1,
+                all_keys_modes,
+            ),
+            Some(b"\x1b[57441;2u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata(
+                "Control",
+                "",
+                BrowserKeyModifiers::default(),
+                "ControlRight",
+                2,
+                all_keys_modes,
+            ),
+            Some(b"\x1b[57448;5u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata_and_event_type(
+                "Meta",
+                "",
+                BrowserKeyModifiers::default(),
+                "MetaRight",
+                2,
+                BrowserKeyEventType::Release,
+                event_type_modes,
+            ),
+            Some(b"\x1b[57450;1:3u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata(
+                "Shift",
+                "",
+                BrowserKeyModifiers::default(),
+                "ShiftLeft",
+                1,
+                TerminalInputModes {
+                    kitty_keyboard_flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+                    ..TerminalInputModes::default()
+                },
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn browser_key_input_reports_kitty_associated_text_when_enabled() {
         let modes = TerminalInputModes {
             kitty_keyboard_flags: KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES
@@ -6825,6 +6986,28 @@ mod tests {
                 ..BrowserKeyModifiers::default()
             }
         );
+    }
+
+    #[test]
+    fn browser_modifier_key_mapper_uses_code_or_location() {
+        assert_eq!(
+            browser_modifier_key_from_code("ShiftLeft"),
+            Some(BrowserModifierKey::LeftShift)
+        );
+        assert_eq!(
+            browser_modifier_key_from_code("MetaRight"),
+            Some(BrowserModifierKey::RightSuper)
+        );
+        assert_eq!(browser_modifier_key_from_code("KeyA"), None);
+        assert_eq!(
+            browser_modifier_key_from_location("Alt", 1),
+            Some(BrowserModifierKey::LeftAlt)
+        );
+        assert_eq!(
+            browser_modifier_key_from_location("Control", 2),
+            Some(BrowserModifierKey::RightControl)
+        );
+        assert_eq!(browser_modifier_key_from_location("Shift", 0), None);
     }
 
     #[test]

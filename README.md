@@ -264,8 +264,9 @@ such as Neovim. It tracks Kitty keyboard flags and supports
 `Enter`, `Tab`, and `Backspace`; flag `2` adds Kitty press/repeat/release
 event sub-fields to CSI-u keys; flag `4` adds shifted and physical base-key
 sub-fields for character keys; flag `8` also reports text keys and those
-legacy C0 keys as CSI-u; flag `16` adds safe associated text codepoints when
-flag `8` is active. Kitty graphics/image protocols are not part of this
+legacy C0 keys plus left/right modifier-key events as CSI-u; flag `16` adds
+safe associated text codepoints when flag `8` is active. Kitty graphics/image
+protocols are not part of this
 support. See
 `docs/terminal-kitty-keyboard-protocol.md`.
 

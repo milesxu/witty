@@ -12209,6 +12209,7 @@ fn encode_key_input_with_event_type(
             modifiers,
             keypad_key: None,
             base_layout_key: None,
+            modifier_key: None,
             event_type,
         },
         modes,
@@ -12220,14 +12221,21 @@ fn encode_key_event_input(
     modifiers: ModifiersState,
     modes: TerminalInputModes,
 ) -> Option<Vec<u8>> {
+    let event_type = TerminalKeyEventType::from_winit(event);
+    let modifier_key = modifier_key_from_winit_event(event);
     encode_terminal_key_input(
         TerminalKeyInput {
             logical_key: &event.logical_key,
             text: event.text.as_deref(),
-            modifiers: TerminalKeyModifiers::from_winit(modifiers),
+            modifiers: TerminalKeyModifiers::from_winit_key_event(
+                modifiers,
+                modifier_key,
+                event_type,
+            ),
             keypad_key: keypad_key_from_winit_event(event),
             base_layout_key: base_layout_key_from_winit_event(event),
-            event_type: TerminalKeyEventType::from_winit(event),
+            modifier_key,
+            event_type,
         },
         modes,
     )
@@ -12277,6 +12285,36 @@ impl TerminalKeyModifiers {
         }
     }
 
+    fn from_winit_key_event(
+        modifiers: ModifiersState,
+        modifier_key: Option<TerminalModifierKey>,
+        event_type: TerminalKeyEventType,
+    ) -> Self {
+        let mut modifiers = Self::from_winit(modifiers);
+        if let Some(modifier_key) = modifier_key {
+            modifiers.apply_modifier_key_event_state(modifier_key, event_type);
+        }
+        modifiers
+    }
+
+    fn apply_modifier_key_event_state(
+        &mut self,
+        modifier_key: TerminalModifierKey,
+        event_type: TerminalKeyEventType,
+    ) {
+        let active = event_type != TerminalKeyEventType::Release;
+        match modifier_key {
+            TerminalModifierKey::LeftShift | TerminalModifierKey::RightShift => {
+                self.shift = active
+            }
+            TerminalModifierKey::LeftAlt | TerminalModifierKey::RightAlt => self.alt = active,
+            TerminalModifierKey::LeftControl | TerminalModifierKey::RightControl => {
+                self.control = active
+            }
+            TerminalModifierKey::LeftSuper | TerminalModifierKey::RightSuper => self.meta = active,
+        }
+    }
+
     fn allows_application_keypad(self) -> bool {
         !self.control && !self.shift && !self.alt && !self.meta
     }
@@ -12319,6 +12357,33 @@ impl TerminalKeyModifiers {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalModifierKey {
+    LeftShift,
+    RightShift,
+    LeftAlt,
+    RightAlt,
+    LeftControl,
+    RightControl,
+    LeftSuper,
+    RightSuper,
+}
+
+impl TerminalModifierKey {
+    fn kitty_key_code(self) -> u32 {
+        match self {
+            Self::LeftShift => 57441,
+            Self::LeftControl => 57442,
+            Self::LeftAlt => 57443,
+            Self::LeftSuper => 57444,
+            Self::RightShift => 57447,
+            Self::RightControl => 57448,
+            Self::RightAlt => 57449,
+            Self::RightSuper => 57450,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum KeypadKey {
     Digit(u8),
     Decimal,
@@ -12338,6 +12403,7 @@ struct TerminalKeyInput<'a> {
     modifiers: TerminalKeyModifiers,
     keypad_key: Option<KeypadKey>,
     base_layout_key: Option<char>,
+    modifier_key: Option<TerminalModifierKey>,
     event_type: TerminalKeyEventType,
 }
 
@@ -12449,6 +12515,15 @@ fn kitty_all_keys_sequence(
     report_alternate_keys: bool,
     report_event_type: bool,
 ) -> Option<Vec<u8>> {
+    if let Some(modifier_key) = input.modifier_key {
+        return Some(kitty_csi_u_sequence(
+            KittyKeyCodes::new(modifier_key.kitty_key_code()),
+            input.modifiers,
+            input.event_type,
+            report_event_type,
+        ));
+    }
+
     match input.logical_key {
         Key::Named(NamedKey::Escape) => Some(kitty_csi_u_sequence_with_text(
             KittyKeyCodes::new(27),
@@ -12739,6 +12814,51 @@ fn modified_named_key_sequence(logical_key: &Key, modifier_parameter: u8) -> Opt
         Key::Named(NamedKey::F10) => Some(csi_modified_tilde_sequence(21, modifier_parameter)),
         Key::Named(NamedKey::F11) => Some(csi_modified_tilde_sequence(23, modifier_parameter)),
         Key::Named(NamedKey::F12) => Some(csi_modified_tilde_sequence(24, modifier_parameter)),
+        _ => None,
+    }
+}
+
+fn modifier_key_from_winit_event(event: &KeyEvent) -> Option<TerminalModifierKey> {
+    if let PhysicalKey::Code(code) = event.physical_key {
+        if let Some(modifier_key) = modifier_key_from_winit_key_code(code) {
+            return Some(modifier_key);
+        }
+    }
+
+    modifier_key_from_winit_location(&event.logical_key, event.location)
+}
+
+fn modifier_key_from_winit_key_code(code: KeyCode) -> Option<TerminalModifierKey> {
+    match code {
+        KeyCode::ShiftLeft => Some(TerminalModifierKey::LeftShift),
+        KeyCode::ShiftRight => Some(TerminalModifierKey::RightShift),
+        KeyCode::AltLeft => Some(TerminalModifierKey::LeftAlt),
+        KeyCode::AltRight => Some(TerminalModifierKey::RightAlt),
+        KeyCode::ControlLeft => Some(TerminalModifierKey::LeftControl),
+        KeyCode::ControlRight => Some(TerminalModifierKey::RightControl),
+        KeyCode::SuperLeft => Some(TerminalModifierKey::LeftSuper),
+        KeyCode::SuperRight => Some(TerminalModifierKey::RightSuper),
+        _ => None,
+    }
+}
+
+fn modifier_key_from_winit_location(
+    logical_key: &Key,
+    location: KeyLocation,
+) -> Option<TerminalModifierKey> {
+    match (logical_key, location) {
+        (Key::Named(NamedKey::Shift), KeyLocation::Left) => Some(TerminalModifierKey::LeftShift),
+        (Key::Named(NamedKey::Shift), KeyLocation::Right) => Some(TerminalModifierKey::RightShift),
+        (Key::Named(NamedKey::Alt), KeyLocation::Left) => Some(TerminalModifierKey::LeftAlt),
+        (Key::Named(NamedKey::Alt), KeyLocation::Right) => Some(TerminalModifierKey::RightAlt),
+        (Key::Named(NamedKey::Control), KeyLocation::Left) => {
+            Some(TerminalModifierKey::LeftControl)
+        }
+        (Key::Named(NamedKey::Control), KeyLocation::Right) => {
+            Some(TerminalModifierKey::RightControl)
+        }
+        (Key::Named(NamedKey::Super), KeyLocation::Left) => Some(TerminalModifierKey::LeftSuper),
+        (Key::Named(NamedKey::Super), KeyLocation::Right) => Some(TerminalModifierKey::RightSuper),
         _ => None,
     }
 }
@@ -17526,6 +17646,7 @@ mod tests {
             modifiers: TerminalKeyModifiers::default(),
             keypad_key: Some(KeypadKey::Digit(1)),
             base_layout_key: None,
+            modifier_key: None,
             event_type: TerminalKeyEventType::Press,
         };
 
@@ -17571,6 +17692,7 @@ mod tests {
                         modifiers: TerminalKeyModifiers::default(),
                         keypad_key: Some(keypad_key),
                         base_layout_key: None,
+                        modifier_key: None,
                         event_type: TerminalKeyEventType::Press,
                     },
                     modes,
@@ -17588,6 +17710,7 @@ mod tests {
                     modifiers: TerminalKeyModifiers::default(),
                     keypad_key: Some(KeypadKey::Enter),
                     base_layout_key: None,
+                    modifier_key: None,
                     event_type: TerminalKeyEventType::Press,
                 },
                 modes,
@@ -17618,6 +17741,7 @@ mod tests {
                     modifiers: TerminalKeyModifiers::default(),
                     keypad_key: Some(KeypadKey::Equal),
                     base_layout_key: None,
+                    modifier_key: None,
                     event_type: TerminalKeyEventType::Press,
                 },
                 modes,
@@ -17635,6 +17759,7 @@ mod tests {
                     },
                     keypad_key: Some(KeypadKey::Digit(1)),
                     base_layout_key: None,
+                    modifier_key: None,
                     event_type: TerminalKeyEventType::Press,
                 },
                 modes,
@@ -17667,6 +17792,31 @@ mod tests {
         assert_eq!(
             keypad_key_from_winit_location(&enter, None, KeyLocation::Numpad),
             Some(KeypadKey::Enter)
+        );
+    }
+
+    #[test]
+    fn native_modifier_key_mapper_uses_physical_code_or_location() {
+        assert_eq!(
+            modifier_key_from_winit_key_code(KeyCode::ShiftLeft),
+            Some(TerminalModifierKey::LeftShift)
+        );
+        assert_eq!(
+            modifier_key_from_winit_key_code(KeyCode::SuperRight),
+            Some(TerminalModifierKey::RightSuper)
+        );
+        assert_eq!(modifier_key_from_winit_key_code(KeyCode::KeyA), None);
+        assert_eq!(
+            modifier_key_from_winit_location(&Key::Named(NamedKey::Alt), KeyLocation::Left),
+            Some(TerminalModifierKey::LeftAlt)
+        );
+        assert_eq!(
+            modifier_key_from_winit_location(&Key::Named(NamedKey::Control), KeyLocation::Right),
+            Some(TerminalModifierKey::RightControl)
+        );
+        assert_eq!(
+            modifier_key_from_winit_location(&Key::Named(NamedKey::Shift), KeyLocation::Standard),
+            None
         );
     }
 
@@ -17812,6 +17962,95 @@ mod tests {
     }
 
     #[test]
+    fn key_encoder_reports_kitty_modifier_keys_when_all_keys_mode_is_enabled() {
+        let all_keys_modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES,
+            ..TerminalInputModes::default()
+        };
+        let event_type_modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES
+                | KITTY_KEYBOARD_REPORT_EVENT_TYPES,
+            ..TerminalInputModes::default()
+        };
+        let shift_key = Key::Named(NamedKey::Shift);
+        let control_key = Key::Named(NamedKey::Control);
+        let super_key = Key::Named(NamedKey::Super);
+
+        assert_eq!(
+            encode_terminal_key_input(
+                TerminalKeyInput {
+                    logical_key: &shift_key,
+                    text: None,
+                    modifiers: TerminalKeyModifiers {
+                        shift: true,
+                        ..TerminalKeyModifiers::default()
+                    },
+                    keypad_key: None,
+                    base_layout_key: None,
+                    modifier_key: Some(TerminalModifierKey::LeftShift),
+                    event_type: TerminalKeyEventType::Press,
+                },
+                all_keys_modes,
+            ),
+            Some(b"\x1b[57441;2u".to_vec())
+        );
+        assert_eq!(
+            encode_terminal_key_input(
+                TerminalKeyInput {
+                    logical_key: &control_key,
+                    text: None,
+                    modifiers: TerminalKeyModifiers {
+                        control: true,
+                        ..TerminalKeyModifiers::default()
+                    },
+                    keypad_key: None,
+                    base_layout_key: None,
+                    modifier_key: Some(TerminalModifierKey::RightControl),
+                    event_type: TerminalKeyEventType::Press,
+                },
+                all_keys_modes,
+            ),
+            Some(b"\x1b[57448;5u".to_vec())
+        );
+        assert_eq!(
+            encode_terminal_key_input(
+                TerminalKeyInput {
+                    logical_key: &super_key,
+                    text: None,
+                    modifiers: TerminalKeyModifiers::default(),
+                    keypad_key: None,
+                    base_layout_key: None,
+                    modifier_key: Some(TerminalModifierKey::RightSuper),
+                    event_type: TerminalKeyEventType::Release,
+                },
+                event_type_modes,
+            ),
+            Some(b"\x1b[57450;1:3u".to_vec())
+        );
+        assert_eq!(
+            encode_terminal_key_input(
+                TerminalKeyInput {
+                    logical_key: &shift_key,
+                    text: None,
+                    modifiers: TerminalKeyModifiers {
+                        shift: true,
+                        ..TerminalKeyModifiers::default()
+                    },
+                    keypad_key: None,
+                    base_layout_key: None,
+                    modifier_key: Some(TerminalModifierKey::LeftShift),
+                    event_type: TerminalKeyEventType::Press,
+                },
+                TerminalInputModes {
+                    kitty_keyboard_flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+                    ..TerminalInputModes::default()
+                },
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn key_encoder_reports_kitty_associated_text_when_enabled() {
         let modes = TerminalInputModes {
             kitty_keyboard_flags: KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES
@@ -17906,6 +18145,7 @@ mod tests {
                     modifiers: shift,
                     keypad_key: None,
                     base_layout_key: Some('a'),
+                    modifier_key: None,
                     event_type: TerminalKeyEventType::Press,
                 },
                 all_keys_modes,
@@ -17920,6 +18160,7 @@ mod tests {
                     modifiers: shift,
                     keypad_key: None,
                     base_layout_key: Some('='),
+                    modifier_key: None,
                     event_type: TerminalKeyEventType::Press,
                 },
                 all_keys_modes,
@@ -17934,6 +18175,7 @@ mod tests {
                     modifiers: TerminalKeyModifiers::default(),
                     keypad_key: None,
                     base_layout_key: Some('e'),
+                    modifier_key: None,
                     event_type: TerminalKeyEventType::Press,
                 },
                 all_keys_modes,
@@ -17948,6 +18190,7 @@ mod tests {
                     modifiers: shift_control,
                     keypad_key: None,
                     base_layout_key: Some('i'),
+                    modifier_key: None,
                     event_type: TerminalKeyEventType::Press,
                 },
                 disambiguate_modes,

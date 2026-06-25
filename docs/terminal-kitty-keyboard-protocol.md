@@ -1,6 +1,6 @@
 # Terminal Kitty Keyboard Protocol
 
-Updated: 2026-06-24
+Updated: 2026-06-25
 
 Witty supports a focused subset of the Kitty keyboard protocol for native and
 browser terminal input. This is the keyboard protocol / CSI-u line, not the
@@ -51,6 +51,18 @@ With flag `8`, Witty additionally reports text-producing keys plus `Enter`,
 - `Shift-Tab` -> `CSI 9;2u`
 - `Ctrl-Backspace` -> `CSI 127;5u`
 - text with no single known key -> `CSI 0u`
+
+Flag `8` also reports physical modifier keys when native `winit` or browser
+keyboard metadata identifies the left/right key:
+
+- left `Shift` press -> `CSI 57441;2u`
+- right `Ctrl` press -> `CSI 57448;5u`
+- right `Super` release with flags `8|2` -> `CSI 57450;1:3u`
+
+Witty uses native `KeyLocation` / physical `KeyCode` and browser
+`KeyboardEvent.location` / `KeyboardEvent.code` for left/right detection. If
+the platform only reports a generic modifier key, Witty leaves it unreported
+rather than aliasing it to the left-side key code.
 
 With flags `8|16`, Witty adds safe associated text as the third CSI-u
 parameter for text-producing character keys:
@@ -106,6 +118,8 @@ parameters such as `CSI 1;5A`.
 ## Deferred
 
 - Full layout-aware alternate-key reporting beyond the US physical base map.
+- Additional Kitty functional-key codes such as Hyper, Meta, ISO level shifts,
+  lock keys, media keys, and extended function keys.
 - Kitty graphics/image protocol.
 
 ## Verification
