@@ -29,8 +29,8 @@ use witty_core::{
     PixelMousePosition, RenderSnapshot, Rgba, SearchHighlight, TerminalClipboardSelection,
     TerminalClipboardWrite, TerminalColorTheme, TerminalHostAction, TerminalHyperlink,
     TerminalInputModes, TerminalMouseEvent, KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
-    KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES, KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT,
-    KITTY_KEYBOARD_REPORT_EVENT_TYPES,
+    KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES, KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS,
+    KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT, KITTY_KEYBOARD_REPORT_EVENT_TYPES,
 };
 use witty_launcher::open_external_url;
 use witty_plugin_api::{CommandRegistration, PluginAction, PluginEvent};
@@ -12208,6 +12208,7 @@ fn encode_key_input_with_event_type(
             text,
             modifiers,
             keypad_key: None,
+            base_layout_key: None,
             event_type,
         },
         modes,
@@ -12225,6 +12226,7 @@ fn encode_key_event_input(
             text: event.text.as_deref(),
             modifiers: TerminalKeyModifiers::from_winit(modifiers),
             keypad_key: keypad_key_from_winit_event(event),
+            base_layout_key: base_layout_key_from_winit_event(event),
             event_type: TerminalKeyEventType::from_winit(event),
         },
         modes,
@@ -12335,6 +12337,7 @@ struct TerminalKeyInput<'a> {
     text: Option<&'a str>,
     modifiers: TerminalKeyModifiers,
     keypad_key: Option<KeypadKey>,
+    base_layout_key: Option<char>,
     event_type: TerminalKeyEventType,
 }
 
@@ -12347,6 +12350,7 @@ fn encode_terminal_key_input(
     }
 
     let report_event_types = kitty_keyboard_report_event_types_enabled(modes);
+    let report_alternate_keys = kitty_keyboard_report_alternate_keys_enabled(modes);
     if input.event_type == TerminalKeyEventType::Release && !report_event_types {
         return None;
     }
@@ -12355,6 +12359,7 @@ fn encode_terminal_key_input(
         if let Some(bytes) = kitty_all_keys_sequence(
             input,
             kitty_keyboard_report_associated_text_enabled(modes),
+            report_alternate_keys,
             report_event_types,
         )
         {
@@ -12363,7 +12368,9 @@ fn encode_terminal_key_input(
     }
 
     if kitty_keyboard_disambiguate_enabled(modes) {
-        if let Some(bytes) = kitty_disambiguated_key_sequence(input, report_event_types) {
+        if let Some(bytes) =
+            kitty_disambiguated_key_sequence(input, report_alternate_keys, report_event_types)
+        {
             return Some(bytes);
         }
     }
@@ -12432,35 +12439,40 @@ fn kitty_keyboard_report_event_types_enabled(modes: TerminalInputModes) -> bool 
     modes.kitty_keyboard_flags & KITTY_KEYBOARD_REPORT_EVENT_TYPES != 0
 }
 
+fn kitty_keyboard_report_alternate_keys_enabled(modes: TerminalInputModes) -> bool {
+    modes.kitty_keyboard_flags & KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS != 0
+}
+
 fn kitty_all_keys_sequence(
     input: TerminalKeyInput<'_>,
     report_associated_text: bool,
+    report_alternate_keys: bool,
     report_event_type: bool,
 ) -> Option<Vec<u8>> {
     match input.logical_key {
         Key::Named(NamedKey::Escape) => Some(kitty_csi_u_sequence_with_text(
-            27,
+            KittyKeyCodes::new(27),
             input.modifiers,
             input.event_type,
             report_event_type,
             kitty_associated_text(input, report_associated_text, false),
         )),
         Key::Named(NamedKey::Enter) => Some(kitty_csi_u_sequence_with_text(
-            13,
+            KittyKeyCodes::new(13),
             input.modifiers,
             input.event_type,
             report_event_type,
             kitty_associated_text(input, report_associated_text, false),
         )),
         Key::Named(NamedKey::Tab) => Some(kitty_csi_u_sequence_with_text(
-            9,
+            KittyKeyCodes::new(9),
             input.modifiers,
             input.event_type,
             report_event_type,
             kitty_associated_text(input, report_associated_text, false),
         )),
         Key::Named(NamedKey::Backspace) => Some(kitty_csi_u_sequence_with_text(
-            127,
+            KittyKeyCodes::new(127),
             input.modifiers,
             input.event_type,
             report_event_type,
@@ -12468,9 +12480,10 @@ fn kitty_all_keys_sequence(
         )),
         Key::Character(value) => {
             let text = kitty_associated_text(input, report_associated_text, true);
-            let key_code = kitty_character_key_code(value).unwrap_or(0);
+            let key_codes = kitty_character_key_codes(value, input, report_alternate_keys)
+                .unwrap_or_else(|| KittyKeyCodes::new(0));
             Some(kitty_csi_u_sequence_with_text(
-                key_code,
+                key_codes,
                 input.modifiers,
                 input.event_type,
                 report_event_type,
@@ -12483,11 +12496,12 @@ fn kitty_all_keys_sequence(
 
 fn kitty_disambiguated_key_sequence(
     input: TerminalKeyInput<'_>,
+    report_alternate_keys: bool,
     report_event_type: bool,
 ) -> Option<Vec<u8>> {
     match input.logical_key {
         Key::Named(NamedKey::Escape) => Some(kitty_csi_u_sequence(
-            27,
+            KittyKeyCodes::new(27),
             input.modifiers,
             input.event_type,
             report_event_type,
@@ -12495,9 +12509,9 @@ fn kitty_disambiguated_key_sequence(
         Key::Character(value)
             if input.modifiers.control || input.modifiers.alt || input.modifiers.meta =>
         {
-            kitty_character_key_code(value).map(|key_code| {
+            kitty_character_key_codes(value, input, report_alternate_keys).map(|key_codes| {
                 kitty_csi_u_sequence(
-                    key_code,
+                    key_codes,
                     input.modifiers,
                     input.event_type,
                     report_event_type,
@@ -12508,31 +12522,127 @@ fn kitty_disambiguated_key_sequence(
     }
 }
 
-fn kitty_character_key_code(value: &str) -> Option<u32> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct KittyKeyCodes {
+    primary: u32,
+    shifted: Option<u32>,
+    base: Option<u32>,
+}
+
+impl KittyKeyCodes {
+    fn new(primary: u32) -> Self {
+        Self {
+            primary,
+            shifted: None,
+            base: None,
+        }
+    }
+
+    fn parameter(self) -> String {
+        match (self.shifted, self.base) {
+            (Some(shifted), Some(base)) => format!("{}:{shifted}:{base}", self.primary),
+            (Some(shifted), None) => format!("{}:{shifted}", self.primary),
+            (None, Some(base)) => format!("{}::{base}", self.primary),
+            (None, None) => self.primary.to_string(),
+        }
+    }
+}
+
+fn kitty_character_key_codes(
+    value: &str,
+    input: TerminalKeyInput<'_>,
+    report_alternate_keys: bool,
+) -> Option<KittyKeyCodes> {
+    let primary = kitty_primary_character_key_code(value, input.base_layout_key)?;
+    if !report_alternate_keys {
+        return Some(KittyKeyCodes::new(primary));
+    }
+
+    let shifted = kitty_shifted_character_key_code(value, input, primary);
+    let base = kitty_base_layout_key_code(input.base_layout_key, primary, shifted);
+    Some(KittyKeyCodes {
+        primary,
+        shifted,
+        base,
+    })
+}
+
+fn kitty_primary_character_key_code(value: &str, base_layout_key: Option<char>) -> Option<u32> {
     let mut chars = value.chars();
     let ch = chars.next()?;
     if chars.next().is_some() {
         return None;
     }
-    let ch = if ch.is_ascii_alphabetic() {
-        ch.to_ascii_lowercase()
+    if let Some(base) = base_layout_key {
+        if shifted_us_layout_key(base) == Some(ch) {
+            return Some(base as u32);
+        }
+    }
+    Some(kitty_lowercase_character(ch) as u32)
+}
+
+fn kitty_shifted_character_key_code(
+    value: &str,
+    input: TerminalKeyInput<'_>,
+    primary: u32,
+) -> Option<u32> {
+    if !input.modifiers.shift {
+        return None;
+    }
+    let ch = input
+        .text
+        .and_then(single_character)
+        .or_else(|| single_character(value))?;
+    let code = ch as u32;
+    (code != primary).then_some(code)
+}
+
+fn kitty_base_layout_key_code(
+    base_layout_key: Option<char>,
+    primary: u32,
+    shifted: Option<u32>,
+) -> Option<u32> {
+    let code = base_layout_key? as u32;
+    if code == primary || Some(code) == shifted {
+        None
+    } else {
+        Some(code)
+    }
+}
+
+fn single_character(value: &str) -> Option<char> {
+    let mut chars = value.chars();
+    let ch = chars.next()?;
+    chars.next().is_none().then_some(ch)
+}
+
+fn kitty_lowercase_character(ch: char) -> char {
+    if ch.is_ascii_alphabetic() {
+        return ch.to_ascii_lowercase();
+    }
+
+    let mut lower = ch.to_lowercase();
+    let Some(first) = lower.next() else {
+        return ch;
+    };
+    if lower.next().is_none() {
+        first
     } else {
         ch
-    };
-    Some(ch as u32)
+    }
 }
 
 fn kitty_csi_u_sequence(
-    key_code: u32,
+    key_codes: KittyKeyCodes,
     modifiers: TerminalKeyModifiers,
     event_type: TerminalKeyEventType,
     report_event_type: bool,
 ) -> Vec<u8> {
-    kitty_csi_u_sequence_with_text(key_code, modifiers, event_type, report_event_type, None)
+    kitty_csi_u_sequence_with_text(key_codes, modifiers, event_type, report_event_type, None)
 }
 
 fn kitty_csi_u_sequence_with_text(
-    key_code: u32,
+    key_codes: KittyKeyCodes,
     modifiers: TerminalKeyModifiers,
     event_type: TerminalKeyEventType,
     report_event_type: bool,
@@ -12549,6 +12659,7 @@ fn kitty_csi_u_sequence_with_text(
     } else {
         None
     };
+    let key_code = key_codes.parameter();
 
     match (modifier_field, associated_text) {
         (Some(modifier), Some(text)) => format!("\x1b[{key_code};{modifier};{text}u"),
@@ -12628,6 +12739,95 @@ fn modified_named_key_sequence(logical_key: &Key, modifier_parameter: u8) -> Opt
         Key::Named(NamedKey::F10) => Some(csi_modified_tilde_sequence(21, modifier_parameter)),
         Key::Named(NamedKey::F11) => Some(csi_modified_tilde_sequence(23, modifier_parameter)),
         Key::Named(NamedKey::F12) => Some(csi_modified_tilde_sequence(24, modifier_parameter)),
+        _ => None,
+    }
+}
+
+fn base_layout_key_from_winit_event(event: &KeyEvent) -> Option<char> {
+    match event.physical_key {
+        PhysicalKey::Code(code) => base_layout_key_from_winit_key_code(code),
+        PhysicalKey::Unidentified(_) => None,
+    }
+}
+
+fn base_layout_key_from_winit_key_code(code: KeyCode) -> Option<char> {
+    match code {
+        KeyCode::KeyA => Some('a'),
+        KeyCode::KeyB => Some('b'),
+        KeyCode::KeyC => Some('c'),
+        KeyCode::KeyD => Some('d'),
+        KeyCode::KeyE => Some('e'),
+        KeyCode::KeyF => Some('f'),
+        KeyCode::KeyG => Some('g'),
+        KeyCode::KeyH => Some('h'),
+        KeyCode::KeyI => Some('i'),
+        KeyCode::KeyJ => Some('j'),
+        KeyCode::KeyK => Some('k'),
+        KeyCode::KeyL => Some('l'),
+        KeyCode::KeyM => Some('m'),
+        KeyCode::KeyN => Some('n'),
+        KeyCode::KeyO => Some('o'),
+        KeyCode::KeyP => Some('p'),
+        KeyCode::KeyQ => Some('q'),
+        KeyCode::KeyR => Some('r'),
+        KeyCode::KeyS => Some('s'),
+        KeyCode::KeyT => Some('t'),
+        KeyCode::KeyU => Some('u'),
+        KeyCode::KeyV => Some('v'),
+        KeyCode::KeyW => Some('w'),
+        KeyCode::KeyX => Some('x'),
+        KeyCode::KeyY => Some('y'),
+        KeyCode::KeyZ => Some('z'),
+        KeyCode::Digit0 => Some('0'),
+        KeyCode::Digit1 => Some('1'),
+        KeyCode::Digit2 => Some('2'),
+        KeyCode::Digit3 => Some('3'),
+        KeyCode::Digit4 => Some('4'),
+        KeyCode::Digit5 => Some('5'),
+        KeyCode::Digit6 => Some('6'),
+        KeyCode::Digit7 => Some('7'),
+        KeyCode::Digit8 => Some('8'),
+        KeyCode::Digit9 => Some('9'),
+        KeyCode::Backquote => Some('`'),
+        KeyCode::Backslash => Some('\\'),
+        KeyCode::BracketLeft => Some('['),
+        KeyCode::BracketRight => Some(']'),
+        KeyCode::Comma => Some(','),
+        KeyCode::Equal => Some('='),
+        KeyCode::IntlBackslash => Some('\\'),
+        KeyCode::Minus => Some('-'),
+        KeyCode::Period => Some('.'),
+        KeyCode::Quote => Some('\''),
+        KeyCode::Semicolon => Some(';'),
+        KeyCode::Slash => Some('/'),
+        KeyCode::Space => Some(' '),
+        _ => None,
+    }
+}
+
+fn shifted_us_layout_key(base: char) -> Option<char> {
+    match base {
+        '`' => Some('~'),
+        '1' => Some('!'),
+        '2' => Some('@'),
+        '3' => Some('#'),
+        '4' => Some('$'),
+        '5' => Some('%'),
+        '6' => Some('^'),
+        '7' => Some('&'),
+        '8' => Some('*'),
+        '9' => Some('('),
+        '0' => Some(')'),
+        '-' => Some('_'),
+        '=' => Some('+'),
+        '[' => Some('{'),
+        ']' => Some('}'),
+        '\\' => Some('|'),
+        ';' => Some(':'),
+        '\'' => Some('"'),
+        ',' => Some('<'),
+        '.' => Some('>'),
+        '/' => Some('?'),
         _ => None,
     }
 }
@@ -17325,6 +17525,7 @@ mod tests {
             text: Some("1"),
             modifiers: TerminalKeyModifiers::default(),
             keypad_key: Some(KeypadKey::Digit(1)),
+            base_layout_key: None,
             event_type: TerminalKeyEventType::Press,
         };
 
@@ -17369,6 +17570,7 @@ mod tests {
                         text: Some(text),
                         modifiers: TerminalKeyModifiers::default(),
                         keypad_key: Some(keypad_key),
+                        base_layout_key: None,
                         event_type: TerminalKeyEventType::Press,
                     },
                     modes,
@@ -17385,6 +17587,7 @@ mod tests {
                     text: None,
                     modifiers: TerminalKeyModifiers::default(),
                     keypad_key: Some(KeypadKey::Enter),
+                    base_layout_key: None,
                     event_type: TerminalKeyEventType::Press,
                 },
                 modes,
@@ -17414,6 +17617,7 @@ mod tests {
                     text: Some("="),
                     modifiers: TerminalKeyModifiers::default(),
                     keypad_key: Some(KeypadKey::Equal),
+                    base_layout_key: None,
                     event_type: TerminalKeyEventType::Press,
                 },
                 modes,
@@ -17430,6 +17634,7 @@ mod tests {
                         ..TerminalKeyModifiers::default()
                     },
                     keypad_key: Some(KeypadKey::Digit(1)),
+                    base_layout_key: None,
                     event_type: TerminalKeyEventType::Press,
                 },
                 modes,
@@ -17664,6 +17869,90 @@ mod tests {
                 modes,
             ),
             Some(b"\x1b[127u".to_vec())
+        );
+    }
+
+    #[test]
+    fn key_encoder_reports_kitty_alternate_keys_when_enabled() {
+        let all_keys_modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES
+                | KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS,
+            ..TerminalInputModes::default()
+        };
+        let disambiguate_modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES
+                | KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS,
+            ..TerminalInputModes::default()
+        };
+        let shift = TerminalKeyModifiers {
+            shift: true,
+            ..TerminalKeyModifiers::default()
+        };
+        let shift_control = TerminalKeyModifiers {
+            shift: true,
+            control: true,
+            ..TerminalKeyModifiers::default()
+        };
+        let shifted_a = Key::Character("A".into());
+        let shifted_equal = Key::Character("+".into());
+        let layout_e_acute = Key::Character("é".into());
+        let shifted_i = Key::Character("I".into());
+
+        assert_eq!(
+            encode_terminal_key_input(
+                TerminalKeyInput {
+                    logical_key: &shifted_a,
+                    text: Some("A"),
+                    modifiers: shift,
+                    keypad_key: None,
+                    base_layout_key: Some('a'),
+                    event_type: TerminalKeyEventType::Press,
+                },
+                all_keys_modes,
+            ),
+            Some(b"\x1b[97:65;2u".to_vec())
+        );
+        assert_eq!(
+            encode_terminal_key_input(
+                TerminalKeyInput {
+                    logical_key: &shifted_equal,
+                    text: Some("+"),
+                    modifiers: shift,
+                    keypad_key: None,
+                    base_layout_key: Some('='),
+                    event_type: TerminalKeyEventType::Press,
+                },
+                all_keys_modes,
+            ),
+            Some(b"\x1b[61:43;2u".to_vec())
+        );
+        assert_eq!(
+            encode_terminal_key_input(
+                TerminalKeyInput {
+                    logical_key: &layout_e_acute,
+                    text: Some("é"),
+                    modifiers: TerminalKeyModifiers::default(),
+                    keypad_key: None,
+                    base_layout_key: Some('e'),
+                    event_type: TerminalKeyEventType::Press,
+                },
+                all_keys_modes,
+            ),
+            Some(b"\x1b[233::101u".to_vec())
+        );
+        assert_eq!(
+            encode_terminal_key_input(
+                TerminalKeyInput {
+                    logical_key: &shifted_i,
+                    text: Some("I"),
+                    modifiers: shift_control,
+                    keypad_key: None,
+                    base_layout_key: Some('i'),
+                    event_type: TerminalKeyEventType::Press,
+                },
+                disambiguate_modes,
+            ),
+            Some(b"\x1b[105:73;6u".to_vec())
         );
     }
 

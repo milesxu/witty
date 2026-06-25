@@ -21,6 +21,7 @@ Supported flags:
 
 - `1`: `DISAMBIGUATE_ESC_CODES`
 - `2`: `REPORT_EVENT_TYPES`
+- `4`: `REPORT_ALTERNATE_KEYS`
 - `8`: `REPORT_ALL_KEYS_AS_ESC_CODES`
 - `16`: `REPORT_ASSOCIATED_TEXT`
 
@@ -84,14 +85,27 @@ Examples:
 also active, because flag `1` alone keeps those keys on legacy byte sequences.
 Plain text release events are likewise tied to flag `8`.
 
+With flag `4`, Witty adds Kitty alternate key code sub-fields to the first
+CSI-u parameter for character keys that Witty is already reporting as CSI-u:
+
+- flags `8|4`, `Shift-A` -> `CSI 97:65;2u`
+- flags `8|4`, `Shift-=` producing `+` -> `CSI 61:43;2u`
+- flags `8|4`, `é` on the physical `E` key -> `CSI 233::101u`
+- flags `1|4`, `Ctrl-Shift-I` -> `CSI 105:73;6u`
+
+The first sub-field is the normalized character key, the second is the shifted
+character when Shift produces a distinct character, and the third is the
+physical US-layout base key when native `winit` or browser `KeyboardEvent.code`
+metadata identifies one. The base key is omitted when it matches the normalized
+key.
+
 Navigation, function, and keypad keys continue through the existing xterm/VT
 escape-code encoders. Modified navigation/function keys keep xterm modifier
 parameters such as `CSI 1;5A`.
 
 ## Deferred
 
-- Alternate key reporting.
-- Precise physical-key fallback for shifted symbols.
+- Full layout-aware alternate-key reporting beyond the US physical base map.
 - Kitty graphics/image protocol.
 
 ## Verification

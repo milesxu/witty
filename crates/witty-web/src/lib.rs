@@ -24,8 +24,8 @@ use witty_core::{
 };
 use witty_core::{
     BasicTerminal, GridSize, TerminalInputModes, KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
-    KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES, KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT,
-    KITTY_KEYBOARD_REPORT_EVENT_TYPES,
+    KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES, KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS,
+    KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT, KITTY_KEYBOARD_REPORT_EVENT_TYPES,
 };
 #[cfg(test)]
 use witty_core::{TerminalRowAnchor, TerminalVisibleRowAnchor};
@@ -2890,6 +2890,7 @@ fn encode_browser_key_input_with_metadata_and_event_type(
             text,
             modifiers,
             keypad_key: browser_keypad_key_from_event(key, text, code, location),
+            base_layout_key: browser_base_layout_key_from_code(code),
             event_type,
         },
         modes,
@@ -3003,6 +3004,7 @@ struct BrowserTerminalKeyInput<'a> {
     text: &'a str,
     modifiers: BrowserKeyModifiers,
     keypad_key: Option<BrowserKeypadKey>,
+    base_layout_key: Option<char>,
     event_type: BrowserKeyEventType,
 }
 
@@ -3015,6 +3017,7 @@ fn encode_browser_terminal_key_input(
     }
 
     let report_event_types = browser_kitty_keyboard_report_event_types_enabled(modes);
+    let report_alternate_keys = browser_kitty_keyboard_report_alternate_keys_enabled(modes);
     if input.event_type == BrowserKeyEventType::Release && !report_event_types {
         return None;
     }
@@ -3023,6 +3026,7 @@ fn encode_browser_terminal_key_input(
         if let Some(bytes) = browser_kitty_all_keys_sequence(
             input,
             browser_kitty_keyboard_report_associated_text_enabled(modes),
+            report_alternate_keys,
             report_event_types,
         ) {
             return Some(bytes);
@@ -3030,7 +3034,11 @@ fn encode_browser_terminal_key_input(
     }
 
     if browser_kitty_keyboard_disambiguate_enabled(modes) {
-        if let Some(bytes) = browser_kitty_disambiguated_key_sequence(input, report_event_types) {
+        if let Some(bytes) = browser_kitty_disambiguated_key_sequence(
+            input,
+            report_alternate_keys,
+            report_event_types,
+        ) {
             return Some(bytes);
         }
     }
@@ -3103,35 +3111,40 @@ fn browser_kitty_keyboard_report_event_types_enabled(modes: TerminalInputModes) 
     modes.kitty_keyboard_flags & KITTY_KEYBOARD_REPORT_EVENT_TYPES != 0
 }
 
+fn browser_kitty_keyboard_report_alternate_keys_enabled(modes: TerminalInputModes) -> bool {
+    modes.kitty_keyboard_flags & KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS != 0
+}
+
 fn browser_kitty_all_keys_sequence(
     input: BrowserTerminalKeyInput<'_>,
     report_associated_text: bool,
+    report_alternate_keys: bool,
     report_event_type: bool,
 ) -> Option<Vec<u8>> {
     match input.key {
         "Escape" => Some(browser_kitty_csi_u_sequence_with_text(
-            27,
+            BrowserKittyKeyCodes::new(27),
             input.modifiers,
             input.event_type,
             report_event_type,
             browser_kitty_associated_text(input, report_associated_text, false),
         )),
         "Enter" => Some(browser_kitty_csi_u_sequence_with_text(
-            13,
+            BrowserKittyKeyCodes::new(13),
             input.modifiers,
             input.event_type,
             report_event_type,
             browser_kitty_associated_text(input, report_associated_text, false),
         )),
         "Tab" => Some(browser_kitty_csi_u_sequence_with_text(
-            9,
+            BrowserKittyKeyCodes::new(9),
             input.modifiers,
             input.event_type,
             report_event_type,
             browser_kitty_associated_text(input, report_associated_text, false),
         )),
         "Backspace" => Some(browser_kitty_csi_u_sequence_with_text(
-            127,
+            BrowserKittyKeyCodes::new(127),
             input.modifiers,
             input.event_type,
             report_event_type,
@@ -3139,10 +3152,14 @@ fn browser_kitty_all_keys_sequence(
         )),
         _ => {
             let text = browser_kitty_associated_text(input, report_associated_text, true);
-            let key_code = browser_kitty_character_key_code(input.key)
-                .or_else(|| (!input.text.is_empty()).then_some(0))?;
+            let key_codes = browser_kitty_character_key_codes(
+                input.key,
+                input,
+                report_alternate_keys,
+            )
+            .or_else(|| (!input.text.is_empty()).then(|| BrowserKittyKeyCodes::new(0)))?;
             Some(browser_kitty_csi_u_sequence_with_text(
-                key_code,
+                key_codes,
                 input.modifiers,
                 input.event_type,
                 report_event_type,
@@ -3154,51 +3171,150 @@ fn browser_kitty_all_keys_sequence(
 
 fn browser_kitty_disambiguated_key_sequence(
     input: BrowserTerminalKeyInput<'_>,
+    report_alternate_keys: bool,
     report_event_type: bool,
 ) -> Option<Vec<u8>> {
     match input.key {
         "Escape" => Some(browser_kitty_csi_u_sequence(
-            27,
+            BrowserKittyKeyCodes::new(27),
             input.modifiers,
             input.event_type,
             report_event_type,
         )),
         _ if input.modifiers.control || input.modifiers.alt || input.modifiers.meta => {
-            browser_kitty_character_key_code(input.key).map(|key_code| {
-                browser_kitty_csi_u_sequence(
-                    key_code,
-                    input.modifiers,
-                    input.event_type,
-                    report_event_type,
-                )
-            })
+            browser_kitty_character_key_codes(input.key, input, report_alternate_keys).map(
+                |key_codes| {
+                    browser_kitty_csi_u_sequence(
+                        key_codes,
+                        input.modifiers,
+                        input.event_type,
+                        report_event_type,
+                    )
+                },
+            )
         }
         _ => None,
     }
 }
 
-fn browser_kitty_character_key_code(value: &str) -> Option<u32> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BrowserKittyKeyCodes {
+    primary: u32,
+    shifted: Option<u32>,
+    base: Option<u32>,
+}
+
+impl BrowserKittyKeyCodes {
+    fn new(primary: u32) -> Self {
+        Self {
+            primary,
+            shifted: None,
+            base: None,
+        }
+    }
+
+    fn parameter(self) -> String {
+        match (self.shifted, self.base) {
+            (Some(shifted), Some(base)) => format!("{}:{shifted}:{base}", self.primary),
+            (Some(shifted), None) => format!("{}:{shifted}", self.primary),
+            (None, Some(base)) => format!("{}::{base}", self.primary),
+            (None, None) => self.primary.to_string(),
+        }
+    }
+}
+
+fn browser_kitty_character_key_codes(
+    value: &str,
+    input: BrowserTerminalKeyInput<'_>,
+    report_alternate_keys: bool,
+) -> Option<BrowserKittyKeyCodes> {
+    let primary = browser_kitty_primary_character_key_code(value, input.base_layout_key)?;
+    if !report_alternate_keys {
+        return Some(BrowserKittyKeyCodes::new(primary));
+    }
+
+    let shifted = browser_kitty_shifted_character_key_code(value, input, primary);
+    let base = browser_kitty_base_layout_key_code(input.base_layout_key, primary, shifted);
+    Some(BrowserKittyKeyCodes {
+        primary,
+        shifted,
+        base,
+    })
+}
+
+fn browser_kitty_primary_character_key_code(
+    value: &str,
+    base_layout_key: Option<char>,
+) -> Option<u32> {
     let mut chars = value.chars();
     let ch = chars.next()?;
     if chars.next().is_some() {
         return None;
     }
-    let ch = if ch.is_ascii_alphabetic() {
-        ch.to_ascii_lowercase()
+    if let Some(base) = base_layout_key {
+        if browser_shifted_us_layout_key(base) == Some(ch) {
+            return Some(base as u32);
+        }
+    }
+    Some(browser_kitty_lowercase_character(ch) as u32)
+}
+
+fn browser_kitty_shifted_character_key_code(
+    value: &str,
+    input: BrowserTerminalKeyInput<'_>,
+    primary: u32,
+) -> Option<u32> {
+    if !input.modifiers.shift {
+        return None;
+    }
+    let ch = browser_single_character(input.text).or_else(|| browser_single_character(value))?;
+    let code = ch as u32;
+    (code != primary).then_some(code)
+}
+
+fn browser_kitty_base_layout_key_code(
+    base_layout_key: Option<char>,
+    primary: u32,
+    shifted: Option<u32>,
+) -> Option<u32> {
+    let code = base_layout_key? as u32;
+    if code == primary || Some(code) == shifted {
+        None
+    } else {
+        Some(code)
+    }
+}
+
+fn browser_single_character(value: &str) -> Option<char> {
+    let mut chars = value.chars();
+    let ch = chars.next()?;
+    chars.next().is_none().then_some(ch)
+}
+
+fn browser_kitty_lowercase_character(ch: char) -> char {
+    if ch.is_ascii_alphabetic() {
+        return ch.to_ascii_lowercase();
+    }
+
+    let mut lower = ch.to_lowercase();
+    let Some(first) = lower.next() else {
+        return ch;
+    };
+    if lower.next().is_none() {
+        first
     } else {
         ch
-    };
-    Some(ch as u32)
+    }
 }
 
 fn browser_kitty_csi_u_sequence(
-    key_code: u32,
+    key_codes: BrowserKittyKeyCodes,
     modifiers: BrowserKeyModifiers,
     event_type: BrowserKeyEventType,
     report_event_type: bool,
 ) -> Vec<u8> {
     browser_kitty_csi_u_sequence_with_text(
-        key_code,
+        key_codes,
         modifiers,
         event_type,
         report_event_type,
@@ -3207,7 +3323,7 @@ fn browser_kitty_csi_u_sequence(
 }
 
 fn browser_kitty_csi_u_sequence_with_text(
-    key_code: u32,
+    key_codes: BrowserKittyKeyCodes,
     modifiers: BrowserKeyModifiers,
     event_type: BrowserKeyEventType,
     report_event_type: bool,
@@ -3224,6 +3340,7 @@ fn browser_kitty_csi_u_sequence_with_text(
     } else {
         None
     };
+    let key_code = key_codes.parameter();
 
     match (modifier_field, associated_text) {
         (Some(modifier), Some(text)) => format!("\x1b[{key_code};{modifier};{text}u"),
@@ -3332,6 +3449,88 @@ fn browser_modified_named_key_sequence(key: &str, modifier_parameter: u8) -> Opt
         "F10" => Some(browser_csi_modified_tilde_sequence(21, modifier_parameter)),
         "F11" => Some(browser_csi_modified_tilde_sequence(23, modifier_parameter)),
         "F12" => Some(browser_csi_modified_tilde_sequence(24, modifier_parameter)),
+        _ => None,
+    }
+}
+
+fn browser_base_layout_key_from_code(code: &str) -> Option<char> {
+    match code {
+        "KeyA" => Some('a'),
+        "KeyB" => Some('b'),
+        "KeyC" => Some('c'),
+        "KeyD" => Some('d'),
+        "KeyE" => Some('e'),
+        "KeyF" => Some('f'),
+        "KeyG" => Some('g'),
+        "KeyH" => Some('h'),
+        "KeyI" => Some('i'),
+        "KeyJ" => Some('j'),
+        "KeyK" => Some('k'),
+        "KeyL" => Some('l'),
+        "KeyM" => Some('m'),
+        "KeyN" => Some('n'),
+        "KeyO" => Some('o'),
+        "KeyP" => Some('p'),
+        "KeyQ" => Some('q'),
+        "KeyR" => Some('r'),
+        "KeyS" => Some('s'),
+        "KeyT" => Some('t'),
+        "KeyU" => Some('u'),
+        "KeyV" => Some('v'),
+        "KeyW" => Some('w'),
+        "KeyX" => Some('x'),
+        "KeyY" => Some('y'),
+        "KeyZ" => Some('z'),
+        "Digit0" => Some('0'),
+        "Digit1" => Some('1'),
+        "Digit2" => Some('2'),
+        "Digit3" => Some('3'),
+        "Digit4" => Some('4'),
+        "Digit5" => Some('5'),
+        "Digit6" => Some('6'),
+        "Digit7" => Some('7'),
+        "Digit8" => Some('8'),
+        "Digit9" => Some('9'),
+        "Backquote" => Some('`'),
+        "Backslash" => Some('\\'),
+        "BracketLeft" => Some('['),
+        "BracketRight" => Some(']'),
+        "Comma" => Some(','),
+        "Equal" => Some('='),
+        "IntlBackslash" => Some('\\'),
+        "Minus" => Some('-'),
+        "Period" => Some('.'),
+        "Quote" => Some('\''),
+        "Semicolon" => Some(';'),
+        "Slash" => Some('/'),
+        "Space" => Some(' '),
+        _ => None,
+    }
+}
+
+fn browser_shifted_us_layout_key(base: char) -> Option<char> {
+    match base {
+        '`' => Some('~'),
+        '1' => Some('!'),
+        '2' => Some('@'),
+        '3' => Some('#'),
+        '4' => Some('$'),
+        '5' => Some('%'),
+        '6' => Some('^'),
+        '7' => Some('&'),
+        '8' => Some('*'),
+        '9' => Some('('),
+        '0' => Some(')'),
+        '-' => Some('_'),
+        '=' => Some('+'),
+        '[' => Some('{'),
+        ']' => Some('}'),
+        '\\' => Some('|'),
+        ';' => Some(':'),
+        '\'' => Some('"'),
+        ',' => Some('<'),
+        '.' => Some('>'),
+        '/' => Some('?'),
         _ => None,
     }
 }
@@ -6348,6 +6547,60 @@ mod tests {
                 modes,
             ),
             Some(b"\x1b[127u".to_vec())
+        );
+    }
+
+    #[test]
+    fn browser_key_input_reports_kitty_alternate_keys_when_enabled() {
+        let all_keys_modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES
+                | KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS,
+            ..TerminalInputModes::default()
+        };
+        let disambiguate_modes = TerminalInputModes {
+            kitty_keyboard_flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES
+                | KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS,
+            ..TerminalInputModes::default()
+        };
+        let shift = BrowserKeyModifiers {
+            shift: true,
+            ..BrowserKeyModifiers::default()
+        };
+        let shift_control = BrowserKeyModifiers {
+            shift: true,
+            control: true,
+            ..BrowserKeyModifiers::default()
+        };
+
+        assert_eq!(
+            encode_browser_key_input_with_metadata("A", "A", shift, "KeyA", 0, all_keys_modes),
+            Some(b"\x1b[97:65;2u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata("+", "+", shift, "Equal", 0, all_keys_modes),
+            Some(b"\x1b[61:43;2u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata(
+                "é",
+                "é",
+                BrowserKeyModifiers::default(),
+                "KeyE",
+                0,
+                all_keys_modes,
+            ),
+            Some(b"\x1b[233::101u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata(
+                "I",
+                "I",
+                shift_control,
+                "KeyI",
+                0,
+                disambiguate_modes,
+            ),
+            Some(b"\x1b[105:73;6u".to_vec())
         );
     }
 

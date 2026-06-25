@@ -2749,6 +2749,16 @@ client surface while preserving the native/browser transport split.
      where those keys remain legacy under flag `1` alone. Browser input now
      forwards keydown repeat and keyup metadata into the shared encoder. See
      `terminal-kitty-keyboard-protocol.md`.
+373. `m692-terminal-kitty-alternate-keys`
+   - done. Added Kitty keyboard protocol flag `4`
+     (`REPORT_ALTERNATE_KEYS`) to the core flag state and native/browser input
+     encoders. Character keys that are already emitted as CSI-u can now include
+     shifted-key and physical US-layout base-key sub-fields, such as
+     `Shift-A` -> `CSI 97:65;2u`, `Shift-=` producing `+` ->
+     `CSI 61:43;2u`, and non-US logical keys with browser/native physical-key
+     metadata -> `CSI primary::base u`. Navigation, function, and keypad keys
+     remain on the existing xterm/VT encoder path. See
+     `terminal-kitty-keyboard-protocol.md`.
 
 ## Non-Goals For This Line
 

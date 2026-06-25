@@ -14,8 +14,8 @@ use crate::{
     TerminalShellIntegrationEvent, TerminalShellIntegrationMarker, TerminalTextRange,
     TerminalVisibleRowAnchor, UnderlineStyle, DEFAULT_MAX_SCROLLBACK_LINES,
     KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES, KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES,
-    KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT, KITTY_KEYBOARD_REPORT_EVENT_TYPES,
-    MAX_OSC52_DECODED_BYTES,
+    KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS, KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT,
+    KITTY_KEYBOARD_REPORT_EVENT_TYPES, MAX_OSC52_DECODED_BYTES,
 };
 
 const MAX_OSC7_URI_BYTES: usize = 4096;
@@ -60,6 +60,7 @@ const REPORT_SCREEN_SIZE_CHARS: u16 = 19;
 const SUPPORTED_KITTY_KEYBOARD_FLAGS: u16 =
     KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES
         | KITTY_KEYBOARD_REPORT_EVENT_TYPES
+        | KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS
         | KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES
         | KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT;
 const MAX_KITTY_KEYBOARD_STACK_DEPTH: usize = 16;
@@ -6244,6 +6245,18 @@ mod tests {
             vec![terminal_reply(b"\x1b[?9u")]
         );
 
+        terminal.feed(b"\x1b[>13u\x1b[?u");
+        assert_eq!(
+            terminal.input_modes().kitty_keyboard_flags,
+            KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES
+                | KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS
+                | KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES
+        );
+        assert_eq!(
+            terminal.drain_host_actions(),
+            vec![terminal_reply(b"\x1b[?13u")]
+        );
+
         terminal.feed(b"\x1b[>25u\x1b[?u");
         assert_eq!(
             terminal.input_modes().kitty_keyboard_flags,
@@ -6285,21 +6298,38 @@ mod tests {
             KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES | KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT
         );
 
+        terminal.feed(b"\x1b[=4;2u");
+        assert_eq!(
+            terminal.input_modes().kitty_keyboard_flags,
+            KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS
+                | KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES
+                | KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT
+        );
+
         terminal.feed(b"\x1b[=1;3u");
         assert_eq!(
             terminal.input_modes().kitty_keyboard_flags,
-            KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES | KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT
+            KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS
+                | KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES
+                | KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT
         );
 
         terminal.feed(b"\x1b[=1;2u");
         assert_eq!(
             terminal.input_modes().kitty_keyboard_flags,
             KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES
+                | KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS
                 | KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES
                 | KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT
         );
 
         terminal.feed(b"\x1b[=4;1u");
+        assert_eq!(
+            terminal.input_modes().kitty_keyboard_flags,
+            KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS
+        );
+
+        terminal.feed(b"\x1b[=32;1u");
         assert_eq!(terminal.input_modes().kitty_keyboard_flags, 0);
     }
 
