@@ -2891,6 +2891,13 @@ client surface while preserving the native/browser transport split.
      completed, missing-report, failed, or skipped terminal runs. The helper
      keeps the true byte comparison interactive while making the surrounding
      reference-terminal workflow repeatable.
+389. `m724-keyboard-protocol-live-compare-summary`
+   - done. Added `witty --keyboard-protocol-live-compare-summary <file-or-dir>`
+     as a non-GUI report aggregation command. It expands JSON files from
+     report directories, tolerates pending, missing, malformed, and
+     wrong-diagnostic files as structured report rows, counts complete and
+     matched terminal reports, and aggregates matched/mismatched case counts for
+     the Kitty/WezTerm/Ghostty live comparison workflow.
 
 ## Non-Goals For This Line
 

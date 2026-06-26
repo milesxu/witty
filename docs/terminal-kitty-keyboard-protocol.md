@@ -198,7 +198,10 @@ Use `--keyboard-protocol-live-compare-list` to print the live case manifest and
 valid case ids without entering raw input mode. Add one or more
 `--keyboard-protocol-live-compare-case <id>` options to run only selected cases,
 and add `--keyboard-protocol-live-compare-output <path>` to save the final JSON
-report while still echoing it to stdout.
+report while still echoing it to stdout. Use
+`--keyboard-protocol-live-compare-summary <file-or-dir>` after live runs to
+summarize complete, pending, missing, or invalid report files and aggregate
+matched/mismatched case counts.
 
 `scripts/run-keyboard-protocol-live-compare-matrix.sh` wraps this live compare
 command for reference terminal emulators. It detects installed Kitty, WezTerm,

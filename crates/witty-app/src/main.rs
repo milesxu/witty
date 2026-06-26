@@ -331,6 +331,11 @@ fn run_main(args: Vec<String>) -> anyhow::Result<()> {
     if options.mode == AppMode::KeyboardProtocolLiveCompareList {
         return run_keyboard_protocol_live_compare_list();
     }
+    if options.mode == AppMode::KeyboardProtocolLiveCompareSummary {
+        return run_keyboard_protocol_live_compare_summary(
+            &options.keyboard_protocol_live_compare_summary_paths,
+        );
+    }
     if options.mode == AppMode::KeyboardProtocolNativeDiagnostics {
         return window::run_keyboard_protocol_native_diagnostics();
     }
@@ -416,6 +421,7 @@ struct AppOptions {
     font_list_filter: Option<String>,
     keyboard_protocol_live_compare_case_ids: Vec<String>,
     keyboard_protocol_live_compare_output: Option<PathBuf>,
+    keyboard_protocol_live_compare_summary_paths: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -506,8 +512,10 @@ impl AppOptions {
         let mut font_list_filter = None;
         let mut keyboard_protocol_live_compare_case_ids = Vec::new();
         let mut keyboard_protocol_live_compare_output = None;
+        let mut keyboard_protocol_live_compare_summary_paths = Vec::new();
         let mut keyboard_protocol_live_compare_args_seen = false;
         let mut keyboard_protocol_live_compare_list_seen = false;
+        let mut keyboard_protocol_live_compare_summary_seen = false;
         let mut font_list_args_seen = false;
         let mut profile_store_path = None;
         let mut ssh_profile_json = None;
@@ -592,16 +600,20 @@ impl AppOptions {
                     non_profile_mode_seen = true;
                 }
                 "--keyboard-protocol-live-compare-list" => {
-                    if keyboard_protocol_live_compare_args_seen {
-                        bail!("--keyboard-protocol-live-compare-list cannot be combined with live compare case/output options");
+                    if keyboard_protocol_live_compare_args_seen
+                        || keyboard_protocol_live_compare_summary_seen
+                    {
+                        bail!("--keyboard-protocol-live-compare-list cannot be combined with live compare case/output/summary options");
                     }
                     mode = AppMode::KeyboardProtocolLiveCompareList;
                     keyboard_protocol_live_compare_list_seen = true;
                     non_profile_mode_seen = true;
                 }
                 "--keyboard-protocol-live-compare-case" => {
-                    if keyboard_protocol_live_compare_list_seen {
-                        bail!("--keyboard-protocol-live-compare-case cannot be combined with --keyboard-protocol-live-compare-list");
+                    if keyboard_protocol_live_compare_list_seen
+                        || keyboard_protocol_live_compare_summary_seen
+                    {
+                        bail!("--keyboard-protocol-live-compare-case cannot be combined with live compare list/summary modes");
                     }
                     let Some(value) = args.next() else {
                         bail!("--keyboard-protocol-live-compare-case requires a case id");
@@ -613,8 +625,10 @@ impl AppOptions {
                     non_profile_mode_seen = true;
                 }
                 "--keyboard-protocol-live-compare-output" => {
-                    if keyboard_protocol_live_compare_list_seen {
-                        bail!("--keyboard-protocol-live-compare-output cannot be combined with --keyboard-protocol-live-compare-list");
+                    if keyboard_protocol_live_compare_list_seen
+                        || keyboard_protocol_live_compare_summary_seen
+                    {
+                        bail!("--keyboard-protocol-live-compare-output cannot be combined with live compare list/summary modes");
                     }
                     let Some(value) = args.next() else {
                         bail!("--keyboard-protocol-live-compare-output requires a path");
@@ -626,6 +640,21 @@ impl AppOptions {
                         Some(parse_keyboard_protocol_live_compare_output_path(&value)?);
                     keyboard_protocol_live_compare_args_seen = true;
                     mode = AppMode::KeyboardProtocolLiveCompare;
+                    non_profile_mode_seen = true;
+                }
+                "--keyboard-protocol-live-compare-summary" => {
+                    if keyboard_protocol_live_compare_list_seen
+                        || keyboard_protocol_live_compare_args_seen
+                    {
+                        bail!("--keyboard-protocol-live-compare-summary cannot be combined with live compare list/case/output options");
+                    }
+                    let Some(value) = args.next() else {
+                        bail!("--keyboard-protocol-live-compare-summary requires a path");
+                    };
+                    keyboard_protocol_live_compare_summary_paths
+                        .push(parse_keyboard_protocol_live_compare_summary_path(&value)?);
+                    keyboard_protocol_live_compare_summary_seen = true;
+                    mode = AppMode::KeyboardProtocolLiveCompareSummary;
                     non_profile_mode_seen = true;
                 }
                 "--keyboard-protocol-native-diagnostics" => {
@@ -1304,6 +1333,11 @@ impl AppOptions {
         {
             bail!("keyboard protocol live compare options require --keyboard-protocol-live-compare");
         }
+        if keyboard_protocol_live_compare_summary_seen
+            && mode != AppMode::KeyboardProtocolLiveCompareSummary
+        {
+            bail!("keyboard protocol live compare summary options require --keyboard-protocol-live-compare-summary");
+        }
         if wittyrc_args_seen
             && !matches!(
                 mode,
@@ -1465,6 +1499,7 @@ impl AppOptions {
             font_list_filter,
             keyboard_protocol_live_compare_case_ids,
             keyboard_protocol_live_compare_output,
+            keyboard_protocol_live_compare_summary_paths,
         })
     }
 
@@ -2887,6 +2922,14 @@ fn parse_keyboard_protocol_live_compare_output_path(value: &str) -> Result<PathB
     Ok(path)
 }
 
+fn parse_keyboard_protocol_live_compare_summary_path(value: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(value);
+    if path.as_os_str().is_empty() || path.to_string_lossy().trim().is_empty() {
+        bail!("--keyboard-protocol-live-compare-summary cannot be empty");
+    }
+    Ok(path)
+}
+
 fn parse_font_size(value: &str, name: &str) -> Result<u16> {
     let size = value
         .parse::<u16>()
@@ -3231,6 +3274,7 @@ enum AppMode {
     KeyboardProtocolCapture,
     KeyboardProtocolLiveCompare,
     KeyboardProtocolLiveCompareList,
+    KeyboardProtocolLiveCompareSummary,
     KeyboardProtocolNativeDiagnostics,
     FontList,
     WittyrcTemplate,
@@ -4660,6 +4704,258 @@ fn keyboard_protocol_live_compare_case_json(
     })
 }
 
+fn run_keyboard_protocol_live_compare_summary(paths: &[PathBuf]) -> anyhow::Result<()> {
+    let mut text = serde_json::to_string_pretty(&keyboard_protocol_live_compare_summary_json(
+        paths,
+    )?)?;
+    text.push('\n');
+    print!("{text}");
+    Ok(())
+}
+
+fn keyboard_protocol_live_compare_summary_json(
+    paths: &[PathBuf],
+) -> anyhow::Result<serde_json::Value> {
+    if paths.is_empty() {
+        bail!("--keyboard-protocol-live-compare-summary requires at least one path");
+    }
+
+    let report_paths = keyboard_protocol_live_compare_summary_report_paths(paths)?;
+    let reports = report_paths
+        .iter()
+        .map(|path| keyboard_protocol_live_compare_summary_report_path_json(path))
+        .collect::<Vec<_>>();
+
+    let mut complete_report_count = 0_u64;
+    let mut matched_report_count = 0_u64;
+    let mut mismatched_report_count = 0_u64;
+    let mut missing_report_count = 0_u64;
+    let mut invalid_report_count = 0_u64;
+    let mut case_count = 0_u64;
+    let mut matched_case_count = 0_u64;
+    let mut unmatched_case_count = 0_u64;
+
+    for report in &reports {
+        match report["status"].as_str().unwrap_or("unknown") {
+            "complete" => {
+                complete_report_count += 1;
+                if report["allMatched"].as_bool().unwrap_or(false) {
+                    matched_report_count += 1;
+                } else {
+                    mismatched_report_count += 1;
+                }
+                case_count += report["caseCount"].as_u64().unwrap_or(0);
+                matched_case_count += report["matchedCaseCount"].as_u64().unwrap_or(0);
+                unmatched_case_count += report["unmatchedCaseCount"].as_u64().unwrap_or(0);
+            }
+            "missing" => missing_report_count += 1,
+            _ => invalid_report_count += 1,
+        }
+    }
+
+    let report_count = reports.len() as u64;
+    let all_complete_matched = report_count > 0
+        && complete_report_count == report_count
+        && matched_report_count == report_count;
+
+    Ok(serde_json::json!({
+        "diagnostic": "keyboard-protocol-live-compare-summary",
+        "version": env!("CARGO_PKG_VERSION"),
+        "inputs": paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+        "reportCount": report_count,
+        "completeReportCount": complete_report_count,
+        "matchedReportCount": matched_report_count,
+        "mismatchedReportCount": mismatched_report_count,
+        "missingReportCount": missing_report_count,
+        "invalidReportCount": invalid_report_count,
+        "caseCount": case_count,
+        "matchedCaseCount": matched_case_count,
+        "unmatchedCaseCount": unmatched_case_count,
+        "allCompleteMatched": all_complete_matched,
+        "reports": reports,
+    }))
+}
+
+fn keyboard_protocol_live_compare_summary_report_paths(
+    paths: &[PathBuf],
+) -> anyhow::Result<Vec<PathBuf>> {
+    let mut report_paths = Vec::new();
+    for path in paths {
+        if path.is_dir() {
+            let mut entries = fs::read_dir(path)
+                .with_context(|| format!("read live compare summary dir {}", path.display()))?
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<io::Result<Vec<_>>>()
+                .with_context(|| format!("read live compare summary dir {}", path.display()))?;
+            entries.sort();
+            report_paths.extend(entries.into_iter().filter(|entry| {
+                entry.is_file()
+                    && entry
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+            }));
+        } else {
+            report_paths.push(path.clone());
+        }
+    }
+    report_paths.sort();
+    report_paths.dedup();
+    Ok(report_paths)
+}
+
+fn keyboard_protocol_live_compare_summary_report_path_json(path: &Path) -> serde_json::Value {
+    let terminal_name = keyboard_protocol_live_compare_summary_terminal_name(path);
+    let path_text = path.display().to_string();
+    if !path.exists() {
+        return serde_json::json!({
+            "path": path_text,
+            "terminalName": terminal_name,
+            "status": "missing",
+            "diagnostic": null,
+            "allMatched": null,
+            "canceled": null,
+            "caseCount": 0,
+            "matchedCaseCount": 0,
+            "unmatchedCaseCount": 0,
+            "cases": [],
+        });
+    }
+
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) => {
+            return serde_json::json!({
+                "path": path_text,
+                "terminalName": terminal_name,
+                "status": "read-error",
+                "error": err.to_string(),
+                "diagnostic": null,
+                "allMatched": null,
+                "canceled": null,
+                "caseCount": 0,
+                "matchedCaseCount": 0,
+                "unmatchedCaseCount": 0,
+                "cases": [],
+            });
+        }
+    };
+    let report = match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(report) => report,
+        Err(err) => {
+            return serde_json::json!({
+                "path": path_text,
+                "terminalName": terminal_name,
+                "status": "invalid-json",
+                "error": err.to_string(),
+                "diagnostic": null,
+                "allMatched": null,
+                "canceled": null,
+                "caseCount": 0,
+                "matchedCaseCount": 0,
+                "unmatchedCaseCount": 0,
+                "cases": [],
+            });
+        }
+    };
+    keyboard_protocol_live_compare_summary_report_value_json(path, &report)
+}
+
+fn keyboard_protocol_live_compare_summary_report_value_json(
+    path: &Path,
+    report: &serde_json::Value,
+) -> serde_json::Value {
+    let terminal_name = keyboard_protocol_live_compare_summary_terminal_name(path);
+    let path_text = path.display().to_string();
+    let diagnostic = report.get("diagnostic").cloned().unwrap_or(serde_json::Value::Null);
+    if diagnostic != "keyboard-protocol-live-compare" {
+        let status = if diagnostic == "keyboard-protocol-live-compare-pending" {
+            "pending"
+        } else {
+            "wrong-diagnostic"
+        };
+        return serde_json::json!({
+            "path": path_text,
+            "terminalName": terminal_name,
+            "status": status,
+            "diagnostic": diagnostic,
+            "allMatched": null,
+            "canceled": null,
+            "caseCount": 0,
+            "matchedCaseCount": 0,
+            "unmatchedCaseCount": 0,
+            "cases": [],
+        });
+    }
+
+    let cases = report["cases"]
+        .as_array()
+        .map(|cases| {
+            cases
+                .iter()
+                .map(keyboard_protocol_live_compare_summary_case_json)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let case_count = cases.len() as u64;
+    let matched_case_count = cases
+        .iter()
+        .filter(|case| case["matched"].as_bool().unwrap_or(false))
+        .count() as u64;
+    let unmatched_case_count = case_count.saturating_sub(matched_case_count);
+    let canceled = report["canceled"].as_bool().unwrap_or(false);
+    let all_matched = report["allMatched"]
+        .as_bool()
+        .unwrap_or(!canceled && case_count > 0 && matched_case_count == case_count);
+
+    serde_json::json!({
+        "path": path_text,
+        "terminalName": terminal_name,
+        "status": "complete",
+        "diagnostic": diagnostic,
+        "terminal": report.get("terminal").cloned().unwrap_or(serde_json::Value::Null),
+        "allMatched": all_matched,
+        "canceled": canceled,
+        "caseCount": case_count,
+        "matchedCaseCount": matched_case_count,
+        "unmatchedCaseCount": unmatched_case_count,
+        "cases": cases,
+    })
+}
+
+fn keyboard_protocol_live_compare_summary_case_json(
+    case: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "index": case.get("index").cloned().unwrap_or(serde_json::Value::Null),
+        "id": case.get("id").cloned().unwrap_or(serde_json::Value::Null),
+        "description": case.get("description").cloned().unwrap_or(serde_json::Value::Null),
+        "matched": case.get("matched").cloned().unwrap_or(serde_json::Value::Null),
+        "canceled": case.get("canceled").cloned().unwrap_or(serde_json::Value::Null),
+        "expectedBytesEscaped": case
+            .get("expectedBytesEscaped")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        "actualBytesEscaped": case
+            .get("actualBytesEscaped")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        "drainedBytesEscaped": case
+            .get("drainedBytesEscaped")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    })
+}
+
+fn keyboard_protocol_live_compare_summary_terminal_name(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_str()?;
+    file_name
+        .strip_suffix("-live-compare.json")
+        .or_else(|| file_name.strip_suffix(".json"))
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
 struct KittyKeyboardFlagsGuard {
     active: bool,
 }
@@ -4976,6 +5272,9 @@ mod tests {
         assert!(options.launcher_args.is_empty());
         assert!(options.keyboard_protocol_live_compare_case_ids.is_empty());
         assert_eq!(options.keyboard_protocol_live_compare_output, None);
+        assert!(options
+            .keyboard_protocol_live_compare_summary_paths
+            .is_empty());
         assert_eq!(
             options.wasm_plugins,
             vec![PathBuf::from("one.wasm"), PathBuf::from("two.wasm")]
@@ -5004,6 +5303,7 @@ mod tests {
             AppMode::KeyboardProtocolCapture,
             AppMode::KeyboardProtocolLiveCompare,
             AppMode::KeyboardProtocolLiveCompareList,
+            AppMode::KeyboardProtocolLiveCompareSummary,
             AppMode::KeyboardProtocolNativeDiagnostics,
             AppMode::FontList,
             AppMode::WittyrcTemplate,
@@ -5146,6 +5446,15 @@ mod tests {
                 .unwrap()
                 .mode,
             AppMode::KeyboardProtocolLiveCompareList
+        );
+        assert_eq!(
+            AppOptions::parse([
+                "--keyboard-protocol-live-compare-summary".to_owned(),
+                "target/live".to_owned(),
+            ])
+            .unwrap()
+            .mode,
+            AppMode::KeyboardProtocolLiveCompareSummary
         );
         assert_eq!(
             AppOptions::parse(["--keyboard-protocol-native-diagnostics".to_owned()])
@@ -5311,6 +5620,22 @@ mod tests {
             options.keyboard_protocol_live_compare_output,
             Some(PathBuf::from("target/live.json"))
         );
+        let summary_options = AppOptions::parse([
+            "--keyboard-protocol-live-compare-summary".to_owned(),
+            "target/live".to_owned(),
+            "--keyboard-protocol-live-compare-summary".to_owned(),
+            "target/other.json".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            summary_options.mode,
+            AppMode::KeyboardProtocolLiveCompareSummary
+        );
+        assert_eq!(
+            summary_options.keyboard_protocol_live_compare_summary_paths,
+            vec![PathBuf::from("target/live"), PathBuf::from("target/other.json")]
+        );
         assert!(AppOptions::parse([
             "--keyboard-protocol-live-compare-list".to_owned(),
             "--keyboard-protocol-live-compare-output".to_owned(),
@@ -5321,6 +5646,18 @@ mod tests {
         assert!(AppOptions::parse([
             "--keyboard-protocol-live-compare-output".to_owned(),
             "".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--keyboard-protocol-live-compare-summary".to_owned(),
+            "".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse([
+            "--keyboard-protocol-live-compare-summary".to_owned(),
+            "target/live".to_owned(),
+            "--keyboard-protocol-live-compare-case".to_owned(),
+            "legacy-ctrl-i".to_owned(),
         ])
         .is_err());
     }
@@ -9075,6 +9412,98 @@ Host prod
         assert_eq!(matched["drainedBytesHex"], "");
         assert_eq!(mismatched["actualBytesEscaped"], "\\t");
         assert_eq!(mismatched["matched"], false);
+    }
+
+    #[test]
+    fn keyboard_protocol_live_compare_summary_counts_reports_and_cases() {
+        let dir = std::env::temp_dir().join(format!(
+            "witty-keyboard-summary-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("kitty-live-compare.json"),
+            serde_json::to_string(&serde_json::json!({
+                "diagnostic": "keyboard-protocol-live-compare",
+                "terminal": {
+                    "TERM": "xterm-kitty"
+                },
+                "canceled": false,
+                "allMatched": false,
+                "cases": [
+                    {
+                        "index": 1,
+                        "id": "legacy-ctrl-i",
+                        "description": "Legacy Ctrl-I remains indistinguishable from Tab.",
+                        "matched": true,
+                        "canceled": false,
+                        "expectedBytesEscaped": "\\t",
+                        "actualBytesEscaped": "\\t",
+                        "drainedBytesEscaped": ""
+                    },
+                    {
+                        "index": 2,
+                        "id": "kitty-disambiguate-ctrl-i",
+                        "description": "Kitty flag 1 disambiguates Ctrl-I from Tab.",
+                        "matched": false,
+                        "canceled": false,
+                        "expectedBytesEscaped": "\\x1b[105;5u",
+                        "actualBytesEscaped": "\\t",
+                        "drainedBytesEscaped": ""
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("pending-live-compare.json"),
+            r#"{"diagnostic":"keyboard-protocol-live-compare-pending"}"#,
+        )
+        .unwrap();
+
+        let summary = keyboard_protocol_live_compare_summary_json(&[
+            dir.clone(),
+            dir.join("ghostty-live-compare.json"),
+        ])
+        .unwrap();
+        let reports = summary["reports"].as_array().expect("reports array");
+        let complete = reports
+            .iter()
+            .find(|report| report["status"] == "complete")
+            .expect("complete report");
+        let missing = reports
+            .iter()
+            .find(|report| report["status"] == "missing")
+            .expect("missing report");
+        let pending = reports
+            .iter()
+            .find(|report| report["status"] == "pending")
+            .expect("pending report");
+
+        assert_eq!(
+            summary["diagnostic"],
+            "keyboard-protocol-live-compare-summary"
+        );
+        assert_eq!(summary["reportCount"], 3);
+        assert_eq!(summary["completeReportCount"], 1);
+        assert_eq!(summary["matchedReportCount"], 0);
+        assert_eq!(summary["mismatchedReportCount"], 1);
+        assert_eq!(summary["missingReportCount"], 1);
+        assert_eq!(summary["invalidReportCount"], 1);
+        assert_eq!(summary["caseCount"], 2);
+        assert_eq!(summary["matchedCaseCount"], 1);
+        assert_eq!(summary["unmatchedCaseCount"], 1);
+        assert_eq!(summary["allCompleteMatched"], false);
+        assert_eq!(complete["terminalName"], "kitty");
+        assert_eq!(complete["terminal"]["TERM"], "xterm-kitty");
+        assert_eq!(complete["cases"][1]["id"], "kitty-disambiguate-ctrl-i");
+        assert_eq!(missing["terminalName"], "ghostty");
+        assert_eq!(pending["diagnostic"], "keyboard-protocol-live-compare-pending");
     }
 
     #[test]

@@ -180,6 +180,10 @@ terminal_command() {
   esac
 }
 
+summary_command() {
+  printf '%s\0' "${WITTY_BIN}" --keyboard-protocol-live-compare-summary "${OUTPUT_DIR}"
+}
+
 terminal_plan_json() {
   local terminal="$1"
   local binary
@@ -219,6 +223,10 @@ print_plan_json() {
   printf '  "build": %s,\n' "$([[ "${BUILD}" == "1" ]] && printf true || printf false)"
   printf '  "outputDir": %s,\n' "$(json_string "${OUTPUT_DIR}")"
   printf '  "cases": %s,\n' "$(json_string_array "${CASES[@]}")"
+  local -a summary
+  mapfile -d '' -t summary < <(summary_command)
+  printf '  "summaryCommand": %s,\n' "$(json_command_array "${summary[@]}")"
+  printf '  "summaryShellCommand": %s,\n' "$(json_string "$(print_shell_command "${summary[@]}")")"
   printf '  "terminals": [\n'
   local index=0
   local terminal
@@ -311,6 +319,10 @@ run_matrix() {
   printf '  "wittyBin": %s,\n' "$(json_string "${WITTY_BIN}")"
   printf '  "outputDir": %s,\n' "$(json_string "${OUTPUT_DIR}")"
   printf '  "cases": %s,\n' "$(json_string_array "${CASES[@]}")"
+  local -a summary
+  mapfile -d '' -t summary < <(summary_command)
+  printf '  "summaryCommand": %s,\n' "$(json_command_array "${summary[@]}")"
+  printf '  "summaryShellCommand": %s,\n' "$(json_string "$(print_shell_command "${summary[@]}")")"
   printf '  "results": [\n'
   local index
   for index in "${!results[@]}"; do

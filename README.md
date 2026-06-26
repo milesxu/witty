@@ -297,6 +297,7 @@ witty --keyboard-protocol-live-compare
 witty --keyboard-protocol-live-compare-list
 witty --keyboard-protocol-live-compare-case kitty-disambiguate-ctrl-i
 witty --keyboard-protocol-live-compare-output target/kitty-live.json
+witty --keyboard-protocol-live-compare-summary target/keyboard-protocol-live-compare
 ```
 
 To launch the same guided check inside each installed reference terminal
