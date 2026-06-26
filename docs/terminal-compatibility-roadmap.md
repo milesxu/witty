@@ -2820,6 +2820,15 @@ client surface while preserving the native/browser transport split.
      OpenGL launcher treats it as a helper mode, so it can be run through
      `scripts/run-witty-native-opengl.sh` without appending `--window`.
      Interactive live key capture remains follow-up work.
+381. `m708-keyboard-protocol-live-byte-capture`
+   - done. Added `witty --keyboard-protocol-capture`, an interactive terminal
+     byte capture helper for comparing what the current terminal actually
+     sends. The command requires terminal stdin, saves `stty -g`, switches to
+     `stty raw -echo min 0 time 1`, prints grouped key-event bytes as hex and
+     escaped text, exits on `Ctrl-C`, and restores the saved terminal state on
+     drop. It is also allowlisted in `scripts/run-witty-native-opengl.sh` as a
+     non-window helper. Native/browser key-location metadata remains future
+     diagnostic work.
 
 ## Non-Goals For This Line
 

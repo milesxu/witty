@@ -12,7 +12,7 @@ use std::{
     env,
     ffi::OsString,
     fs::{self, OpenOptions},
-    io::Write as _,
+    io::{self, IsTerminal, Write as _},
 };
 
 use anyhow::{bail, Context as _, Result};
@@ -318,6 +318,9 @@ fn run_main(args: Vec<String>) -> anyhow::Result<()> {
     if options.mode == AppMode::KeyboardProtocolDiagnostics {
         return run_keyboard_protocol_diagnostics();
     }
+    if options.mode == AppMode::KeyboardProtocolCapture {
+        return run_keyboard_protocol_capture();
+    }
     if options.mode == AppMode::FontList {
         return run_font_list(options.font_list_filter.as_deref());
     }
@@ -559,6 +562,10 @@ impl AppOptions {
                 }
                 "--keyboard-protocol-diagnostics" => {
                     mode = AppMode::KeyboardProtocolDiagnostics;
+                    non_profile_mode_seen = true;
+                }
+                "--keyboard-protocol-capture" => {
+                    mode = AppMode::KeyboardProtocolCapture;
                     non_profile_mode_seen = true;
                 }
                 "--font-list" => {
@@ -3134,6 +3141,7 @@ enum AppMode {
     RendererBackendInfo,
     RendererNoSurfaceDiagnostics,
     KeyboardProtocolDiagnostics,
+    KeyboardProtocolCapture,
     FontList,
     WittyrcTemplate,
     WittyrcDefaultPath,
@@ -4124,6 +4132,126 @@ fn escaped_bytes(bytes: &[u8]) -> String {
         .collect()
 }
 
+fn run_keyboard_protocol_capture() -> anyhow::Result<()> {
+    if !io::stdin().is_terminal() {
+        bail!("--keyboard-protocol-capture requires stdin to be a terminal");
+    }
+
+    let mut stdout = io::stdout();
+    writeln!(stdout, "Witty keyboard protocol capture")?;
+    writeln!(stdout, "Press keys to print the bytes sent by this terminal.")?;
+    writeln!(stdout, "Press Ctrl-C to exit.")?;
+    stdout.flush()?;
+
+    let _raw_mode = SttyRawMode::enter()?;
+    let mut stdin = io::stdin();
+    let mut index = 1usize;
+    loop {
+        let bytes = read_keyboard_protocol_capture_event(&mut stdin)?;
+        if bytes.contains(&0x03) {
+            break;
+        }
+        writeln!(
+            stdout,
+            "{}",
+            keyboard_protocol_capture_event_line(index, &bytes)
+        )?;
+        stdout.flush()?;
+        index += 1;
+    }
+
+    writeln!(stdout, "\nkeyboard protocol capture ended")?;
+    Ok(())
+}
+
+struct SttyRawMode {
+    saved_state: String,
+}
+
+impl SttyRawMode {
+    fn enter() -> anyhow::Result<Self> {
+        let saved_state = stty_saved_state()?;
+        run_stty(["raw", "-echo", "min", "0", "time", "1"])?;
+        Ok(Self { saved_state })
+    }
+}
+
+impl Drop for SttyRawMode {
+    fn drop(&mut self) {
+        if !self.saved_state.is_empty() {
+            let _ = run_stty([self.saved_state.as_str()]);
+        }
+    }
+}
+
+fn stty_saved_state() -> anyhow::Result<String> {
+    let output = std::process::Command::new("stty")
+        .arg("-g")
+        .stdin(std::process::Stdio::inherit())
+        .output()
+        .context("run stty -g")?;
+    if !output.status.success() {
+        bail!(
+            "stty -g failed with status {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn run_stty<I, S>(args: I) -> anyhow::Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let output = std::process::Command::new("stty")
+        .args(args)
+        .stdin(std::process::Stdio::inherit())
+        .output()
+        .context("run stty")?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        bail!(
+            "stty failed with status {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+    }
+}
+
+fn read_keyboard_protocol_capture_event(reader: &mut impl io::Read) -> io::Result<Vec<u8>> {
+    let mut event = Vec::new();
+    let mut buf = [0u8; 64];
+    let mut empty_reads_after_event = 0usize;
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) if event.is_empty() => {}
+            Ok(0) => {
+                empty_reads_after_event += 1;
+                if empty_reads_after_event >= 2 {
+                    return Ok(event);
+                }
+            }
+            Ok(n) => {
+                event.extend_from_slice(&buf[..n]);
+                empty_reads_after_event = 0;
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn keyboard_protocol_capture_event_line(index: usize, bytes: &[u8]) -> String {
+    format!(
+        "event {index}: bytesHex={} bytesEscaped={}",
+        bytes_hex(bytes),
+        escaped_bytes(bytes)
+    )
+}
+
 fn renderer_no_surface_diagnostics_json() -> serde_json::Value {
     let size = GridSize::new(4, 16);
     let mut terminal = BasicTerminal::new(size);
@@ -4319,6 +4447,7 @@ mod tests {
             AppMode::RendererBackendInfo,
             AppMode::RendererNoSurfaceDiagnostics,
             AppMode::KeyboardProtocolDiagnostics,
+            AppMode::KeyboardProtocolCapture,
             AppMode::FontList,
             AppMode::WittyrcTemplate,
             AppMode::WittyrcDefaultPath,
@@ -4442,6 +4571,12 @@ mod tests {
                 .unwrap()
                 .mode,
             AppMode::KeyboardProtocolDiagnostics
+        );
+        assert_eq!(
+            AppOptions::parse(["--keyboard-protocol-capture".to_owned()])
+                .unwrap()
+                .mode,
+            AppMode::KeyboardProtocolCapture
         );
         assert_eq!(
             AppOptions::parse(["--font-list".to_owned()]).unwrap().mode,
@@ -8209,6 +8344,18 @@ Host prod
         assert_eq!(
             case_by_id("kitty-right-ctrl-release")["modifierKey"],
             "RIGHT_CONTROL"
+        );
+    }
+
+    #[test]
+    fn keyboard_protocol_capture_formats_grouped_bytes() {
+        let mut reader = std::io::Cursor::new(b"\x1b[A".to_vec());
+        let bytes = read_keyboard_protocol_capture_event(&mut reader).unwrap();
+
+        assert_eq!(bytes, b"\x1b[A");
+        assert_eq!(
+            keyboard_protocol_capture_event_line(7, &bytes),
+            "event 7: bytesHex=1b 5b 41 bytesEscaped=\\x1b[A"
         );
     }
 

@@ -278,6 +278,13 @@ For a non-GUI local report of representative encoded key sequences, run:
 witty --keyboard-protocol-diagnostics
 ```
 
+To capture the raw bytes sent by the current terminal for live comparison,
+run:
+
+```text
+witty --keyboard-protocol-capture
+```
+
 The session tab strip is hidden by default so it never covers shell output or a
 tmux status line. Set `session-tab-show-single = true` or
 `session-tab-show-multiple = true` to render it, and use

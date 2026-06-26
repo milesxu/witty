@@ -171,13 +171,20 @@ alternate keys, keypad digit/navigation keys, and sided modifier release
 events. Each case reports flags, flag names, key metadata, hex bytes, and
 escaped bytes.
 
+`witty --keyboard-protocol-capture` is the live companion tool. It requires
+stdin to be a terminal, temporarily switches the terminal to `stty raw -echo`,
+prints the hex and escaped bytes sent by the current terminal for each key
+event, and restores the previous `stty -g` state on exit. Press `Ctrl-C` to
+leave capture mode. This captures terminal-emitted bytes for comparison; it
+does not expose native `winit` or browser key-location metadata yet.
+
 ## Deferred
 
 - Full layout-aware alternate-key reporting beyond the US physical base map.
 - Less common Kitty functional-key codes such as ISO level shifts beyond
   `AltGraph` and platform-specific media/application keys.
-- Interactive keyboard protocol diagnostic mode that captures real key presses
-  and browser/native location metadata for live comparison against Kitty,
+- Native/browser key-location metadata in live keyboard protocol diagnostics,
+  so Witty can compare physical-key and modifier-side detection against Kitty,
   WezTerm, Ghostty, and Neovim behavior.
 - Kitty graphics/image protocol.
 
@@ -191,4 +198,10 @@ cargo run -p witty-app -- --keyboard-protocol-diagnostics
 cargo run -p witty-app -- --real-tui-smoke nvim-kitty-keyboard
 cargo test -p witty-web browser_key_input_ --lib
 cargo check --workspace
+```
+
+Manual live capture:
+
+```bash
+cargo run -p witty-app -- --keyboard-protocol-capture
 ```
