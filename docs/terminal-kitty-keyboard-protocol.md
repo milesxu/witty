@@ -150,13 +150,20 @@ legacy xterm sequence when flags `1` or `8` are active:
 
 - `F13` -> `CSI 57376u`
 - `CapsLock` -> `CSI 57358u`
+- browser `MediaReverse` -> `CSI 57431u`
 - `MediaTrackNext` release with flags `1|2` -> `CSI 57435;1:3u`
-- `AltGraph` -> `CSI 57453u`
+- `AltGraph` / ISO Level 3 Shift -> `CSI 57453u`
 
 The supported native/browser PUA set includes `CapsLock`, `ScrollLock`,
 `NumLock`, `PrintScreen`, `Pause`, `ContextMenu`, `F13` through `F35`, common
-media keys, volume keys, `Hyper` modifier keys when side metadata is available,
-native `Meta` modifier keys when side metadata is available, and `AltGraph`.
+media keys including browser `MediaReverse`, volume keys, `Hyper` modifier
+keys when side metadata is available, native `Meta` modifier keys when side
+metadata is available, and `AltGraph`.
+
+When a platform reports AltGraph as both logical `AltGraph` and physical right
+Alt, Witty reports the Kitty ISO Level 3 Shift PUA key instead of the right Alt
+modifier-key PUA code. Plain right Alt events still report right Alt when the
+logical key is not AltGraph.
 
 Keypad keys use legacy text or application keypad SS3 sequences until Kitty
 flags `1` or `8` request disambiguated keypad reporting.
@@ -167,9 +174,11 @@ flags `1` or `8` request disambiguated keypad reporting.
 representative key encodings. The command does not open a window, create a
 renderer surface, or start a PTY. Current cases include legacy `Ctrl-I`, Kitty
 `Ctrl-I` disambiguation, Kitty event typing, `Ctrl-Enter`, associated text with
-alternate keys, keypad digit/navigation keys, and sided modifier release
-events. Each case reports flags, flag names, key metadata, hex bytes, and
-escaped bytes.
+alternate keys, keypad digit/navigation keys, PUA functional keys, AltGraph,
+and sided modifier press/release events. Each case reports flags, flag names,
+key metadata, hex bytes, and escaped bytes. The JSON also includes
+`supportedKittyPuaKeys`, a table of Witty's current Kitty PUA key names and
+codepoints for capture comparison.
 
 `witty --keyboard-protocol-capture` is the live companion tool. It requires
 stdin to be a terminal, temporarily switches the terminal to `stty raw -echo`,

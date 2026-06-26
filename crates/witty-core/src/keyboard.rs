@@ -71,6 +71,7 @@ pub enum TerminalNamedKey {
   MediaPlay,
   MediaPause,
   MediaPlayPause,
+  MediaReverse,
   MediaStop,
   MediaFastForward,
   MediaRewind,
@@ -221,6 +222,59 @@ pub enum TerminalModifierKey {
   LeftMeta,
   RightMeta,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalKittyPuaKeyCode {
+  pub key: TerminalNamedKey,
+  pub name: &'static str,
+  pub code: u32,
+}
+
+pub const TERMINAL_KITTY_PUA_KEY_CODES: &[TerminalKittyPuaKeyCode] = &[
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::CapsLock, name: "CAPS_LOCK", code: 57358 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::ScrollLock, name: "SCROLL_LOCK", code: 57359 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::NumLock, name: "NUM_LOCK", code: 57360 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::PrintScreen, name: "PRINT_SCREEN", code: 57361 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::Pause, name: "PAUSE", code: 57362 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::ContextMenu, name: "MENU", code: 57363 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F13, name: "F13", code: 57376 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F14, name: "F14", code: 57377 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F15, name: "F15", code: 57378 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F16, name: "F16", code: 57379 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F17, name: "F17", code: 57380 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F18, name: "F18", code: 57381 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F19, name: "F19", code: 57382 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F20, name: "F20", code: 57383 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F21, name: "F21", code: 57384 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F22, name: "F22", code: 57385 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F23, name: "F23", code: 57386 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F24, name: "F24", code: 57387 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F25, name: "F25", code: 57388 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F26, name: "F26", code: 57389 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F27, name: "F27", code: 57390 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F28, name: "F28", code: 57391 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F29, name: "F29", code: 57392 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F30, name: "F30", code: 57393 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F31, name: "F31", code: 57394 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F32, name: "F32", code: 57395 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F33, name: "F33", code: 57396 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F34, name: "F34", code: 57397 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::F35, name: "F35", code: 57398 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::MediaPlay, name: "MEDIA_PLAY", code: 57428 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::MediaPause, name: "MEDIA_PAUSE", code: 57429 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::MediaPlayPause, name: "MEDIA_PLAY_PAUSE", code: 57430 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::MediaReverse, name: "MEDIA_REVERSE", code: 57431 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::MediaStop, name: "MEDIA_STOP", code: 57432 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::MediaFastForward, name: "MEDIA_FAST_FORWARD", code: 57433 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::MediaRewind, name: "MEDIA_REWIND", code: 57434 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::MediaTrackNext, name: "MEDIA_TRACK_NEXT", code: 57435 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::MediaTrackPrevious, name: "MEDIA_TRACK_PREVIOUS", code: 57436 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::MediaRecord, name: "MEDIA_RECORD", code: 57437 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::AudioVolumeDown, name: "VOLUME_DOWN", code: 57438 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::AudioVolumeUp, name: "VOLUME_UP", code: 57439 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::AudioVolumeMute, name: "VOLUME_MUTE", code: 57440 },
+  TerminalKittyPuaKeyCode { key: TerminalNamedKey::AltGraph, name: "ISO_LEVEL3_SHIFT", code: 57453 },
+];
 
 impl TerminalModifierKey {
   fn kitty_key_code(self) -> u32 {
@@ -410,6 +464,9 @@ fn kitty_all_keys_sequence(
   report_alternate_keys: bool,
   report_event_type: bool,
 ) -> Option<Vec<u8>> {
+  if input.key == TerminalKey::Named(TerminalNamedKey::AltGraph) {
+    return kitty_functional_key_sequence(input, report_event_type);
+  }
   if let Some(modifier_key) = input.modifier_key {
     return Some(kitty_csi_u_sequence(
       KittyKeyCodes::new(modifier_key.kitty_key_code()),
@@ -575,9 +632,18 @@ impl KittyFunctionalKey {
 }
 
 fn kitty_functional_key_sequence(
-  input: TerminalKeyInput<'_>,
+  mut input: TerminalKeyInput<'_>,
   report_event_type: bool,
 ) -> Option<Vec<u8>> {
+  if input.key == TerminalKey::Named(TerminalNamedKey::AltGraph)
+    && matches!(
+      input.modifier_key,
+      Some(TerminalModifierKey::LeftAlt | TerminalModifierKey::RightAlt)
+    )
+  {
+    input.modifiers.alt = false;
+  }
+
   let key = kitty_functional_key(input.key)?;
   if key.has_legacy_fallback() && !report_event_type && !input.modifiers.meta {
     return None;
@@ -645,51 +711,9 @@ fn kitty_functional_key(key: TerminalKey<'_>) -> Option<KittyFunctionalKey> {
 }
 
 fn kitty_pua_functional_key_code(named_key: TerminalNamedKey) -> Option<u32> {
-  match named_key {
-    TerminalNamedKey::CapsLock => Some(57358),
-    TerminalNamedKey::ScrollLock => Some(57359),
-    TerminalNamedKey::NumLock => Some(57360),
-    TerminalNamedKey::PrintScreen => Some(57361),
-    TerminalNamedKey::Pause => Some(57362),
-    TerminalNamedKey::ContextMenu => Some(57363),
-    TerminalNamedKey::F13 => Some(57376),
-    TerminalNamedKey::F14 => Some(57377),
-    TerminalNamedKey::F15 => Some(57378),
-    TerminalNamedKey::F16 => Some(57379),
-    TerminalNamedKey::F17 => Some(57380),
-    TerminalNamedKey::F18 => Some(57381),
-    TerminalNamedKey::F19 => Some(57382),
-    TerminalNamedKey::F20 => Some(57383),
-    TerminalNamedKey::F21 => Some(57384),
-    TerminalNamedKey::F22 => Some(57385),
-    TerminalNamedKey::F23 => Some(57386),
-    TerminalNamedKey::F24 => Some(57387),
-    TerminalNamedKey::F25 => Some(57388),
-    TerminalNamedKey::F26 => Some(57389),
-    TerminalNamedKey::F27 => Some(57390),
-    TerminalNamedKey::F28 => Some(57391),
-    TerminalNamedKey::F29 => Some(57392),
-    TerminalNamedKey::F30 => Some(57393),
-    TerminalNamedKey::F31 => Some(57394),
-    TerminalNamedKey::F32 => Some(57395),
-    TerminalNamedKey::F33 => Some(57396),
-    TerminalNamedKey::F34 => Some(57397),
-    TerminalNamedKey::F35 => Some(57398),
-    TerminalNamedKey::MediaPlay => Some(57428),
-    TerminalNamedKey::MediaPause => Some(57429),
-    TerminalNamedKey::MediaPlayPause => Some(57430),
-    TerminalNamedKey::MediaStop => Some(57432),
-    TerminalNamedKey::MediaFastForward => Some(57433),
-    TerminalNamedKey::MediaRewind => Some(57434),
-    TerminalNamedKey::MediaTrackNext => Some(57435),
-    TerminalNamedKey::MediaTrackPrevious => Some(57436),
-    TerminalNamedKey::MediaRecord => Some(57437),
-    TerminalNamedKey::AudioVolumeDown => Some(57438),
-    TerminalNamedKey::AudioVolumeUp => Some(57439),
-    TerminalNamedKey::AudioVolumeMute => Some(57440),
-    TerminalNamedKey::AltGraph => Some(57453),
-    _ => None,
-  }
+  TERMINAL_KITTY_PUA_KEY_CODES
+    .iter()
+    .find_map(|entry| (entry.key == named_key).then_some(entry.code))
 }
 
 fn kitty_functional_modifier_field(
@@ -1208,7 +1232,7 @@ mod tests {
     assert_eq!(
       encode_terminal_key_input(
         TerminalKeyInput {
-          key: TerminalKey::Named(TerminalNamedKey::AltGraph),
+          key: TerminalKey::Unidentified,
           text: None,
           modifiers: TerminalKeyModifiers::default(),
           keypad_key: None,
@@ -1219,6 +1243,36 @@ mod tests {
         modes,
       ),
       Some(b"\x1b[57449u".to_vec())
+    );
+    assert_eq!(
+      encode_terminal_key_input(
+        TerminalKeyInput {
+          key: TerminalKey::Named(TerminalNamedKey::AltGraph),
+          text: None,
+          modifiers: TerminalKeyModifiers::default(),
+          keypad_key: None,
+          base_layout_key: None,
+          modifier_key: Some(TerminalModifierKey::RightAlt),
+          event_type: TerminalKeyEventType::Press,
+        },
+        modes,
+      ),
+      Some(b"\x1b[57453u".to_vec())
+    );
+    assert_eq!(
+      encode_terminal_key_input(
+        TerminalKeyInput {
+          key: TerminalKey::Named(TerminalNamedKey::MediaReverse),
+          text: None,
+          modifiers: TerminalKeyModifiers::default(),
+          keypad_key: None,
+          base_layout_key: None,
+          modifier_key: None,
+          event_type: TerminalKeyEventType::Press,
+        },
+        modes,
+      ),
+      Some(b"\x1b[57431u".to_vec())
     );
     assert_eq!(
       encode_terminal_key_input(

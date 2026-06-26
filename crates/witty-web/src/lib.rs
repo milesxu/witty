@@ -3333,6 +3333,7 @@ fn core_terminal_named_key_from_browser(key: &str) -> Option<TerminalNamedKey> {
         "MediaPlay" => Some(TerminalNamedKey::MediaPlay),
         "MediaPause" => Some(TerminalNamedKey::MediaPause),
         "MediaPlayPause" => Some(TerminalNamedKey::MediaPlayPause),
+        "MediaReverse" => Some(TerminalNamedKey::MediaReverse),
         "MediaStop" => Some(TerminalNamedKey::MediaStop),
         "MediaFastForward" => Some(TerminalNamedKey::MediaFastForward),
         "MediaRewind" => Some(TerminalNamedKey::MediaRewind),
@@ -6812,6 +6813,28 @@ mod tests {
                 disambiguate_modes,
             ),
             Some(b"\x1b[57358u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata(
+                "MediaReverse",
+                "",
+                BrowserKeyModifiers::default(),
+                "",
+                0,
+                disambiguate_modes,
+            ),
+            Some(b"\x1b[57431u".to_vec())
+        );
+        assert_eq!(
+            encode_browser_key_input_with_metadata(
+                "AltGraph",
+                "",
+                BrowserKeyModifiers::default(),
+                "AltRight",
+                2,
+                disambiguate_modes,
+            ),
+            Some(b"\x1b[57453u".to_vec())
         );
         assert_eq!(
             encode_browser_key_input_with_metadata_and_event_type(

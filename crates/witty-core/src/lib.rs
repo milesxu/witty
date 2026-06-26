@@ -15,8 +15,8 @@ use unicode_width::UnicodeWidthChar;
 pub use basic_terminal::{parse_terminal_color, BasicTerminal, TerminalColorTheme};
 pub use keyboard::{
     encode_terminal_key_input, shifted_us_layout_key, TerminalKey, TerminalKeyEventType,
-    TerminalKeyInput, TerminalKeyModifiers, TerminalKeypadKey, TerminalModifierKey,
-    TerminalNamedKey,
+    TerminalKeyInput, TerminalKeyModifiers, TerminalKeypadKey, TerminalKittyPuaKeyCode,
+    TerminalModifierKey, TerminalNamedKey, TERMINAL_KITTY_PUA_KEY_CODES,
 };
 pub use mouse::{
     encode_terminal_focus_event, encode_terminal_mouse_event, FocusEventKind, MouseButtonCode,

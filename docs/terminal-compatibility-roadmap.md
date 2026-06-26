@@ -2857,6 +2857,15 @@ client surface while preserving the native/browser transport split.
      `Ctrl-I` showing `CSI 105;5u`; local validation used static JS checks and
      `witty-web` Rust/wasm checks without overriding the local Chromium/WebGPU
      safety marker.
+385. `m716-keyboard-protocol-pua-diagnostics`
+   - done. Exposed Witty's supported Kitty PUA functional-key table through
+     the non-GUI `--keyboard-protocol-diagnostics` JSON report and added
+     representative cases for F13, browser `MediaReverse`, media-key release
+     event typing, AltGraph / ISO Level 3 Shift, sided Hyper, and native sided
+     Meta. The shared encoder now treats logical AltGraph as the Kitty
+     ISO Level 3 Shift PUA key even when platform metadata also identifies the
+     physical key as right Alt, while plain right Alt remains a sided modifier
+     key. Browser input now recognizes the DOM `MediaReverse` key value.
 
 ## Non-Goals For This Line
 

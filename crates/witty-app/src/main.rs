@@ -32,6 +32,7 @@ use witty_core::{
     DEFAULT_MAX_SCROLLBACK_LINES, KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
     KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES, KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS,
     KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT, KITTY_KEYBOARD_REPORT_EVENT_TYPES,
+    TERMINAL_KITTY_PUA_KEY_CODES,
 };
 use witty_plugin_api::{
     CommandRegistration, PluginAction, PluginEvent, PluginManifest, PluginPermissions,
@@ -3832,6 +3833,7 @@ fn keyboard_protocol_diagnostics_json() -> serde_json::Value {
         "version": env!("CARGO_PKG_VERSION"),
         "opensWindow": false,
         "startsPty": false,
+        "supportedKittyPuaKeys": keyboard_protocol_pua_key_table_json(),
         "cases": cases,
     })
 }
@@ -3949,6 +3951,54 @@ fn keyboard_protocol_diagnostic_specs() -> Vec<KeyboardProtocolDiagnosticSpec> {
             event_type: TerminalKeyEventType::Press,
         },
         KeyboardProtocolDiagnosticSpec {
+            id: "kitty-f13",
+            description: "Kitty flag 1 reports F13 with its PUA functional key code.",
+            flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+            key: TerminalKey::Named(TerminalNamedKey::F13),
+            text: None,
+            modifiers: no_modifiers,
+            keypad_key: None,
+            base_layout_key: None,
+            modifier_key: None,
+            event_type: TerminalKeyEventType::Press,
+        },
+        KeyboardProtocolDiagnosticSpec {
+            id: "kitty-media-reverse",
+            description: "Kitty flag 1 reports browser MediaReverse with its PUA functional key code.",
+            flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+            key: TerminalKey::Named(TerminalNamedKey::MediaReverse),
+            text: None,
+            modifiers: no_modifiers,
+            keypad_key: None,
+            base_layout_key: None,
+            modifier_key: None,
+            event_type: TerminalKeyEventType::Press,
+        },
+        KeyboardProtocolDiagnosticSpec {
+            id: "kitty-media-track-next-release",
+            description: "Kitty flags 1|2 report media-key release event types.",
+            flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES | KITTY_KEYBOARD_REPORT_EVENT_TYPES,
+            key: TerminalKey::Named(TerminalNamedKey::MediaTrackNext),
+            text: None,
+            modifiers: no_modifiers,
+            keypad_key: None,
+            base_layout_key: None,
+            modifier_key: None,
+            event_type: TerminalKeyEventType::Release,
+        },
+        KeyboardProtocolDiagnosticSpec {
+            id: "kitty-alt-graph",
+            description: "Kitty flag 1 reports AltGraph as ISO_LEVEL3_SHIFT.",
+            flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+            key: TerminalKey::Named(TerminalNamedKey::AltGraph),
+            text: None,
+            modifiers: no_modifiers,
+            keypad_key: None,
+            base_layout_key: None,
+            modifier_key: None,
+            event_type: TerminalKeyEventType::Press,
+        },
+        KeyboardProtocolDiagnosticSpec {
             id: "kitty-right-ctrl-release",
             description: "Kitty flags 8|2 report sided modifier release events.",
             flags: KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES
@@ -3961,7 +4011,50 @@ fn keyboard_protocol_diagnostic_specs() -> Vec<KeyboardProtocolDiagnosticSpec> {
             modifier_key: Some(TerminalModifierKey::RightControl),
             event_type: TerminalKeyEventType::Release,
         },
+        KeyboardProtocolDiagnosticSpec {
+            id: "kitty-left-hyper-press",
+            description: "Kitty flag 8 reports sided Hyper modifier press events.",
+            flags: KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES,
+            key: TerminalKey::Unidentified,
+            text: None,
+            modifiers: TerminalKeyModifiers {
+                hyper: true,
+                ..TerminalKeyModifiers::default()
+            },
+            keypad_key: None,
+            base_layout_key: None,
+            modifier_key: Some(TerminalModifierKey::LeftHyper),
+            event_type: TerminalKeyEventType::Press,
+        },
+        KeyboardProtocolDiagnosticSpec {
+            id: "kitty-right-meta-press",
+            description: "Kitty flag 8 reports native sided Meta modifier press events.",
+            flags: KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES,
+            key: TerminalKey::Unidentified,
+            text: None,
+            modifiers: TerminalKeyModifiers {
+                kitty_meta: true,
+                ..TerminalKeyModifiers::default()
+            },
+            keypad_key: None,
+            base_layout_key: None,
+            modifier_key: Some(TerminalModifierKey::RightMeta),
+            event_type: TerminalKeyEventType::Press,
+        },
     ]
+}
+
+fn keyboard_protocol_pua_key_table_json() -> Vec<serde_json::Value> {
+    TERMINAL_KITTY_PUA_KEY_CODES
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "key": keyboard_protocol_key_label(TerminalKey::Named(entry.key)),
+                "kittyName": entry.name,
+                "code": entry.code,
+            })
+        })
+        .collect()
 }
 
 fn keyboard_protocol_diagnostic_case_json(
@@ -8356,9 +8449,37 @@ Host prod
             case_by_id("kitty-keypad-left-numlock-off")["keypadKey"],
             "KP_LEFT"
         );
+        assert_eq!(case_by_id("kitty-f13")["bytesEscaped"], "\\x1b[57376u");
+        assert_eq!(
+            case_by_id("kitty-media-reverse")["bytesEscaped"],
+            "\\x1b[57431u"
+        );
+        assert_eq!(
+            case_by_id("kitty-media-track-next-release")["bytesEscaped"],
+            "\\x1b[57435;1:3u"
+        );
+        assert_eq!(
+            case_by_id("kitty-alt-graph")["bytesEscaped"],
+            "\\x1b[57453u"
+        );
         assert_eq!(
             case_by_id("kitty-right-ctrl-release")["modifierKey"],
             "RIGHT_CONTROL"
+        );
+        assert_eq!(
+            case_by_id("kitty-left-hyper-press")["bytesEscaped"],
+            "\\x1b[57445;17u"
+        );
+        assert_eq!(
+            case_by_id("kitty-right-meta-press")["bytesEscaped"],
+            "\\x1b[57452;33u"
+        );
+        assert!(
+            report["supportedKittyPuaKeys"]
+                .as_array()
+                .expect("supported kitty PUA key array")
+                .iter()
+                .any(|entry| entry["kittyName"] == "MEDIA_REVERSE" && entry["code"] == 57431)
         );
     }
 

@@ -268,7 +268,8 @@ forms; flag `4` adds shifted and physical base-key sub-fields for character
 keys; flag `8` also reports text keys and those legacy C0 keys plus left/right
 modifier-key events as CSI-u. Witty also reports Kitty PUA functional key codes
 for keys such as `F13`-`F35`, lock keys, media keys, volume keys, sided Hyper
-keys, native sided Meta keys, and `AltGraph` when Kitty keyboard mode is active.
+keys, native sided Meta keys, and `AltGraph` / ISO Level 3 Shift when Kitty
+keyboard mode is active.
 Flag `16` adds safe associated text codepoints when flag `8` is active. Kitty
 graphics/image protocols are not part of this support. See
 `docs/terminal-kitty-keyboard-protocol.md`.
@@ -277,6 +278,9 @@ For a non-GUI local report of representative encoded key sequences, run:
 ```text
 witty --keyboard-protocol-diagnostics
 ```
+
+This report includes representative sequences and a `supportedKittyPuaKeys`
+table for comparing Witty's supported PUA key codes with live terminal captures.
 
 To capture the raw bytes sent by the current terminal for live comparison,
 run:
