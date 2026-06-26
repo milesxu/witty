@@ -17,7 +17,9 @@ use witty_plugin_api::{
 #[cfg(not(target_arch = "wasm32"))]
 use witty_plugin_wasm::WasmPluginRuntime;
 use witty_render_wgpu::{CellMetrics, FramePlan, RetainedFramePlanner};
-use witty_transport::{ProfileStoreSummary, ProfileStoreV1, TerminalTransport, TransportEvent};
+#[cfg(not(target_arch = "wasm32"))]
+use witty_transport::ProfileStoreSummary;
+use witty_transport::{ProfileStoreV1, TerminalTransport, TransportEvent};
 
 pub use command_palette::{CommandPalette, CommandPaletteItem};
 pub use ime::{apply_ime_preedit_overlay, ime_preedit_overlay, ImeComposition, ImePreeditOverlay};

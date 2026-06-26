@@ -2264,7 +2264,9 @@ impl WittyWebSession {
                 }
                 PluginAction::RegisterCommand(_)
                 | PluginAction::WriteTerminal { .. }
-                | PluginAction::RenderOverlay(_) => {}
+                | PluginAction::RenderOverlay(_)
+                | PluginAction::RequestProfilePicker(_)
+                | PluginAction::RequestProfileLaunch(_) => {}
             }
         }
         changed
