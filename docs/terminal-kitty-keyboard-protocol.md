@@ -166,6 +166,11 @@ flags `1` or `8` request disambiguated keypad reporting.
 - Full layout-aware alternate-key reporting beyond the US physical base map.
 - Less common Kitty functional-key codes such as ISO level shifts beyond
   `AltGraph` and platform-specific media/application keys.
+- Keyboard protocol diagnostic tool: an interactive/local helper that prints
+  negotiated Kitty flags plus the exact bytes generated for key presses,
+  repeats, releases, modifiers, keypad keys, and browser/native location
+  metadata. This should help compare Witty against Kitty, WezTerm, Ghostty,
+  and Neovim behavior without editing real application configs.
 - Kitty graphics/image protocol.
 
 ## Verification
@@ -174,6 +179,7 @@ flags `1` or `8` request disambiguated keypad reporting.
 cargo test -p witty-core kitty_keyboard_protocol --lib
 cargo test -p witty-core keyboard --lib
 cargo test -p witty-app key_encoder_ --bin witty
+cargo run -p witty-app -- --real-tui-smoke nvim-kitty-keyboard
 cargo test -p witty-web browser_key_input_ --lib
 cargo check --workspace
 ```

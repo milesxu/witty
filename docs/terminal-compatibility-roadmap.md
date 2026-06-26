@@ -2802,6 +2802,15 @@ client surface while preserving the native/browser transport split.
      numpad source, NumLock-off navigation keys now map to Kitty `KP_LEFT`
      through `KP_BEGIN` codes, such as `KP_LEFT` -> `CSI 57417u`. Legacy xterm
      navigation remains unchanged when Kitty keyboard mode is inactive.
+379. `m704-nvim-kitty-keyboard-real-tui-smoke`
+   - done. Added `witty --real-tui-smoke nvim-kitty-keyboard` as a real
+     Neovim compatibility check for the Kitty keyboard protocol. The smoke
+     waits for Neovim to enable Kitty flags through real PTY output, sends
+     `Ctrl-I` through Witty's shared key encoder using current terminal input
+     modes, verifies `CSI 105;5:1u` is emitted while event reporting is active,
+     and confirms Neovim runs the `<C-I>` mapping instead of `<Tab>`. The
+     keyboard protocol diagnostic tool remains a planned follow-up. See
+     `real-tui-smoke-harness.md` and `terminal-kitty-keyboard-protocol.md`.
 
 ## Non-Goals For This Line
 

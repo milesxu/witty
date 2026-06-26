@@ -5,12 +5,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context as _, Result};
 use serde::Serialize;
-use witty_core::{BasicTerminal, GridSize, RenderSnapshot, TerminalHostAction};
+use witty_core::{
+    encode_terminal_key_input, BasicTerminal, GridSize, RenderSnapshot, TerminalHostAction,
+    TerminalKey, TerminalKeyEventType, TerminalKeyInput, TerminalKeyModifiers,
+    KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+};
 use witty_transport::{LocalPtyConfig, LocalPtyTransport, TerminalTransport, TransportEvent};
 
 const LESS_BASIC_RESTORE_CASE_ID: &str = "less-basic-restore";
 const VIM_BASIC_EDIT_CASE_ID: &str = "vim-basic-edit";
 const NVIM_BASIC_EDIT_CASE_ID: &str = "nvim-basic-edit";
+const NVIM_KITTY_KEYBOARD_CASE_ID: &str = "nvim-kitty-keyboard";
 const TMUX_BASIC_PANE_CASE_ID: &str = "tmux-basic-pane";
 const HTOP_OR_BTOP_REDRAW_CASE_ID: &str = "htop-or-btop-redraw";
 const VTTEST_SUBSET_CASE_ID: &str = "vttest-subset";
@@ -124,6 +129,7 @@ fn run_real_tui_smoke(case_id: &str) -> Result<RealTuiSmokeOutcome> {
         LESS_BASIC_RESTORE_CASE_ID => run_less_basic_restore_smoke(),
         VIM_BASIC_EDIT_CASE_ID => run_vim_basic_edit_smoke(),
         NVIM_BASIC_EDIT_CASE_ID => run_nvim_basic_edit_smoke(),
+        NVIM_KITTY_KEYBOARD_CASE_ID => run_nvim_kitty_keyboard_smoke(),
         TMUX_BASIC_PANE_CASE_ID => run_tmux_basic_pane_smoke(),
         HTOP_OR_BTOP_REDRAW_CASE_ID => run_htop_or_btop_redraw_smoke(),
         VTTEST_SUBSET_CASE_ID => run_vttest_subset_smoke(),
@@ -139,6 +145,7 @@ fn real_tui_smoke_case_ids() -> &'static [&'static str] {
         LESS_BASIC_RESTORE_CASE_ID,
         VIM_BASIC_EDIT_CASE_ID,
         NVIM_BASIC_EDIT_CASE_ID,
+        NVIM_KITTY_KEYBOARD_CASE_ID,
         TMUX_BASIC_PANE_CASE_ID,
         HTOP_OR_BTOP_REDRAW_CASE_ID,
         VTTEST_SUBSET_CASE_ID,
@@ -308,6 +315,15 @@ impl RealTuiRuntime {
 
     fn write_input(&mut self, bytes: &[u8]) -> Result<()> {
         self.transport.write(bytes)
+    }
+
+    fn write_key_input(&mut self, input: TerminalKeyInput<'_>) -> Result<Vec<u8>> {
+        let modes = self.terminal.input_modes();
+        let Some(bytes) = encode_terminal_key_input(input, modes) else {
+            bail!("key input was suppressed by current terminal input modes: {modes:?}");
+        };
+        self.transport.write(&bytes)?;
+        Ok(bytes)
     }
 
     fn wait_for_text(&mut self, needle: &str, deadline: Instant) -> Result<bool> {
@@ -527,6 +543,146 @@ fn run_nvim_basic_edit_smoke() -> Result<RealTuiSmokeOutcome> {
     run_editor_basic_edit_smoke(NVIM_BASIC_EDIT_CASE_ID, "nvim", nvim_basic_edit_args)
 }
 
+fn run_nvim_kitty_keyboard_smoke() -> Result<RealTuiSmokeOutcome> {
+    let started_at = Instant::now();
+    let mut report = RealTuiSmokeReport::new(NVIM_KITTY_KEYBOARD_CASE_ID);
+    let Some(nvim_path) = find_executable("nvim") else {
+        let mut report = RealTuiSmokeReport::skipped(NVIM_KITTY_KEYBOARD_CASE_ID, "nvim not found");
+        report.elapsed_ms = started_at.elapsed().as_millis();
+        return Ok(RealTuiSmokeOutcome {
+            report,
+            raw_output: None,
+        });
+    };
+    report.binary_path = Some(nvim_path.display().to_string());
+    report.version = command_version_first_line(&nvim_path);
+
+    let work_dir = create_case_work_dir(NVIM_KITTY_KEYBOARD_CASE_ID)?;
+    let home_dir = work_dir.join("home");
+    let xdg_config_home = work_dir.join("xdg-config");
+    let xdg_data_home = work_dir.join("xdg-data");
+    let xdg_state_home = work_dir.join("xdg-state");
+    let xdg_cache_home = work_dir.join("xdg-cache");
+    for dir in [
+        &home_dir,
+        &xdg_config_home,
+        &xdg_data_home,
+        &xdg_state_home,
+        &xdg_cache_home,
+    ] {
+        fs::create_dir_all(dir)
+            .with_context(|| format!("create smoke support dir {}", dir.display()))?;
+    }
+
+    let result_path = work_dir.join("nvim-kitty-keyboard-result.txt");
+    let init_path = work_dir.join("init.lua");
+    fs::write(&init_path, nvim_kitty_keyboard_init_lua(&result_path))
+        .with_context(|| format!("write nvim kitty init {}", init_path.display()))?;
+
+    let mut config = LocalPtyConfig::command(
+        REAL_TUI_SMOKE_SIZE,
+        nvim_path.to_string_lossy().into_owned(),
+    );
+    config
+        .args(nvim_kitty_keyboard_args(&init_path))
+        .env("TERM", "xterm-256color")
+        .env("COLORTERM", "truecolor")
+        .env("LC_ALL", "C.UTF-8")
+        .env("HOME", home_dir.to_string_lossy().into_owned())
+        .env(
+            "XDG_CONFIG_HOME",
+            xdg_config_home.to_string_lossy().into_owned(),
+        )
+        .env(
+            "XDG_DATA_HOME",
+            xdg_data_home.to_string_lossy().into_owned(),
+        )
+        .env(
+            "XDG_STATE_HOME",
+            xdg_state_home.to_string_lossy().into_owned(),
+        )
+        .env(
+            "XDG_CACHE_HOME",
+            xdg_cache_home.to_string_lossy().into_owned(),
+        )
+        .env("VIMINIT", "")
+        .env("GVIMINIT", "")
+        .env("EXINIT", "")
+        .cwd(&work_dir);
+
+    let capture_raw = capture_raw_real_tui_smoke();
+    let mut runtime = RealTuiRuntime::spawn(config, capture_raw)
+        .with_context(|| format!("spawn nvim at {}", nvim_path.display()))?;
+    let deadline = Instant::now() + REAL_TUI_SMOKE_TIMEOUT;
+
+    let kitty_flags_enabled = runtime.wait_until(deadline, |terminal| {
+        terminal.input_modes().kitty_keyboard_flags & KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES != 0
+    })?;
+    report.push_assertion(
+        "nvim_enabled_kitty_keyboard_protocol",
+        kitty_flags_enabled,
+        format!(
+            "expected Neovim to enable Kitty keyboard flags, got {}",
+            runtime.terminal.input_modes().kitty_keyboard_flags
+        ),
+    );
+
+    if kitty_flags_enabled {
+        let sent_bytes = runtime.write_key_input(TerminalKeyInput {
+            key: TerminalKey::Character("i"),
+            text: Some("i"),
+            modifiers: TerminalKeyModifiers {
+                control: true,
+                ..TerminalKeyModifiers::default()
+            },
+            keypad_key: None,
+            base_layout_key: None,
+            modifier_key: None,
+            event_type: TerminalKeyEventType::Press,
+        })?;
+        report.push_assertion(
+            "ctrl_i_encoded_as_csi_u",
+            sent_bytes == b"\x1b[105;5:1u",
+            format!(
+                "expected Ctrl-I to encode as CSI 105;5:1u while Kitty event reporting is active, got {}",
+                printable_bytes(&sent_bytes)
+            ),
+        );
+    }
+
+    let exited = runtime.wait_for_exit(deadline)?;
+    report.push_assertion(
+        "process_exited",
+        exited,
+        "nvim should exit after the mapped key writes the result before the case deadline",
+    );
+    report.push_assertion(
+        "process_exit_success",
+        runtime.exit_code == Some(0),
+        format!("expected exit status 0, got {:?}", runtime.exit_code),
+    );
+
+    let result_text = fs::read_to_string(&result_path).unwrap_or_default();
+    report.push_assertion(
+        "ctrl_i_mapping_selected_over_tab",
+        result_text.trim() == "ctrl-i",
+        format!(
+            "expected the <C-I> mapping to run instead of <Tab>, result file contained {:?}",
+            result_text.trim()
+        ),
+    );
+
+    runtime.poll_available()?;
+    report.finish_from_runtime(&runtime, started_at);
+
+    let _ = fs::remove_dir_all(&work_dir);
+
+    Ok(RealTuiSmokeOutcome {
+        report,
+        raw_output: runtime.raw_output,
+    })
+}
+
 fn run_editor_basic_edit_smoke(
     case_id: &str,
     binary_name: &str,
@@ -684,6 +840,64 @@ fn nvim_basic_edit_args(input_path: &Path) -> Vec<String> {
         "-n".to_owned(),
         input_path.to_string_lossy().into_owned(),
     ]
+}
+
+fn nvim_kitty_keyboard_args(init_path: &Path) -> Vec<String> {
+    vec![
+        "-n".to_owned(),
+        "-u".to_owned(),
+        init_path.to_string_lossy().into_owned(),
+        "--cmd".to_owned(),
+        "set shortmess+=I".to_owned(),
+    ]
+}
+
+fn nvim_kitty_keyboard_init_lua(result_path: &Path) -> String {
+    let result_path = lua_string_literal(&result_path.to_string_lossy());
+    format!(
+        "\
+vim.opt.swapfile = false
+vim.opt.writebackup = false
+vim.opt.updatecount = 0
+local result_path = {result_path}
+local function record(value)
+  vim.fn.writefile({{ value }}, result_path)
+  vim.cmd('qall!')
+end
+vim.keymap.set('n', '<C-I>', function() record('ctrl-i') end, {{ noremap = true, silent = true }})
+vim.keymap.set('n', '<Tab>', function() record('tab') end, {{ noremap = true, silent = true }})
+"
+    )
+}
+
+fn lua_string_literal(value: &str) -> String {
+    let mut escaped = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped.push('"');
+    escaped
+}
+
+fn printable_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| match byte {
+            b'\x1b' => "\\x1b".to_owned(),
+            b'\r' => "\\r".to_owned(),
+            b'\n' => "\\n".to_owned(),
+            b'\t' => "\\t".to_owned(),
+            0x20..=0x7e => char::from(*byte).to_string(),
+            _ => format!("\\x{byte:02x}"),
+        })
+        .collect()
 }
 
 fn run_tmux_basic_pane_smoke() -> Result<RealTuiSmokeOutcome> {
@@ -1345,6 +1559,7 @@ mod tests {
                 LESS_BASIC_RESTORE_CASE_ID,
                 VIM_BASIC_EDIT_CASE_ID,
                 NVIM_BASIC_EDIT_CASE_ID,
+                NVIM_KITTY_KEYBOARD_CASE_ID,
                 TMUX_BASIC_PANE_CASE_ID,
                 HTOP_OR_BTOP_REDRAW_CASE_ID,
                 VTTEST_SUBSET_CASE_ID,
@@ -1363,6 +1578,7 @@ mod tests {
                 LESS_BASIC_RESTORE_CASE_ID,
                 VIM_BASIC_EDIT_CASE_ID,
                 NVIM_BASIC_EDIT_CASE_ID,
+                NVIM_KITTY_KEYBOARD_CASE_ID,
                 TMUX_BASIC_PANE_CASE_ID,
                 HTOP_OR_BTOP_REDRAW_CASE_ID,
                 VTTEST_SUBSET_CASE_ID,
@@ -1436,6 +1652,44 @@ mod tests {
         assert_eq!(
             nvim_basic_edit_args(input),
             ["--clean", "-n", "/tmp/witty-editor-smoke.txt"]
+        );
+    }
+
+    #[test]
+    fn nvim_kitty_keyboard_args_and_init_are_isolated() {
+        let init = Path::new("/tmp/witty-nvim-init.lua");
+        let result = Path::new("/tmp/witty-nvim-result.txt");
+        let args = nvim_kitty_keyboard_args(init);
+        let lua = nvim_kitty_keyboard_init_lua(result);
+
+        assert_eq!(
+            args,
+            [
+                "-n",
+                "-u",
+                "/tmp/witty-nvim-init.lua",
+                "--cmd",
+                "set shortmess+=I",
+            ]
+        );
+        assert!(lua.contains("vim.keymap.set('n', '<C-I>'"));
+        assert!(lua.contains("vim.keymap.set('n', '<Tab>'"));
+        assert!(lua.contains("\"/tmp/witty-nvim-result.txt\""));
+    }
+
+    #[test]
+    fn lua_string_literal_escapes_special_characters() {
+        assert_eq!(
+            lua_string_literal("a\\b\"c\nd\re\tf"),
+            "\"a\\\\b\\\"c\\nd\\re\\tf\""
+        );
+    }
+
+    #[test]
+    fn printable_bytes_exposes_escape_sequences() {
+        assert_eq!(
+            printable_bytes(b"\x1b[105;5:1u\r\n"),
+            "\\x1b[105;5:1u\\r\\n"
         );
     }
 

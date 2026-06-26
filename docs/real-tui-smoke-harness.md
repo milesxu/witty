@@ -29,6 +29,7 @@ Implemented cases:
 | `less-basic-restore` | implemented |
 | `vim-basic-edit` | implemented |
 | `nvim-basic-edit` | implemented, skipped if `nvim` is missing |
+| `nvim-kitty-keyboard` | implemented, skipped if `nvim` is missing |
 | `tmux-basic-pane` | implemented, skipped if `tmux` is missing |
 | `htop-or-btop-redraw` | implemented, skipped if both tools are missing |
 | `vttest-subset` | implemented, skipped if `vttest` is missing |
@@ -116,6 +117,29 @@ nvim --clean -n <fixture>
 
 If `nvim` is missing, the runner writes an explicit `skipped` report.
 
+## `nvim-kitty-keyboard`
+
+The optional Neovim Kitty keyboard case runs:
+
+```text
+nvim -n -u <temporary-init.lua> --cmd 'set shortmess+=I'
+```
+
+with isolated `HOME`, `XDG_*`, and empty `VIMINIT`/`GVIMINIT`/`EXINIT`
+environment values. The temporary init maps `<C-I>` and `<Tab>` to different
+file writes, then exits after either mapping runs.
+
+Assertions:
+
+- Neovim enables Kitty keyboard protocol flags through real PTY output.
+- the smoke sends `Ctrl-I` through Witty's shared key encoder using the active
+  terminal input modes.
+- the encoded bytes are `CSI 105;5:1u` while Kitty event reporting is active.
+- Neovim runs the `<C-I>` mapping rather than the `<Tab>` mapping.
+- process exit status is `0`.
+
+If `nvim` is missing, the runner writes an explicit `skipped` report.
+
 ## `tmux-basic-pane`
 
 The tmux case uses an isolated socket path and temporary config:
@@ -195,6 +219,7 @@ Passed:
 - `target/debug/witty --real-tui-smoke less-basic-restore`
 - `target/debug/witty --real-tui-smoke vim-basic-edit`
 - `target/debug/witty --real-tui-smoke nvim-basic-edit`
+- `target/debug/witty --real-tui-smoke nvim-kitty-keyboard`
 - `target/debug/witty --real-tui-smoke tmux-basic-pane`
 - `target/debug/witty --real-tui-smoke htop-or-btop-redraw` skipped locally
 - `target/debug/witty --real-tui-smoke vttest-subset` skipped locally
@@ -205,6 +230,7 @@ Local run result:
 Real TUI smoke less-basic-restore status=passed artifact=target/real-tui-smoke/less-basic-restore.json
 Real TUI smoke vim-basic-edit status=passed artifact=target/real-tui-smoke/vim-basic-edit.json
 Real TUI smoke nvim-basic-edit status=passed artifact=target/real-tui-smoke/nvim-basic-edit.json
+Real TUI smoke nvim-kitty-keyboard status=passed artifact=target/real-tui-smoke/nvim-kitty-keyboard.json
 Real TUI smoke tmux-basic-pane status=passed artifact=target/real-tui-smoke/tmux-basic-pane.json
 Real TUI smoke htop-or-btop-redraw status=skipped artifact=target/real-tui-smoke/htop-or-btop-redraw.json
 Real TUI smoke vttest-subset status=skipped artifact=target/real-tui-smoke/vttest-subset.json
