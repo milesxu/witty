@@ -3920,6 +3920,66 @@ async function runBrowserFunctionKeySmoke(page) {
   return result.inputBytes;
 }
 
+async function runBrowserKeyboardDiagnosticPanelSmoke(page) {
+  const result = await page.evaluate(() => {
+    const panelApi = window.wittyKeyboardProtocolDiagnosticPanel;
+    if (!panelApi || typeof panelApi.open !== "function") {
+      throw new Error("keyboard diagnostic panel API is missing");
+    }
+    if (typeof window.wittyKeyboardProtocolDiagnostic !== "function") {
+      throw new Error("keyboard protocol diagnostic API is missing");
+    }
+
+    const opened = panelApi.open();
+    const report = window.wittyKeyboardProtocolDiagnostic({
+      key: "i",
+      text: "i",
+      control: true,
+      code: "KeyI",
+      location: 0,
+      modifierMask: 0,
+      eventType: 1,
+    });
+    const panel = document.getElementById("witty-keyboard-diagnostics");
+    const toggle = document.getElementById("witty-keyboard-diagnostics-toggle");
+    const summary = document.getElementById("witty-keyboard-diagnostics-summary");
+    const grid = document.getElementById("witty-keyboard-diagnostics-grid");
+    const history = document.getElementById("witty-keyboard-diagnostics-history");
+    return {
+      opened,
+      state: panelApi.state(),
+      report,
+      hidden: panel?.hidden ?? true,
+      expanded: toggle?.getAttribute("aria-expanded") ?? "",
+      summaryText: summary?.textContent ?? "",
+      gridText: grid?.innerText ?? "",
+      historyText: history?.innerText ?? "",
+    };
+  });
+
+  if (!result.opened.open || result.hidden || result.expanded !== "true") {
+    throw new Error(`keyboard diagnostic panel did not open: ${JSON.stringify(result)}`);
+  }
+  if (result.report.encoded?.kittyDisambiguate?.escaped !== "\\x1b[105;5u") {
+    throw new Error(`keyboard diagnostic Ctrl-I encoding mismatch: ${JSON.stringify(result)}`);
+  }
+  if (
+    result.state.latest?.encoded?.kittyDisambiguate?.escaped !== "\\x1b[105;5u" ||
+    !result.summaryText.includes("KeyI") ||
+    !result.gridText.includes("Kitty flag 1") ||
+    !result.gridText.includes("\\x1b[105;5u") ||
+    !result.historyText.includes("\\x1b[105;5u")
+  ) {
+    throw new Error(`keyboard diagnostic panel text mismatch: ${JSON.stringify(result)}`);
+  }
+
+  return {
+    key: result.report.key,
+    code: result.report.code,
+    kittyDisambiguate: result.report.encoded.kittyDisambiguate.escaped,
+  };
+}
+
 async function runBrowserTerminalQueryReplySmoke(page) {
   const result = await page.evaluate(async () => {
     if (!window.wittySession) {
@@ -7167,6 +7227,9 @@ try {
   }
 
   const functionKeySmokeBytes = JSON.stringify(await runBrowserFunctionKeySmoke(page));
+  const keyboardDiagnosticPanelSmoke = JSON.stringify(
+    await runBrowserKeyboardDiagnosticPanelSmoke(page),
+  );
   const queryReplySmoke =
     gateway.kind === "node"
       ? JSON.stringify(await runBrowserTerminalQueryReplySmoke(page))
@@ -7275,7 +7338,7 @@ try {
   }
 
   console.log(
-    `Witty browser smoke connected ${gateway.kind} WebSocket gateway ${launcherBackedGatewayModes.has(gateway.kind) ? url : gatewayUrl}, profile picker ${profilePickerSmoke}, scrollback config ${scrollbackConfigSmoke}, local scrollback wheel ${localScrollbackWheelSmoke}, frame stats ${frameStatsSmoke}, observed ${inputResult} after initial resize ${initialResize.rows}x${initialResize.cols}, verified gateway title and alternate-screen restore, accepted gateway output, search ${searchSmoke}, command palette ${commandPaletteSmoke}, command shortcuts ${commandShortcutSmoke}, ime ${imeSmoke}, hyperlink ${hyperlinkSmoke}, product paste ${productPasteSmoke}, keypad bytes ${keypadSmokeBytes}, function-key bytes ${functionKeySmokeBytes}, terminal query replies ${queryReplySmoke}, shell integration ${shellIntegrationSmoke}, synchronized output ${synchronizedOutputSmoke}, synchronized timeout ${synchronizedOutputTimeoutSmoke}, focus bytes ${focusSmokeBytes}, mouse bytes ${mouseSmokeBytes}, empty copy ${emptyCopySmoke}, selection override ${selectionOverrideSmoke}, copy selection ${copySelectionSmoke}, empty paste ${emptyPasteSmoke}, paste ${pasteSmoke}, bracketed paste ${bracketedPasteSmoke}, osc52 clipboard ${osc52ClipboardSmoke}, disabled selection policy ${selectionDisabledPolicySmoke}, resized canvas, and rendered a nonblank canvas at ${canvasScreenshot.pathname}${launcherLifecycleResult}`,
+    `Witty browser smoke connected ${gateway.kind} WebSocket gateway ${launcherBackedGatewayModes.has(gateway.kind) ? url : gatewayUrl}, profile picker ${profilePickerSmoke}, scrollback config ${scrollbackConfigSmoke}, local scrollback wheel ${localScrollbackWheelSmoke}, frame stats ${frameStatsSmoke}, observed ${inputResult} after initial resize ${initialResize.rows}x${initialResize.cols}, verified gateway title and alternate-screen restore, accepted gateway output, search ${searchSmoke}, command palette ${commandPaletteSmoke}, command shortcuts ${commandShortcutSmoke}, ime ${imeSmoke}, hyperlink ${hyperlinkSmoke}, product paste ${productPasteSmoke}, keypad bytes ${keypadSmokeBytes}, function-key bytes ${functionKeySmokeBytes}, keyboard diagnostic panel ${keyboardDiagnosticPanelSmoke}, terminal query replies ${queryReplySmoke}, shell integration ${shellIntegrationSmoke}, synchronized output ${synchronizedOutputSmoke}, synchronized timeout ${synchronizedOutputTimeoutSmoke}, focus bytes ${focusSmokeBytes}, mouse bytes ${mouseSmokeBytes}, empty copy ${emptyCopySmoke}, selection override ${selectionOverrideSmoke}, copy selection ${copySelectionSmoke}, empty paste ${emptyPasteSmoke}, paste ${pasteSmoke}, bracketed paste ${bracketedPasteSmoke}, osc52 clipboard ${osc52ClipboardSmoke}, disabled selection policy ${selectionDisabledPolicySmoke}, resized canvas, and rendered a nonblank canvas at ${canvasScreenshot.pathname}${launcherLifecycleResult}`,
   );
   }
 } finally {

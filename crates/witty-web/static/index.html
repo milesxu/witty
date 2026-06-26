@@ -302,9 +302,120 @@
 
       #status {
         min-height: 20px;
-        margin-top: 10px;
         color: #8fb3ff;
         font-size: 13px;
+      }
+
+      #witty-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-top: 10px;
+      }
+
+      #witty-keyboard-diagnostics-toggle {
+        min-height: 28px;
+        padding: 0 10px;
+        border: 1px solid #3b4656;
+        border-radius: 6px;
+        background: #202731;
+        color: #d7dde7;
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+
+      #witty-keyboard-diagnostics-toggle:hover,
+      #witty-keyboard-diagnostics-toggle:focus {
+        border-color: #8fb3ff;
+        outline: none;
+      }
+
+      #witty-keyboard-diagnostics-toggle[aria-expanded="true"] {
+        background: #8fb3ff;
+        color: #111827;
+      }
+
+      #witty-keyboard-diagnostics {
+        margin-top: 10px;
+        padding: 12px;
+        border: 1px solid #364150;
+        border-radius: 6px;
+        background: #171c23;
+        box-shadow: 0 16px 34px rgba(0, 0, 0, 0.24);
+      }
+
+      #witty-keyboard-diagnostics[hidden] {
+        display: none;
+      }
+
+      .keyboard-diagnostics-header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 10px;
+      }
+
+      .keyboard-diagnostics-header h2 {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      #witty-keyboard-diagnostics-summary {
+        color: #9aa7b8;
+        font-size: 12px;
+      }
+
+      .keyboard-diagnostics-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px;
+      }
+
+      .keyboard-diagnostics-cell {
+        min-width: 0;
+        padding: 7px 8px;
+        border: 1px solid #2f3946;
+        border-radius: 4px;
+        background: #10151c;
+      }
+
+      .keyboard-diagnostics-label {
+        margin-bottom: 3px;
+        color: #7f8da0;
+        font-size: 11px;
+      }
+
+      .keyboard-diagnostics-value {
+        overflow-wrap: anywhere;
+        color: #e6ebf3;
+        font-size: 12px;
+        line-height: 1.35;
+      }
+
+      #witty-keyboard-diagnostics-history {
+        display: grid;
+        gap: 4px;
+        max-height: 110px;
+        margin: 10px 0 0;
+        padding: 0;
+        overflow: auto;
+        list-style: none;
+        color: #b8c2d2;
+        font-size: 12px;
+      }
+
+      #witty-keyboard-diagnostics-history li {
+        overflow-wrap: anywhere;
+      }
+
+      @media (max-width: 720px) {
+        .keyboard-diagnostics-grid {
+          grid-template-columns: 1fr;
+        }
       }
     </style>
   </head>
@@ -320,7 +431,33 @@
         spellcheck="false"
         inputmode="text"
       />
-      <div id="status">starting</div>
+      <div id="witty-footer">
+        <div id="status">starting</div>
+        <button
+          id="witty-keyboard-diagnostics-toggle"
+          type="button"
+          aria-controls="witty-keyboard-diagnostics"
+          aria-expanded="false"
+        >
+          Keys
+        </button>
+      </div>
+      <section
+        id="witty-keyboard-diagnostics"
+        aria-live="polite"
+        aria-label="Keyboard diagnostics"
+        hidden
+      >
+        <div class="keyboard-diagnostics-header">
+          <h2>Keyboard diagnostics</h2>
+          <div id="witty-keyboard-diagnostics-summary">No key captured</div>
+        </div>
+        <div
+          id="witty-keyboard-diagnostics-grid"
+          class="keyboard-diagnostics-grid"
+        ></div>
+        <ol id="witty-keyboard-diagnostics-history"></ol>
+      </section>
     </main>
     <script type="module" src="./app.js"></script>
   </body>

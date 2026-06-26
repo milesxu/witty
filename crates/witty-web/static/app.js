@@ -16,6 +16,7 @@ const SYNCHRONIZED_OUTPUT_TIMEOUT_MS = 150;
 const COMMAND_BLOCK_ACTION_MENU_COMMAND_ID = "witty.command_block.actions";
 const COMMAND_BLOCK_COPY_COMMAND_ID = "witty.command_block.copy_command";
 const COMMAND_BLOCK_COPY_OUTPUT_ID = "witty.command_block.copy_output";
+const KEYBOARD_DIAGNOSTIC_HISTORY_LIMIT = 6;
 const authorizedProfileImportReports = new WeakSet();
 
 function parseMouseSelectionOverridePolicy(value) {
@@ -54,6 +55,150 @@ function setStatus(state, message) {
   status.dataset.smoke = state;
   status.textContent = message;
 }
+
+const keyboardDiagnosticPanelState = {
+  open: false,
+  latest: null,
+  history: [],
+};
+
+function keyboardDiagnosticPanelElements() {
+  return {
+    panel: document.getElementById("witty-keyboard-diagnostics"),
+    toggle: document.getElementById("witty-keyboard-diagnostics-toggle"),
+    summary: document.getElementById("witty-keyboard-diagnostics-summary"),
+    grid: document.getElementById("witty-keyboard-diagnostics-grid"),
+    history: document.getElementById("witty-keyboard-diagnostics-history"),
+  };
+}
+
+function keyboardDiagnosticBytesLabel(value) {
+  if (!value) {
+    return "not sent";
+  }
+  const escaped = value.escaped || "";
+  const hex = value.hex || "";
+  return hex ? `${escaped} | ${hex}` : escaped;
+}
+
+function keyboardDiagnosticModifierLabel(modifiers) {
+  if (!modifiers) {
+    return "none";
+  }
+  const active = Object.entries(modifiers)
+    .filter(([, enabled]) => enabled)
+    .map(([name]) => name);
+  return active.length > 0 ? active.join("+") : "none";
+}
+
+function keyboardDiagnosticLocationLabel(location) {
+  switch (Number(location)) {
+    case 1:
+      return "left";
+    case 2:
+      return "right";
+    case 3:
+      return "numpad";
+    default:
+      return "standard";
+  }
+}
+
+function keyboardDiagnosticShortReport(report) {
+  const key = report?.key || "Unidentified";
+  const code = report?.code || "no-code";
+  const eventType = report?.eventType || "Press";
+  const kitty = keyboardDiagnosticBytesLabel(report?.encoded?.kittyDisambiguate);
+  return `${eventType} ${key} ${code} -> ${kitty}`;
+}
+
+function keyboardDiagnosticRows(report) {
+  return [
+    ["DOM key", report?.key || "none"],
+    ["DOM code", report?.code || "none"],
+    ["DOM location", keyboardDiagnosticLocationLabel(report?.location)],
+    ["Event", report?.eventType || "none"],
+    ["Input modifiers", keyboardDiagnosticModifierLabel(report?.inputModifiers)],
+    ["Witty modifiers", keyboardDiagnosticModifierLabel(report?.witty?.modifiers)],
+    ["Modifier key", report?.witty?.modifierKey || "none"],
+    ["Keypad key", report?.witty?.keypadKey || "none"],
+    ["Base layout", report?.witty?.baseLayoutKey || "none"],
+    ["Legacy bytes", keyboardDiagnosticBytesLabel(report?.encoded?.legacy)],
+    ["Kitty flag 1", keyboardDiagnosticBytesLabel(report?.encoded?.kittyDisambiguate)],
+    ["Kitty all flags", keyboardDiagnosticBytesLabel(report?.encoded?.kittyAllFeatures)],
+  ];
+}
+
+function renderKeyboardDiagnosticPanel() {
+  const { panel, toggle, summary, grid, history } = keyboardDiagnosticPanelElements();
+  if (!panel || !toggle || !summary || !grid || !history) {
+    return keyboardDiagnosticPanelSnapshot();
+  }
+
+  panel.hidden = !keyboardDiagnosticPanelState.open;
+  toggle.setAttribute("aria-expanded", String(keyboardDiagnosticPanelState.open));
+  document.body.dataset.wittyKeyboardDiagnostics =
+    keyboardDiagnosticPanelState.open ? "active" : "inactive";
+
+  const report = keyboardDiagnosticPanelState.latest;
+  summary.textContent = report ? keyboardDiagnosticShortReport(report) : "No key captured";
+  grid.replaceChildren(
+    ...keyboardDiagnosticRows(report).map(([label, value]) => {
+      const cell = document.createElement("div");
+      cell.className = "keyboard-diagnostics-cell";
+      const labelElement = document.createElement("div");
+      labelElement.className = "keyboard-diagnostics-label";
+      labelElement.textContent = label;
+      const valueElement = document.createElement("div");
+      valueElement.className = "keyboard-diagnostics-value";
+      valueElement.textContent = value;
+      cell.append(labelElement, valueElement);
+      return cell;
+    }),
+  );
+  history.replaceChildren(
+    ...keyboardDiagnosticPanelState.history.map((entry) => {
+      const item = document.createElement("li");
+      item.textContent = entry;
+      return item;
+    }),
+  );
+  return keyboardDiagnosticPanelSnapshot();
+}
+
+function keyboardDiagnosticPanelSnapshot() {
+  return {
+    open: keyboardDiagnosticPanelState.open,
+    latest: keyboardDiagnosticPanelState.latest,
+    history: [...keyboardDiagnosticPanelState.history],
+  };
+}
+
+function setKeyboardDiagnosticPanelOpen(open) {
+  keyboardDiagnosticPanelState.open = Boolean(open);
+  return renderKeyboardDiagnosticPanel();
+}
+
+function toggleKeyboardDiagnosticPanel() {
+  return setKeyboardDiagnosticPanelOpen(!keyboardDiagnosticPanelState.open);
+}
+
+function recordKeyboardDiagnosticReport(report) {
+  keyboardDiagnosticPanelState.latest = report;
+  keyboardDiagnosticPanelState.history.unshift(keyboardDiagnosticShortReport(report));
+  keyboardDiagnosticPanelState.history = keyboardDiagnosticPanelState.history.slice(
+    0,
+    KEYBOARD_DIAGNOSTIC_HISTORY_LIMIT,
+  );
+  window.wittyLastKeyboardProtocolDiagnosticPanel = renderKeyboardDiagnosticPanel();
+}
+
+window.wittyKeyboardProtocolDiagnosticPanel = {
+  open: () => setKeyboardDiagnosticPanelOpen(true),
+  close: () => setKeyboardDiagnosticPanelOpen(false),
+  toggle: () => toggleKeyboardDiagnosticPanel(),
+  state: () => keyboardDiagnosticPanelSnapshot(),
+};
 
 function browserClipboard() {
   return window.wittyClipboardApi ?? navigator.clipboard;
@@ -1337,6 +1482,17 @@ function isCommandPaletteShortcut(event) {
   );
 }
 
+function isKeyboardDiagnosticsShortcut(event) {
+  return (
+    event.ctrlKey &&
+    event.shiftKey &&
+    !event.altKey &&
+    !event.metaKey &&
+    typeof event.key === "string" &&
+    event.key.toLowerCase() === "k"
+  );
+}
+
 function captureSearchState(session, statusText) {
   const state = {
     open: session.search_is_open(),
@@ -1858,6 +2014,13 @@ async function main() {
     focusTerminalInput(session, canvas, imeInput);
     return true;
   };
+  document
+    .getElementById("witty-keyboard-diagnostics-toggle")
+    ?.addEventListener("click", () => {
+      toggleKeyboardDiagnosticPanel();
+      focusTerminalInput(session, canvas, imeInput);
+    });
+  renderKeyboardDiagnosticPanel();
   window.wittySetImePreedit = (text, caretStart = -1, caretEnd = -1) => {
     const changed = session.set_ime_preedit(String(text ?? ""), caretStart, caretEnd);
     const rect = syncImeInputPosition(session, canvas, imeInput);
@@ -2698,6 +2861,7 @@ async function main() {
       ),
     );
     window.wittyLastKeyboardProtocolDiagnostic = report;
+    recordKeyboardDiagnosticReport(report);
     return report;
   }
 
@@ -2739,6 +2903,13 @@ async function main() {
       event.preventDefault();
       openCommandPalette(session);
       syncImeInputPosition(session, canvas, imeInput);
+      return;
+    }
+
+    if (isKeyboardDiagnosticsShortcut(event)) {
+      event.preventDefault();
+      toggleKeyboardDiagnosticPanel();
+      focusTerminalInput(session, canvas, imeInput);
       return;
     }
 
@@ -2840,6 +3011,7 @@ async function main() {
       session.search_is_open() ||
       isSearchShortcut(event) ||
       isCommandPaletteShortcut(event) ||
+      isKeyboardDiagnosticsShortcut(event) ||
       isCopySelectionShortcut(event) ||
       isPasteClipboardShortcut(event)
     ) {

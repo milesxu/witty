@@ -193,6 +193,23 @@ modifier/keypad/base-layout metadata, and legacy/Kitty encoded byte sequences.
 The most recent browser keydown/keyup report is also stored in
 `window.wittyLastKeyboardProtocolDiagnostic`.
 
+The browser page also includes a compact diagnostic panel below the terminal
+canvas. Open it with the `Keys` button or `Ctrl+Shift+K`. The panel displays
+the latest DOM key metadata, Witty modifier/keypad/base-layout resolution,
+legacy bytes, Kitty flag-1 bytes, all-feature Kitty bytes, and a short
+recent-event history. Test code can control it through:
+
+```js
+window.wittyKeyboardProtocolDiagnosticPanel.open();
+window.wittyKeyboardProtocolDiagnosticPanel.close();
+window.wittyKeyboardProtocolDiagnosticPanel.toggle();
+window.wittyKeyboardProtocolDiagnosticPanel.state();
+```
+
+The Playwright smoke script contains a browser-side assertion for this panel:
+it opens the panel, asks `window.wittyKeyboardProtocolDiagnostic(...)` to report
+`Ctrl-I`, and checks that the panel shows `CSI 105;5u` for Kitty flag 1.
+
 ## Current Local Validation
 
 Local validation on 2026-06-26 found:
@@ -212,6 +229,14 @@ Automated checks passed:
 - `cargo run -p witty-app -- --real-tui-smoke nvim-kitty-keyboard`
 - `cargo test -p witty-web browser_key_input_ --lib`
 - `cargo test -p witty-web browser_keyboard_protocol_diagnostics --lib`
+- `cargo check -p witty-web`
+- `cargo check -p witty-web --target wasm32-unknown-unknown`
+- `node --check crates/witty-web/static/app.js`
+- `node --check scripts/run-witty-web-smoke.mjs`
+
+Full Chromium/WebGPU browser smoke was not run during this local validation
+unless explicitly overridden, because `.witty-local-opengl-only` marks that
+runtime path as deferred on this machine.
 
 The Neovim real-TUI smoke artifact was written to:
 
@@ -237,7 +262,6 @@ keyboard details such as keypad keys and sided modifiers.
 - Full layout-aware alternate-key reporting beyond the US physical base map.
 - Less common Kitty functional-key codes such as ISO level shifts beyond
   `AltGraph` and platform-specific media/application keys.
-- Browser-side interactive diagnostic UI; the callable JSON report is in place.
 - Live comparison captures against WezTerm and Ghostty once those terminals are
   installed locally.
 - Kitty graphics/image protocol.
@@ -251,6 +275,8 @@ cargo test -p witty-app key_encoder_ --bin witty
 cargo run -p witty-app -- --keyboard-protocol-diagnostics
 cargo run -p witty-app -- --real-tui-smoke nvim-kitty-keyboard
 cargo test -p witty-web browser_key_input_ --lib
+node --check crates/witty-web/static/app.js
+node --check scripts/run-witty-web-smoke.mjs
 cargo check --workspace
 ```
 

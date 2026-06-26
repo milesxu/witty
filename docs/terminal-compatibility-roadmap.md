@@ -2845,8 +2845,18 @@ client surface while preserving the native/browser transport split.
      modifier/keypad/base-layout metadata, and legacy/Kitty encoded bytes.
      `app.js` wraps it as `window.wittyKeyboardProtocolDiagnostic(eventOrFields)`
      and records the latest real browser keydown/keyup report in
-     `window.wittyLastKeyboardProtocolDiagnostic`. A dedicated browser-side
-     interactive UI remains future work.
+     `window.wittyLastKeyboardProtocolDiagnostic`. The follow-up browser-side
+     interactive UI is tracked in m714.
+384. `m714-keyboard-protocol-browser-diagnostic-panel`
+   - done. Added a compact browser keyboard diagnostic panel below the terminal
+     canvas, toggled by the `Keys` button or `Ctrl+Shift+K`. The panel renders
+     the latest DOM key metadata, Witty modifier/keypad/base-layout resolution,
+     legacy bytes, Kitty flag-1 bytes, all-feature Kitty bytes, and a bounded
+     recent-event history while leaving terminal input and gateway routing
+     unchanged. The browser smoke script now contains a panel assertion for
+     `Ctrl-I` showing `CSI 105;5u`; local validation used static JS checks and
+     `witty-web` Rust/wasm checks without overriding the local Chromium/WebGPU
+     safety marker.
 
 ## Non-Goals For This Line
 
