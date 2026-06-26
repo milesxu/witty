@@ -21,6 +21,7 @@ Usage: scripts/run-witty-native-opengl.sh [--print-command] [window args...]
        scripts/run-witty-native-opengl.sh [--print-command] --window-config-check [config args...]
        scripts/run-witty-native-opengl.sh [--print-command] --window-config-effective [window args...]
        scripts/run-witty-native-opengl.sh [--print-command] --renderer-backend-info
+       scripts/run-witty-native-opengl.sh [--print-command] --keyboard-protocol-diagnostics
 
 Runs Witty native window mode with WGPU_BACKEND=gl.
 Helper modes reuse the same binary selection but do not append --window or open
@@ -65,7 +66,7 @@ witty_args() {
       --wittyrc-template | --wittyrc-default-path | --wittyrc-init | \
       --wittyrc-check | --wittyrc-effective | \
       --window-config-check | --window-config-effective | --renderer-backend-info | \
-      --renderer-no-surface-diagnostics)
+      --renderer-no-surface-diagnostics | --keyboard-protocol-diagnostics)
       print_null_args "$@"
       ;;
     *)

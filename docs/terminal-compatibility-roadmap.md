@@ -2808,9 +2808,18 @@ client surface while preserving the native/browser transport split.
      waits for Neovim to enable Kitty flags through real PTY output, sends
      `Ctrl-I` through Witty's shared key encoder using current terminal input
      modes, verifies `CSI 105;5:1u` is emitted while event reporting is active,
-     and confirms Neovim runs the `<C-I>` mapping instead of `<Tab>`. The
-     keyboard protocol diagnostic tool remains a planned follow-up. See
+     and confirms Neovim runs the `<C-I>` mapping instead of `<Tab>`. See
      `real-tui-smoke-harness.md` and `terminal-kitty-keyboard-protocol.md`.
+380. `m706-keyboard-protocol-diagnostics-cli`
+   - done. Added `witty --keyboard-protocol-diagnostics`, a non-GUI JSON
+     report for representative terminal key encodings. The command does not
+     open a window, create a renderer surface, or start a PTY, and reports
+     legacy `Ctrl-I`, Kitty disambiguation/event typing, all-keys
+     `Ctrl-Enter`, associated text plus alternate keys, keypad
+     digit/navigation cases, and sided modifier release bytes. The local
+     OpenGL launcher treats it as a helper mode, so it can be run through
+     `scripts/run-witty-native-opengl.sh` without appending `--window`.
+     Interactive live key capture remains follow-up work.
 
 ## Non-Goals For This Line
 

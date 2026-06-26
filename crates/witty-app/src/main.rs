@@ -25,9 +25,13 @@ use window::{
     DEFAULT_WINDOW_TITLE,
 };
 use witty_core::{
-    parse_terminal_color, BasicTerminal, CellPoint, CellRange, CursorShape, GridSize,
-    Osc52ClipboardPolicy, Rgba, TerminalColorTheme, TerminalHostAction,
-    DEFAULT_MAX_SCROLLBACK_LINES,
+    encode_terminal_key_input, parse_terminal_color, BasicTerminal, CellPoint, CellRange,
+    CursorShape, GridSize, Osc52ClipboardPolicy, Rgba, TerminalColorTheme, TerminalHostAction,
+    TerminalInputModes, TerminalKey, TerminalKeyEventType, TerminalKeyInput,
+    TerminalKeyModifiers, TerminalKeypadKey, TerminalModifierKey, TerminalNamedKey,
+    DEFAULT_MAX_SCROLLBACK_LINES, KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+    KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES, KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS,
+    KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT, KITTY_KEYBOARD_REPORT_EVENT_TYPES,
 };
 use witty_plugin_api::{
     CommandRegistration, PluginAction, PluginEvent, PluginManifest, PluginPermissions,
@@ -311,6 +315,9 @@ fn run_main(args: Vec<String>) -> anyhow::Result<()> {
     if options.mode == AppMode::RendererNoSurfaceDiagnostics {
         return run_renderer_no_surface_diagnostics();
     }
+    if options.mode == AppMode::KeyboardProtocolDiagnostics {
+        return run_keyboard_protocol_diagnostics();
+    }
     if options.mode == AppMode::FontList {
         return run_font_list(options.font_list_filter.as_deref());
     }
@@ -548,6 +555,10 @@ impl AppOptions {
                 }
                 "--renderer-no-surface-diagnostics" => {
                     mode = AppMode::RendererNoSurfaceDiagnostics;
+                    non_profile_mode_seen = true;
+                }
+                "--keyboard-protocol-diagnostics" => {
+                    mode = AppMode::KeyboardProtocolDiagnostics;
                     non_profile_mode_seen = true;
                 }
                 "--font-list" => {
@@ -3122,6 +3133,7 @@ enum AppMode {
     RealTuiSmoke,
     RendererBackendInfo,
     RendererNoSurfaceDiagnostics,
+    KeyboardProtocolDiagnostics,
     FontList,
     WittyrcTemplate,
     WittyrcDefaultPath,
@@ -3782,6 +3794,336 @@ fn font_list_text(families: impl IntoIterator<Item = String>, filter: Option<&st
     text
 }
 
+fn run_keyboard_protocol_diagnostics() -> anyhow::Result<()> {
+    print!("{}", keyboard_protocol_diagnostics_text()?);
+    Ok(())
+}
+
+fn keyboard_protocol_diagnostics_text() -> serde_json::Result<String> {
+    let mut text = serde_json::to_string_pretty(&keyboard_protocol_diagnostics_json())?;
+    text.push('\n');
+    Ok(text)
+}
+
+fn keyboard_protocol_diagnostics_json() -> serde_json::Value {
+    let cases = keyboard_protocol_diagnostic_specs()
+        .into_iter()
+        .map(keyboard_protocol_diagnostic_case_json)
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "diagnostic": "keyboard-protocol",
+        "version": env!("CARGO_PKG_VERSION"),
+        "opensWindow": false,
+        "startsPty": false,
+        "cases": cases,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct KeyboardProtocolDiagnosticSpec {
+    id: &'static str,
+    description: &'static str,
+    flags: u16,
+    key: TerminalKey<'static>,
+    text: Option<&'static str>,
+    modifiers: TerminalKeyModifiers,
+    keypad_key: Option<TerminalKeypadKey>,
+    base_layout_key: Option<char>,
+    modifier_key: Option<TerminalModifierKey>,
+    event_type: TerminalKeyEventType,
+}
+
+fn keyboard_protocol_diagnostic_specs() -> Vec<KeyboardProtocolDiagnosticSpec> {
+    let no_modifiers = TerminalKeyModifiers::default();
+    let control = TerminalKeyModifiers {
+        control: true,
+        ..TerminalKeyModifiers::default()
+    };
+    let shift = TerminalKeyModifiers {
+        shift: true,
+        ..TerminalKeyModifiers::default()
+    };
+    vec![
+        KeyboardProtocolDiagnosticSpec {
+            id: "legacy-ctrl-i",
+            description: "Legacy Ctrl-I remains indistinguishable from Tab.",
+            flags: 0,
+            key: TerminalKey::Character("i"),
+            text: Some("i"),
+            modifiers: control,
+            keypad_key: None,
+            base_layout_key: None,
+            modifier_key: None,
+            event_type: TerminalKeyEventType::Press,
+        },
+        KeyboardProtocolDiagnosticSpec {
+            id: "kitty-disambiguate-ctrl-i",
+            description: "Kitty flag 1 disambiguates Ctrl-I from Tab.",
+            flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+            key: TerminalKey::Character("i"),
+            text: Some("i"),
+            modifiers: control,
+            keypad_key: None,
+            base_layout_key: None,
+            modifier_key: None,
+            event_type: TerminalKeyEventType::Press,
+        },
+        KeyboardProtocolDiagnosticSpec {
+            id: "kitty-event-ctrl-i",
+            description: "Kitty flags 1|2 include a press event type for Ctrl-I.",
+            flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES | KITTY_KEYBOARD_REPORT_EVENT_TYPES,
+            key: TerminalKey::Character("i"),
+            text: Some("i"),
+            modifiers: control,
+            keypad_key: None,
+            base_layout_key: None,
+            modifier_key: None,
+            event_type: TerminalKeyEventType::Press,
+        },
+        KeyboardProtocolDiagnosticSpec {
+            id: "kitty-all-ctrl-enter",
+            description: "Kitty flag 8 reports Ctrl-Enter as CSI-u.",
+            flags: KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES,
+            key: TerminalKey::Named(TerminalNamedKey::Enter),
+            text: None,
+            modifiers: control,
+            keypad_key: None,
+            base_layout_key: None,
+            modifier_key: None,
+            event_type: TerminalKeyEventType::Press,
+        },
+        KeyboardProtocolDiagnosticSpec {
+            id: "kitty-associated-shift-a-repeat",
+            description: "Kitty flags 8|16|4|2 combine associated text, alternate keys, and repeat event type.",
+            flags: KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES
+                | KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT
+                | KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS
+                | KITTY_KEYBOARD_REPORT_EVENT_TYPES,
+            key: TerminalKey::Character("A"),
+            text: Some("A"),
+            modifiers: shift,
+            keypad_key: None,
+            base_layout_key: Some('a'),
+            modifier_key: None,
+            event_type: TerminalKeyEventType::Repeat,
+        },
+        KeyboardProtocolDiagnosticSpec {
+            id: "kitty-keypad-1",
+            description: "Kitty flag 1 distinguishes keypad 1 from top-row 1.",
+            flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+            key: TerminalKey::Character("1"),
+            text: Some("1"),
+            modifiers: no_modifiers,
+            keypad_key: Some(TerminalKeypadKey::Digit(1)),
+            base_layout_key: None,
+            modifier_key: None,
+            event_type: TerminalKeyEventType::Press,
+        },
+        KeyboardProtocolDiagnosticSpec {
+            id: "kitty-keypad-left-numlock-off",
+            description: "Kitty flag 1 reports NumLock-off keypad navigation separately.",
+            flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+            key: TerminalKey::Named(TerminalNamedKey::ArrowLeft),
+            text: None,
+            modifiers: no_modifiers,
+            keypad_key: Some(TerminalKeypadKey::Left),
+            base_layout_key: None,
+            modifier_key: None,
+            event_type: TerminalKeyEventType::Press,
+        },
+        KeyboardProtocolDiagnosticSpec {
+            id: "kitty-right-ctrl-release",
+            description: "Kitty flags 8|2 report sided modifier release events.",
+            flags: KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES
+                | KITTY_KEYBOARD_REPORT_EVENT_TYPES,
+            key: TerminalKey::Unidentified,
+            text: None,
+            modifiers: no_modifiers,
+            keypad_key: None,
+            base_layout_key: None,
+            modifier_key: Some(TerminalModifierKey::RightControl),
+            event_type: TerminalKeyEventType::Release,
+        },
+    ]
+}
+
+fn keyboard_protocol_diagnostic_case_json(
+    spec: KeyboardProtocolDiagnosticSpec,
+) -> serde_json::Value {
+    let modes = TerminalInputModes {
+        kitty_keyboard_flags: spec.flags,
+        ..TerminalInputModes::default()
+    };
+    let bytes = encode_terminal_key_input(
+        TerminalKeyInput {
+            key: spec.key,
+            text: spec.text,
+            modifiers: spec.modifiers,
+            keypad_key: spec.keypad_key,
+            base_layout_key: spec.base_layout_key,
+            modifier_key: spec.modifier_key,
+            event_type: spec.event_type,
+        },
+        modes,
+    );
+
+    serde_json::json!({
+        "id": spec.id,
+        "description": spec.description,
+        "flags": spec.flags,
+        "flagNames": keyboard_protocol_flag_names(spec.flags),
+        "key": keyboard_protocol_key_label(spec.key),
+        "text": spec.text,
+        "modifiers": keyboard_protocol_modifier_names(spec.modifiers),
+        "keypadKey": spec.keypad_key.map(keyboard_protocol_keypad_label),
+        "baseLayoutKey": spec.base_layout_key.map(|ch| ch.to_string()),
+        "modifierKey": spec.modifier_key.map(keyboard_protocol_modifier_key_label),
+        "eventType": keyboard_protocol_event_type_label(spec.event_type),
+        "suppressed": bytes.is_none(),
+        "bytesHex": bytes.as_deref().map(bytes_hex),
+        "bytesEscaped": bytes.as_deref().map(escaped_bytes),
+    })
+}
+
+fn keyboard_protocol_flag_names(flags: u16) -> Vec<&'static str> {
+    [
+        (
+            KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+            "DISAMBIGUATE_ESC_CODES",
+        ),
+        (KITTY_KEYBOARD_REPORT_EVENT_TYPES, "REPORT_EVENT_TYPES"),
+        (
+            KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS,
+            "REPORT_ALTERNATE_KEYS",
+        ),
+        (
+            KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES,
+            "REPORT_ALL_KEYS_AS_ESC_CODES",
+        ),
+        (
+            KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT,
+            "REPORT_ASSOCIATED_TEXT",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(flag, name)| (flags & flag != 0).then_some(name))
+    .collect()
+}
+
+fn keyboard_protocol_key_label(key: TerminalKey<'_>) -> String {
+    match key {
+        TerminalKey::Named(key) => format!("{key:?}"),
+        TerminalKey::Character(value) => format!("Character({value})"),
+        TerminalKey::Unidentified => "Unidentified".to_owned(),
+    }
+}
+
+fn keyboard_protocol_modifier_names(modifiers: TerminalKeyModifiers) -> Vec<&'static str> {
+    let mut names = Vec::new();
+    if modifiers.control {
+        names.push("Control");
+    }
+    if modifiers.shift {
+        names.push("Shift");
+    }
+    if modifiers.alt {
+        names.push("Alt");
+    }
+    if modifiers.meta {
+        names.push("Super");
+    }
+    if modifiers.hyper {
+        names.push("Hyper");
+    }
+    if modifiers.kitty_meta {
+        names.push("Meta");
+    }
+    names
+}
+
+fn keyboard_protocol_keypad_label(keypad_key: TerminalKeypadKey) -> &'static str {
+    match keypad_key {
+        TerminalKeypadKey::Digit(0) => "KP_0",
+        TerminalKeypadKey::Digit(1) => "KP_1",
+        TerminalKeypadKey::Digit(2) => "KP_2",
+        TerminalKeypadKey::Digit(3) => "KP_3",
+        TerminalKeypadKey::Digit(4) => "KP_4",
+        TerminalKeypadKey::Digit(5) => "KP_5",
+        TerminalKeypadKey::Digit(6) => "KP_6",
+        TerminalKeypadKey::Digit(7) => "KP_7",
+        TerminalKeypadKey::Digit(8) => "KP_8",
+        TerminalKeypadKey::Digit(9) => "KP_9",
+        TerminalKeypadKey::Digit(_) => "KP_DIGIT_INVALID",
+        TerminalKeypadKey::Decimal => "KP_DECIMAL",
+        TerminalKeypadKey::Comma => "KP_COMMA",
+        TerminalKeypadKey::Add => "KP_ADD",
+        TerminalKeypadKey::Subtract => "KP_SUBTRACT",
+        TerminalKeypadKey::Multiply => "KP_MULTIPLY",
+        TerminalKeypadKey::Divide => "KP_DIVIDE",
+        TerminalKeypadKey::Enter => "KP_ENTER",
+        TerminalKeypadKey::Equal => "KP_EQUAL",
+        TerminalKeypadKey::Left => "KP_LEFT",
+        TerminalKeypadKey::Right => "KP_RIGHT",
+        TerminalKeypadKey::Up => "KP_UP",
+        TerminalKeypadKey::Down => "KP_DOWN",
+        TerminalKeypadKey::PageUp => "KP_PAGE_UP",
+        TerminalKeypadKey::PageDown => "KP_PAGE_DOWN",
+        TerminalKeypadKey::Home => "KP_HOME",
+        TerminalKeypadKey::End => "KP_END",
+        TerminalKeypadKey::Insert => "KP_INSERT",
+        TerminalKeypadKey::Delete => "KP_DELETE",
+        TerminalKeypadKey::Begin => "KP_BEGIN",
+    }
+}
+
+fn keyboard_protocol_modifier_key_label(modifier_key: TerminalModifierKey) -> &'static str {
+    match modifier_key {
+        TerminalModifierKey::LeftShift => "LEFT_SHIFT",
+        TerminalModifierKey::RightShift => "RIGHT_SHIFT",
+        TerminalModifierKey::LeftAlt => "LEFT_ALT",
+        TerminalModifierKey::RightAlt => "RIGHT_ALT",
+        TerminalModifierKey::LeftControl => "LEFT_CONTROL",
+        TerminalModifierKey::RightControl => "RIGHT_CONTROL",
+        TerminalModifierKey::LeftSuper => "LEFT_SUPER",
+        TerminalModifierKey::RightSuper => "RIGHT_SUPER",
+        TerminalModifierKey::LeftHyper => "LEFT_HYPER",
+        TerminalModifierKey::RightHyper => "RIGHT_HYPER",
+        TerminalModifierKey::LeftMeta => "LEFT_META",
+        TerminalModifierKey::RightMeta => "RIGHT_META",
+    }
+}
+
+fn keyboard_protocol_event_type_label(event_type: TerminalKeyEventType) -> &'static str {
+    match event_type {
+        TerminalKeyEventType::Press => "press",
+        TerminalKeyEventType::Repeat => "repeat",
+        TerminalKeyEventType::Release => "release",
+    }
+}
+
+fn bytes_hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn escaped_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| match byte {
+            b'\x1b' => "\\x1b".to_owned(),
+            b'\r' => "\\r".to_owned(),
+            b'\n' => "\\n".to_owned(),
+            b'\t' => "\\t".to_owned(),
+            0x20..=0x7e => char::from(*byte).to_string(),
+            _ => format!("\\x{byte:02x}"),
+        })
+        .collect()
+}
+
 fn renderer_no_surface_diagnostics_json() -> serde_json::Value {
     let size = GridSize::new(4, 16);
     let mut terminal = BasicTerminal::new(size);
@@ -3976,6 +4318,7 @@ mod tests {
             AppMode::RealTuiSmoke,
             AppMode::RendererBackendInfo,
             AppMode::RendererNoSurfaceDiagnostics,
+            AppMode::KeyboardProtocolDiagnostics,
             AppMode::FontList,
             AppMode::WittyrcTemplate,
             AppMode::WittyrcDefaultPath,
@@ -4093,6 +4436,12 @@ mod tests {
                 .unwrap()
                 .mode,
             AppMode::RendererNoSurfaceDiagnostics
+        );
+        assert_eq!(
+            AppOptions::parse(["--keyboard-protocol-diagnostics".to_owned()])
+                .unwrap()
+                .mode,
+            AppMode::KeyboardProtocolDiagnostics
         );
         assert_eq!(
             AppOptions::parse(["--font-list".to_owned()]).unwrap().mode,
@@ -7824,6 +8173,43 @@ Host prod
             "DejaVu Sans Mono\n"
         );
         assert_eq!(font_list_text(families, Some("missing")), "");
+    }
+
+    #[test]
+    fn keyboard_protocol_diagnostics_reports_representative_sequences() {
+        let report = keyboard_protocol_diagnostics_json();
+        let cases = report["cases"].as_array().expect("cases array");
+        let case_by_id = |id: &str| {
+            cases
+                .iter()
+                .find(|case| case["id"] == id)
+                .unwrap_or_else(|| panic!("missing diagnostic case {id}"))
+        };
+
+        assert_eq!(report["diagnostic"], "keyboard-protocol");
+        assert_eq!(report["opensWindow"], false);
+        assert_eq!(report["startsPty"], false);
+        assert_eq!(case_by_id("legacy-ctrl-i")["bytesHex"], "09");
+        assert_eq!(
+            case_by_id("kitty-disambiguate-ctrl-i")["bytesEscaped"],
+            "\\x1b[105;5u"
+        );
+        assert_eq!(
+            case_by_id("kitty-event-ctrl-i")["bytesEscaped"],
+            "\\x1b[105;5:1u"
+        );
+        assert_eq!(
+            case_by_id("kitty-associated-shift-a-repeat")["bytesEscaped"],
+            "\\x1b[97:65;2:2;65u"
+        );
+        assert_eq!(
+            case_by_id("kitty-keypad-left-numlock-off")["keypadKey"],
+            "KP_LEFT"
+        );
+        assert_eq!(
+            case_by_id("kitty-right-ctrl-release")["modifierKey"],
+            "RIGHT_CONTROL"
+        );
     }
 
     #[test]

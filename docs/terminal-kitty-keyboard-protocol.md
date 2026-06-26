@@ -161,16 +161,24 @@ native `Meta` modifier keys when side metadata is available, and `AltGraph`.
 Keypad keys use legacy text or application keypad SS3 sequences until Kitty
 flags `1` or `8` request disambiguated keypad reporting.
 
+## Diagnostics
+
+`witty --keyboard-protocol-diagnostics` prints a non-GUI JSON report for
+representative key encodings. The command does not open a window, create a
+renderer surface, or start a PTY. Current cases include legacy `Ctrl-I`, Kitty
+`Ctrl-I` disambiguation, Kitty event typing, `Ctrl-Enter`, associated text with
+alternate keys, keypad digit/navigation keys, and sided modifier release
+events. Each case reports flags, flag names, key metadata, hex bytes, and
+escaped bytes.
+
 ## Deferred
 
 - Full layout-aware alternate-key reporting beyond the US physical base map.
 - Less common Kitty functional-key codes such as ISO level shifts beyond
   `AltGraph` and platform-specific media/application keys.
-- Keyboard protocol diagnostic tool: an interactive/local helper that prints
-  negotiated Kitty flags plus the exact bytes generated for key presses,
-  repeats, releases, modifiers, keypad keys, and browser/native location
-  metadata. This should help compare Witty against Kitty, WezTerm, Ghostty,
-  and Neovim behavior without editing real application configs.
+- Interactive keyboard protocol diagnostic mode that captures real key presses
+  and browser/native location metadata for live comparison against Kitty,
+  WezTerm, Ghostty, and Neovim behavior.
 - Kitty graphics/image protocol.
 
 ## Verification
@@ -179,6 +187,7 @@ flags `1` or `8` request disambiguated keypad reporting.
 cargo test -p witty-core kitty_keyboard_protocol --lib
 cargo test -p witty-core keyboard --lib
 cargo test -p witty-app key_encoder_ --bin witty
+cargo run -p witty-app -- --keyboard-protocol-diagnostics
 cargo run -p witty-app -- --real-tui-smoke nvim-kitty-keyboard
 cargo test -p witty-web browser_key_input_ --lib
 cargo check --workspace

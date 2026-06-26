@@ -272,6 +272,11 @@ keys, native sided Meta keys, and `AltGraph` when Kitty keyboard mode is active.
 Flag `16` adds safe associated text codepoints when flag `8` is active. Kitty
 graphics/image protocols are not part of this support. See
 `docs/terminal-kitty-keyboard-protocol.md`.
+For a non-GUI local report of representative encoded key sequences, run:
+
+```text
+witty --keyboard-protocol-diagnostics
+```
 
 The session tab strip is hidden by default so it never covers shell output or a
 tmux status line. Set `session-tab-show-single = true` or
