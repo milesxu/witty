@@ -1,6 +1,7 @@
 //! Core terminal data structures shared by parser, renderer, and UI layers.
 
 mod basic_terminal;
+mod keyboard;
 mod mouse;
 
 use std::{error::Error, fmt};
@@ -12,6 +13,11 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
 
 pub use basic_terminal::{parse_terminal_color, BasicTerminal, TerminalColorTheme};
+pub use keyboard::{
+    encode_terminal_key_input, shifted_us_layout_key, TerminalKey, TerminalKeyEventType,
+    TerminalKeyInput, TerminalKeyModifiers, TerminalKeypadKey, TerminalModifierKey,
+    TerminalNamedKey,
+};
 pub use mouse::{
     encode_terminal_focus_event, encode_terminal_mouse_event, FocusEventKind, MouseButtonCode,
     MouseEventKind, MouseModifiers, PixelMousePosition, TerminalMouseEvent,

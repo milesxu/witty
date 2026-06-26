@@ -1,6 +1,6 @@
 # Terminal Kitty Keyboard Protocol
 
-Updated: 2026-06-25
+Updated: 2026-06-26
 
 Witty supports a focused subset of the Kitty keyboard protocol for native and
 browser terminal input. This is the keyboard protocol / CSI-u line, not the
@@ -30,6 +30,13 @@ flag values and stacks. Soft reset and full reset clear both stacks and active
 flag values.
 
 ## Encoding Scope
+
+`witty-core::keyboard` owns the platform-independent terminal key encoder.
+Native `winit` input and browser `KeyboardEvent` input are converted into the
+shared `TerminalKeyInput` model before escape sequences are generated. This
+keeps Kitty/CSI-u behavior identical across native and web builds while
+leaving platform-specific key-location and keypad detection in the frontend
+layers.
 
 With flag `1`, Witty emits CSI-u for ambiguous character-key combinations:
 
@@ -165,6 +172,7 @@ flags `1` or `8` request disambiguated keypad reporting.
 
 ```bash
 cargo test -p witty-core kitty_keyboard_protocol --lib
+cargo test -p witty-core keyboard --lib
 cargo test -p witty-app key_encoder_ --bin witty
 cargo test -p witty-web browser_key_input_ --lib
 cargo check --workspace
