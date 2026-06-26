@@ -193,12 +193,53 @@ modifier/keypad/base-layout metadata, and legacy/Kitty encoded byte sequences.
 The most recent browser keydown/keyup report is also stored in
 `window.wittyLastKeyboardProtocolDiagnostic`.
 
+## Current Local Validation
+
+Local validation on 2026-06-26 found:
+
+- Kitty is installed: `kitty 0.46.0`.
+- Neovim is installed: `NVIM v0.12.2`.
+- tmux is installed: `tmux 3.6b`.
+- WezTerm and Ghostty are not installed on this machine, so live comparison
+  against those terminals remains manual/future work.
+
+Automated checks passed:
+
+- `cargo test -p witty-core kitty_keyboard_protocol --lib`
+- `cargo test -p witty-core keyboard --lib`
+- `cargo test -p witty-app key_encoder_ --bin witty`
+- `scripts/run-witty-native-opengl.sh --keyboard-protocol-diagnostics`
+- `cargo run -p witty-app -- --real-tui-smoke nvim-kitty-keyboard`
+- `cargo test -p witty-web browser_key_input_ --lib`
+- `cargo test -p witty-web browser_keyboard_protocol_diagnostics --lib`
+
+The Neovim real-TUI smoke artifact was written to:
+
+```text
+target/real-tui-smoke/nvim-kitty-keyboard.json
+```
+
+Key assertions from that run:
+
+- Neovim enabled Kitty keyboard flags `3`
+  (`DISAMBIGUATE_ESC_CODES | REPORT_EVENT_TYPES`).
+- Witty encoded `Ctrl-I` as `CSI 105;5:1u` while Kitty event reporting was
+  active.
+- Neovim selected the `<C-I>` mapping instead of the `<Tab>` mapping.
+
+This proves Witty's core/native encoder path works for the most important
+Neovim Kitty keyboard compatibility case. Remaining live validation should
+compare Witty's native event metadata against Kitty's emitted bytes for physical
+keyboard details such as keypad keys and sided modifiers.
+
 ## Deferred
 
 - Full layout-aware alternate-key reporting beyond the US physical base map.
 - Less common Kitty functional-key codes such as ISO level shifts beyond
   `AltGraph` and platform-specific media/application keys.
 - Browser-side interactive diagnostic UI; the callable JSON report is in place.
+- Live comparison captures against WezTerm and Ghostty once those terminals are
+  installed locally.
 - Kitty graphics/image protocol.
 
 ## Verification

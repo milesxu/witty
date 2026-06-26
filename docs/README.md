@@ -27,6 +27,7 @@ The helper and desktop entry are documented in:
 
 - `native-opengl-backend-policy.md`
 - `native-opengl-window-startup.md`
+- `native-fullscreen-multimonitor-debug.md`
 - `linux-opengl-desktop-entry.md`
 - `gui-screenshot-regression-harness.md`
 
