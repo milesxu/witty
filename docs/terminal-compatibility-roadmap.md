@@ -2883,6 +2883,14 @@ client surface while preserving the native/browser transport split.
      helper now treats those flags as non-window helper modes too, so terminal
      compatibility runs can be scripted without accidentally launching Witty's
      native window.
+388. `m722-keyboard-protocol-reference-terminal-matrix-helper`
+   - done. Added `scripts/run-keyboard-protocol-live-compare-matrix.sh` to
+     detect installed Kitty, WezTerm, and Ghostty binaries, print a JSON launch
+     plan without opening windows, launch available terminals with per-terminal
+     live-compare runner scripts, pass through selected case ids, and summarize
+     completed, missing-report, failed, or skipped terminal runs. The helper
+     keeps the true byte comparison interactive while making the surrounding
+     reference-terminal workflow repeatable.
 
 ## Non-Goals For This Line
 

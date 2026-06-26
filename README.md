@@ -299,6 +299,14 @@ witty --keyboard-protocol-live-compare-case kitty-disambiguate-ctrl-i
 witty --keyboard-protocol-live-compare-output target/kitty-live.json
 ```
 
+To launch the same guided check inside each installed reference terminal
+without hand-building commands, run:
+
+```text
+scripts/run-keyboard-protocol-live-compare-matrix.sh --print-plan
+scripts/run-keyboard-protocol-live-compare-matrix.sh --terminal kitty --case kitty-disambiguate-ctrl-i
+```
+
 To inspect native `winit` key metadata and Witty's encoded output for live
 key presses, run:
 

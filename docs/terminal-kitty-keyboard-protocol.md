@@ -200,6 +200,17 @@ valid case ids without entering raw input mode. Add one or more
 and add `--keyboard-protocol-live-compare-output <path>` to save the final JSON
 report while still echoing it to stdout.
 
+`scripts/run-keyboard-protocol-live-compare-matrix.sh` wraps this live compare
+command for reference terminal emulators. It detects installed Kitty, WezTerm,
+and Ghostty binaries, writes one runner script and one report path per terminal
+under `target/keyboard-protocol-live-compare`, launches only available
+terminals, and emits a final JSON summary with skipped terminals recorded. Use
+`--print-plan` to inspect the detected terminal matrix without launching GUI
+windows, `--terminal <name>` to limit the run, and `--case <id>` to pass through
+live compare case filters. The real byte comparison remains intentionally
+interactive: a person still presses the prompted keys inside the launched
+terminal window.
+
 `witty --keyboard-protocol-native-diagnostics` opens a minimal native `winit`
 diagnostic window without starting a PTY or Witty renderer. Each key event is
 printed as one JSON line with the native logical key, physical key, location,
