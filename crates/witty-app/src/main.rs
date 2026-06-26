@@ -321,6 +321,9 @@ fn run_main(args: Vec<String>) -> anyhow::Result<()> {
     if options.mode == AppMode::KeyboardProtocolCapture {
         return run_keyboard_protocol_capture();
     }
+    if options.mode == AppMode::KeyboardProtocolNativeDiagnostics {
+        return window::run_keyboard_protocol_native_diagnostics();
+    }
     if options.mode == AppMode::FontList {
         return run_font_list(options.font_list_filter.as_deref());
     }
@@ -566,6 +569,10 @@ impl AppOptions {
                 }
                 "--keyboard-protocol-capture" => {
                     mode = AppMode::KeyboardProtocolCapture;
+                    non_profile_mode_seen = true;
+                }
+                "--keyboard-protocol-native-diagnostics" => {
+                    mode = AppMode::KeyboardProtocolNativeDiagnostics;
                     non_profile_mode_seen = true;
                 }
                 "--font-list" => {
@@ -3142,6 +3149,7 @@ enum AppMode {
     RendererNoSurfaceDiagnostics,
     KeyboardProtocolDiagnostics,
     KeyboardProtocolCapture,
+    KeyboardProtocolNativeDiagnostics,
     FontList,
     WittyrcTemplate,
     WittyrcDefaultPath,
@@ -4448,6 +4456,7 @@ mod tests {
             AppMode::RendererNoSurfaceDiagnostics,
             AppMode::KeyboardProtocolDiagnostics,
             AppMode::KeyboardProtocolCapture,
+            AppMode::KeyboardProtocolNativeDiagnostics,
             AppMode::FontList,
             AppMode::WittyrcTemplate,
             AppMode::WittyrcDefaultPath,
@@ -4577,6 +4586,12 @@ mod tests {
                 .unwrap()
                 .mode,
             AppMode::KeyboardProtocolCapture
+        );
+        assert_eq!(
+            AppOptions::parse(["--keyboard-protocol-native-diagnostics".to_owned()])
+                .unwrap()
+                .mode,
+            AppMode::KeyboardProtocolNativeDiagnostics
         );
         assert_eq!(
             AppOptions::parse(["--font-list".to_owned()]).unwrap().mode,

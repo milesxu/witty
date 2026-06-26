@@ -2829,6 +2829,15 @@ client surface while preserving the native/browser transport split.
      drop. It is also allowlisted in `scripts/run-witty-native-opengl.sh` as a
      non-window helper. Native/browser key-location metadata remains future
      diagnostic work.
+382. `m710-keyboard-protocol-native-event-diagnostics`
+   - done. Added `witty --keyboard-protocol-native-diagnostics`, a minimal
+     native `winit` diagnostics window that does not start a PTY or Witty
+     renderer. It prints one JSON line per key event with native logical key,
+     physical key, `KeyLocation`, modifier state, Witty's resolved
+     modifier/keypad/base-layout metadata, and legacy/Kitty encoded bytes.
+     This gives a direct native-side comparison point for
+     `--keyboard-protocol-capture` output from Kitty, WezTerm, and Ghostty.
+     Browser key-location metadata remains future diagnostic work.
 
 ## Non-Goals For This Line
 

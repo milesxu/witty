@@ -175,16 +175,23 @@ escaped bytes.
 stdin to be a terminal, temporarily switches the terminal to `stty raw -echo`,
 prints the hex and escaped bytes sent by the current terminal for each key
 event, and restores the previous `stty -g` state on exit. Press `Ctrl-C` to
-leave capture mode. This captures terminal-emitted bytes for comparison; it
-does not expose native `winit` or browser key-location metadata yet.
+leave capture mode. This captures terminal-emitted bytes for comparison.
+
+`witty --keyboard-protocol-native-diagnostics` opens a minimal native `winit`
+diagnostic window without starting a PTY or Witty renderer. Each key event is
+printed as one JSON line with the native logical key, physical key, location,
+modifier state, Witty's resolved modifier/keypad/base-layout metadata, and
+legacy/Kitty encoded byte sequences. Use it to compare Witty's native input
+metadata with `--keyboard-protocol-capture` output from Kitty, WezTerm, or
+Ghostty.
 
 ## Deferred
 
 - Full layout-aware alternate-key reporting beyond the US physical base map.
 - Less common Kitty functional-key codes such as ISO level shifts beyond
   `AltGraph` and platform-specific media/application keys.
-- Native/browser key-location metadata in live keyboard protocol diagnostics,
-  so Witty can compare physical-key and modifier-side detection against Kitty,
+- Browser key-location metadata in live keyboard protocol diagnostics, so
+  Witty can compare DOM physical-key and modifier-side detection against Kitty,
   WezTerm, Ghostty, and Neovim behavior.
 - Kitty graphics/image protocol.
 
@@ -204,4 +211,5 @@ Manual live capture:
 
 ```bash
 cargo run -p witty-app -- --keyboard-protocol-capture
+cargo run -p witty-app -- --keyboard-protocol-native-diagnostics
 ```

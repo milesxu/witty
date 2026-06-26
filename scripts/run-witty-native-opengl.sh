@@ -23,10 +23,12 @@ Usage: scripts/run-witty-native-opengl.sh [--print-command] [window args...]
        scripts/run-witty-native-opengl.sh [--print-command] --renderer-backend-info
        scripts/run-witty-native-opengl.sh [--print-command] --keyboard-protocol-diagnostics
        scripts/run-witty-native-opengl.sh [--print-command] --keyboard-protocol-capture
+       scripts/run-witty-native-opengl.sh [--print-command] --keyboard-protocol-native-diagnostics
 
 Runs Witty native window mode with WGPU_BACKEND=gl.
-Helper modes reuse the same binary selection but do not append --window or open
-a native window.
+Helper modes reuse the same binary selection and do not append --window. Most
+helpers are non-window commands; --keyboard-protocol-native-diagnostics opens
+its own minimal diagnostic window.
 
 Options:
   --print-command  Print the selected command instead of launching it.
@@ -68,7 +70,7 @@ witty_args() {
       --wittyrc-check | --wittyrc-effective | \
       --window-config-check | --window-config-effective | --renderer-backend-info | \
       --renderer-no-surface-diagnostics | --keyboard-protocol-diagnostics | \
-      --keyboard-protocol-capture)
+      --keyboard-protocol-capture | --keyboard-protocol-native-diagnostics)
       print_null_args "$@"
       ;;
     *)

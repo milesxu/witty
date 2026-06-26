@@ -285,6 +285,13 @@ run:
 witty --keyboard-protocol-capture
 ```
 
+To inspect native `winit` key metadata and Witty's encoded output for live
+key presses, run:
+
+```text
+witty --keyboard-protocol-native-diagnostics
+```
+
 The session tab strip is hidden by default so it never covers shell output or a
 tmux status line. Set `session-tab-show-single = true` or
 `session-tab-show-multiple = true` to render it, and use

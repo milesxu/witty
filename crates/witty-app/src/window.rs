@@ -1,5 +1,5 @@
 use std::{
-    io::ErrorKind,
+    io::{self, ErrorKind, Write as _},
     path::{Path, PathBuf},
     process,
     sync::{
@@ -32,13 +32,9 @@ use witty_core::{
     TerminalKey as CoreTerminalKey, TerminalKeyEventType as CoreTerminalKeyEventType,
     TerminalKeyInput as CoreTerminalKeyInput, TerminalKeyModifiers as CoreTerminalKeyModifiers,
     TerminalKeypadKey as CoreTerminalKeypadKey, TerminalModifierKey as CoreTerminalModifierKey,
-    TerminalMouseEvent, TerminalNamedKey,
-};
-#[cfg(test)]
-use witty_core::{
-    KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES, KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES,
-    KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS, KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT,
-    KITTY_KEYBOARD_REPORT_EVENT_TYPES,
+    TerminalMouseEvent, TerminalNamedKey, KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+    KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES, KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS,
+    KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT, KITTY_KEYBOARD_REPORT_EVENT_TYPES,
 };
 use witty_launcher::open_external_url;
 use witty_plugin_api::{CommandRegistration, PluginAction, PluginEvent};
@@ -141,6 +137,13 @@ pub struct WindowSmokeOptions {
 #[derive(Debug)]
 enum NativeWindowEvent {
     BackgroundImageReady,
+}
+
+#[derive(Debug, Default)]
+struct KeyboardProtocolNativeDiagnosticsApp {
+    window_id: Option<WindowId>,
+    modifiers: Modifiers,
+    next_event_index: usize,
 }
 
 #[derive(Debug)]
@@ -2486,6 +2489,19 @@ pub fn run(
     if let Some(error) = app.fatal_startup_error.take() {
         bail!("{error}");
     }
+    Ok(())
+}
+
+pub fn run_keyboard_protocol_native_diagnostics() -> anyhow::Result<()> {
+    eprintln!("Witty native keyboard protocol diagnostics");
+    eprintln!("Focus the diagnostic window and press keys to print JSON events.");
+    eprintln!("Close the diagnostic window to exit.");
+
+    let event_loop = EventLoop::new()?;
+    let mut app = KeyboardProtocolNativeDiagnosticsApp::default();
+    event_loop
+        .run_app(&mut app)
+        .context("run keyboard protocol native diagnostics event loop")?;
     Ok(())
 }
 
@@ -7114,6 +7130,62 @@ impl TerminalWindowApp {
         }
 
         false
+    }
+}
+
+impl ApplicationHandler for KeyboardProtocolNativeDiagnosticsApp {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window_id.is_some() {
+            return;
+        }
+
+        let attrs = witty_window_identity_attributes(
+            Window::default_attributes()
+                .with_title("Witty Keyboard Protocol Native Diagnostics")
+                .with_inner_size(LogicalSize::new(720.0, 240.0)),
+        );
+        let window = match event_loop.create_window(attrs) {
+            Ok(window) => window,
+            Err(err) => {
+                eprintln!("failed to create keyboard diagnostics window: {err:#}");
+                event_loop.exit();
+                return;
+            }
+        };
+        window.set_ime_allowed(true);
+        window.set_ime_purpose(ImePurpose::Terminal);
+        self.window_id = Some(window.id());
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        if Some(window_id) != self.window_id {
+            return;
+        }
+
+        match event {
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers;
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                self.next_event_index = self.next_event_index.saturating_add(1);
+                println!(
+                    "{}",
+                    keyboard_protocol_native_diagnostic_json_line(
+                        self.next_event_index,
+                        &event,
+                        self.modifiers.state()
+                    )
+                );
+                let _ = io::stdout().flush();
+            }
+            _ => {}
+        }
     }
 }
 
@@ -12229,24 +12301,132 @@ fn encode_key_event_input(
     modifiers: ModifiersState,
     modes: TerminalInputModes,
 ) -> Option<Vec<u8>> {
+    encode_terminal_key_input(terminal_key_input_from_winit_event(event, modifiers), modes)
+}
+
+fn terminal_key_input_from_winit_event(
+    event: &KeyEvent,
+    modifiers: ModifiersState,
+) -> TerminalKeyInput<'_> {
     let event_type = TerminalKeyEventType::from_winit(event);
     let modifier_key = modifier_key_from_winit_event(event);
-    encode_terminal_key_input(
-        TerminalKeyInput {
-            logical_key: &event.logical_key,
-            text: event.text.as_deref(),
-            modifiers: TerminalKeyModifiers::from_winit_key_event(
-                modifiers,
-                modifier_key,
-                event_type,
-            ),
-            keypad_key: keypad_key_from_winit_event(event),
-            base_layout_key: base_layout_key_from_winit_event(event),
-            modifier_key,
-            event_type,
+    TerminalKeyInput {
+        logical_key: &event.logical_key,
+        text: event.text.as_deref(),
+        modifiers: TerminalKeyModifiers::from_winit_key_event(modifiers, modifier_key, event_type),
+        keypad_key: keypad_key_from_winit_event(event),
+        base_layout_key: base_layout_key_from_winit_event(event),
+        modifier_key,
+        event_type,
+    }
+}
+
+fn keyboard_protocol_native_diagnostic_json_line(
+    index: usize,
+    event: &KeyEvent,
+    modifiers: ModifiersState,
+) -> String {
+    let input = terminal_key_input_from_winit_event(event, modifiers);
+    let kitty_disambiguate_modes = TerminalInputModes {
+        kitty_keyboard_flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+        ..TerminalInputModes::default()
+    };
+    let kitty_all_feature_modes = TerminalInputModes {
+        kitty_keyboard_flags: KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES
+            | KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS
+            | KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT
+            | KITTY_KEYBOARD_REPORT_EVENT_TYPES,
+        ..TerminalInputModes::default()
+    };
+
+    let line = serde_json::json!({
+        "event": index,
+        "logicalKey": format!("{:?}", event.logical_key),
+        "physicalKey": format!("{:?}", event.physical_key),
+        "location": format!("{:?}", event.location),
+        "state": format!("{:?}", event.state),
+        "repeat": event.repeat,
+        "text": event.text.as_deref(),
+        "modifiers": {
+            "control": modifiers.control_key(),
+            "shift": modifiers.shift_key(),
+            "alt": modifiers.alt_key(),
+            "super": modifiers.super_key(),
         },
-        modes,
-    )
+        "witty": {
+            "eventType": format!("{:?}", input.event_type),
+            "modifiers": terminal_key_modifiers_json(input.modifiers),
+            "modifierKey": debug_option_json(input.modifier_key),
+            "keypadKey": debug_option_json(input.keypad_key),
+            "baseLayoutKey": input.base_layout_key.map(|ch| ch.to_string()),
+        },
+        "encoded": {
+            "legacy": diagnostic_bytes_json(encode_terminal_key_input(
+                input,
+                TerminalInputModes::default(),
+            )),
+            "kittyDisambiguate": diagnostic_bytes_json(encode_terminal_key_input(
+                input,
+                kitty_disambiguate_modes,
+            )),
+            "kittyAllFeatures": diagnostic_bytes_json(encode_terminal_key_input(
+                input,
+                kitty_all_feature_modes,
+            )),
+        },
+    });
+    line.to_string()
+}
+
+fn terminal_key_modifiers_json(modifiers: TerminalKeyModifiers) -> serde_json::Value {
+    serde_json::json!({
+        "control": modifiers.control,
+        "shift": modifiers.shift,
+        "alt": modifiers.alt,
+        "meta": modifiers.meta,
+        "hyper": modifiers.hyper,
+        "kittyMeta": modifiers.kitty_meta,
+    })
+}
+
+fn debug_option_json<T: std::fmt::Debug>(value: Option<T>) -> serde_json::Value {
+    value
+        .map(|value| serde_json::Value::String(format!("{value:?}")))
+        .unwrap_or(serde_json::Value::Null)
+}
+
+fn diagnostic_bytes_json(bytes: Option<Vec<u8>>) -> serde_json::Value {
+    bytes
+        .as_deref()
+        .map(|bytes| {
+            serde_json::json!({
+                "hex": diagnostic_bytes_hex(bytes),
+                "escaped": diagnostic_escaped_bytes(bytes),
+            })
+        })
+        .unwrap_or(serde_json::Value::Null)
+}
+
+fn diagnostic_bytes_hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn diagnostic_escaped_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| match byte {
+            b'\n' => "\\n".to_owned(),
+            b'\r' => "\\r".to_owned(),
+            b'\t' => "\\t".to_owned(),
+            0x1b => "\\x1b".to_owned(),
+            0x20..=0x7e => char::from(*byte).to_string(),
+            _ => format!("\\x{byte:02x}"),
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -17096,6 +17276,15 @@ mod tests {
             ),
             Some(b"\x1b[A".to_vec())
         );
+    }
+
+    #[test]
+    fn keyboard_protocol_native_diagnostics_formats_bytes() {
+        let value = diagnostic_bytes_json(Some(b"\x1b[A\r".to_vec()));
+
+        assert_eq!(value["hex"], "1b 5b 41 0d");
+        assert_eq!(value["escaped"], "\\x1b[A\\r");
+        assert_eq!(diagnostic_bytes_json(None), serde_json::Value::Null);
     }
 
     #[test]
