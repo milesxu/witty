@@ -2838,6 +2838,15 @@ client surface while preserving the native/browser transport split.
      This gives a direct native-side comparison point for
      `--keyboard-protocol-capture` output from Kitty, WezTerm, and Ghostty.
      Browser key-location metadata remains future diagnostic work.
+383. `m712-keyboard-protocol-browser-event-diagnostics`
+   - done. Added a browser/DOM keyboard protocol diagnostic report path.
+     `witty_browser_keyboard_protocol_diagnostic_report_json(...)` exposes DOM
+     `key`/`code`/`location`, Witty's resolved browser
+     modifier/keypad/base-layout metadata, and legacy/Kitty encoded bytes.
+     `app.js` wraps it as `window.wittyKeyboardProtocolDiagnostic(eventOrFields)`
+     and records the latest real browser keydown/keyup report in
+     `window.wittyLastKeyboardProtocolDiagnostic`. A dedicated browser-side
+     interactive UI remains future work.
 
 ## Non-Goals For This Line
 

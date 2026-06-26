@@ -292,6 +292,10 @@ key presses, run:
 witty --keyboard-protocol-native-diagnostics
 ```
 
+The browser build exposes the same metadata style through
+`window.wittyKeyboardProtocolDiagnostic(eventOrFields)` and keeps the latest
+real key report in `window.wittyLastKeyboardProtocolDiagnostic`.
+
 The session tab strip is hidden by default so it never covers shell output or a
 tmux status line. Set `session-tab-show-single = true` or
 `session-tab-show-multiple = true` to render it, and use

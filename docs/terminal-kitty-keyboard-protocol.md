@@ -185,14 +185,20 @@ legacy/Kitty encoded byte sequences. Use it to compare Witty's native input
 metadata with `--keyboard-protocol-capture` output from Kitty, WezTerm, or
 Ghostty.
 
+The browser build exports
+`witty_browser_keyboard_protocol_diagnostic_report_json(...)`, and `app.js`
+wraps it as `window.wittyKeyboardProtocolDiagnostic(eventOrFields)`. The report
+contains DOM `key`/`code`/`location`, Witty's resolved browser
+modifier/keypad/base-layout metadata, and legacy/Kitty encoded byte sequences.
+The most recent browser keydown/keyup report is also stored in
+`window.wittyLastKeyboardProtocolDiagnostic`.
+
 ## Deferred
 
 - Full layout-aware alternate-key reporting beyond the US physical base map.
 - Less common Kitty functional-key codes such as ISO level shifts beyond
   `AltGraph` and platform-specific media/application keys.
-- Browser key-location metadata in live keyboard protocol diagnostics, so
-  Witty can compare DOM physical-key and modifier-side detection against Kitty,
-  WezTerm, Ghostty, and Neovim behavior.
+- Browser-side interactive diagnostic UI; the callable JSON report is in place.
 - Kitty graphics/image protocol.
 
 ## Verification

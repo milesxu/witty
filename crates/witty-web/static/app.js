@@ -1,4 +1,5 @@
 import init, {
+  witty_browser_keyboard_protocol_diagnostic_report_json,
   witty_create_session,
   witty_web_mock_replay_glyph_chars,
   witty_web_session_written_bytes,
@@ -2672,6 +2673,50 @@ async function main() {
     }
   });
 
+  function keyboardModifierMask(event) {
+    return (
+      (event.shiftKey ? 1 : 0) |
+      (event.altKey ? 2 : 0) |
+      (event.metaKey ? 4 : 0)
+    );
+  }
+
+  function keyboardTextForEvent(event) {
+    return event.key.length === 1 && !event.ctrlKey && !event.metaKey ? event.key : "";
+  }
+
+  function keyboardProtocolDiagnosticReport(fields) {
+    const report = JSON.parse(
+      witty_browser_keyboard_protocol_diagnostic_report_json(
+        String(fields.key ?? ""),
+        String(fields.text ?? ""),
+        Boolean(fields.control),
+        String(fields.code ?? ""),
+        Number(fields.location ?? 0),
+        Number(fields.modifierMask ?? 0),
+        Number(fields.eventType ?? 1),
+      ),
+    );
+    window.wittyLastKeyboardProtocolDiagnostic = report;
+    return report;
+  }
+
+  window.wittyKeyboardProtocolDiagnostic = (eventOrFields = {}) => {
+    if (eventOrFields instanceof KeyboardEvent) {
+      const eventType = eventOrFields.type === "keyup" ? 3 : eventOrFields.repeat ? 2 : 1;
+      return keyboardProtocolDiagnosticReport({
+        key: eventOrFields.key,
+        text: eventType === 3 ? "" : keyboardTextForEvent(eventOrFields),
+        control: eventOrFields.ctrlKey,
+        code: eventOrFields.code || "",
+        location: eventOrFields.location || 0,
+        modifierMask: keyboardModifierMask(eventOrFields),
+        eventType,
+      });
+    }
+    return keyboardProtocolDiagnosticReport(eventOrFields);
+  };
+
   function handleTerminalKeydown(event) {
     if (window.wittyImeComposing || event.isComposing || event.key === "Process") {
       event.preventDefault();
@@ -2749,13 +2794,18 @@ async function main() {
       return;
     }
 
-    const text =
-      event.key.length === 1 && !event.ctrlKey && !event.metaKey ? event.key : "";
-    const modifierMask =
-      (event.shiftKey ? 1 : 0) |
-      (event.altKey ? 2 : 0) |
-      (event.metaKey ? 4 : 0);
+    const text = keyboardTextForEvent(event);
+    const modifierMask = keyboardModifierMask(event);
     const eventType = event.repeat ? 2 : 1;
+    keyboardProtocolDiagnosticReport({
+      key: event.key,
+      text,
+      control: event.ctrlKey,
+      code: event.code || "",
+      location: event.location || 0,
+      modifierMask,
+      eventType,
+    });
     const handled = session.handle_key(
       event.key,
       text,
@@ -2796,10 +2846,16 @@ async function main() {
       return;
     }
 
-    const modifierMask =
-      (event.shiftKey ? 1 : 0) |
-      (event.altKey ? 2 : 0) |
-      (event.metaKey ? 4 : 0);
+    const modifierMask = keyboardModifierMask(event);
+    keyboardProtocolDiagnosticReport({
+      key: event.key,
+      text: "",
+      control: event.ctrlKey,
+      code: event.code || "",
+      location: event.location || 0,
+      modifierMask,
+      eventType: 3,
+    });
     const handled = session.handle_key(
       event.key,
       "",

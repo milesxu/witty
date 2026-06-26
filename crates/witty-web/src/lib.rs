@@ -28,9 +28,6 @@ use witty_core::{
     TerminalKeyEventType as CoreTerminalKeyEventType, TerminalKeyInput as CoreTerminalKeyInput,
     TerminalKeyModifiers as CoreTerminalKeyModifiers, TerminalKeypadKey as CoreTerminalKeypadKey,
     TerminalModifierKey as CoreTerminalModifierKey, TerminalNamedKey,
-};
-#[cfg(test)]
-use witty_core::{
     KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES, KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES,
     KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS, KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT,
     KITTY_KEYBOARD_REPORT_EVENT_TYPES,
@@ -273,6 +270,28 @@ pub fn browser_key_input_report(
         control,
         bytes,
     }
+}
+
+pub fn browser_keyboard_protocol_diagnostic_report_json(
+    key: impl Into<String>,
+    text: impl Into<String>,
+    control: bool,
+    code: impl Into<String>,
+    location: u32,
+    modifier_mask: u8,
+    event_type: u8,
+) -> String {
+    let key = key.into();
+    let text = text.into();
+    let code = code.into();
+    browser_keyboard_protocol_diagnostic_json_line(
+        &key,
+        &text,
+        BrowserKeyModifiers::from_browser_mask(control, modifier_mask),
+        &code,
+        location,
+        BrowserKeyEventType::from_browser_event_type(event_type),
+    )
 }
 
 pub fn browser_gateway_smoke_report() -> BrowserGatewaySmokeReport {
@@ -781,6 +800,27 @@ pub fn witty_web_mock_replay_glyph_chars() -> u32 {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub fn witty_web_session_written_bytes() -> u32 {
     browser_session_smoke_report().written_bytes as u32
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub fn witty_browser_keyboard_protocol_diagnostic_report_json(
+    key: String,
+    text: String,
+    control: bool,
+    code: String,
+    location: u32,
+    modifier_mask: u8,
+    event_type: u8,
+) -> String {
+    browser_keyboard_protocol_diagnostic_report_json(
+        key,
+        text,
+        control,
+        code,
+        location,
+        modifier_mask,
+        event_type,
+    )
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2892,19 +2932,133 @@ fn encode_browser_key_input_with_metadata_and_event_type(
     event_type: BrowserKeyEventType,
     modes: TerminalInputModes,
 ) -> Option<Vec<u8>> {
-    let modifier_key = browser_modifier_key_from_event(key, code, location);
     encode_browser_terminal_key_input(
-        BrowserTerminalKeyInput {
-            key,
-            text,
-            modifiers: modifiers.with_modifier_key_event_state(modifier_key, event_type),
-            keypad_key: browser_keypad_key_from_event(key, text, code, location),
-            base_layout_key: browser_base_layout_key_from_code(code),
-            modifier_key,
-            event_type,
-        },
+        browser_terminal_key_input_from_event(key, text, modifiers, code, location, event_type),
         modes,
     )
+}
+
+fn browser_terminal_key_input_from_event<'a>(
+    key: &'a str,
+    text: &'a str,
+    modifiers: BrowserKeyModifiers,
+    code: &'a str,
+    location: u32,
+    event_type: BrowserKeyEventType,
+) -> BrowserTerminalKeyInput<'a> {
+    let modifier_key = browser_modifier_key_from_event(key, code, location);
+    BrowserTerminalKeyInput {
+        key,
+        text,
+        modifiers: modifiers.with_modifier_key_event_state(modifier_key, event_type),
+        keypad_key: browser_keypad_key_from_event(key, text, code, location),
+        base_layout_key: browser_base_layout_key_from_code(code),
+        modifier_key,
+        event_type,
+    }
+}
+
+fn browser_keyboard_protocol_diagnostic_json_line(
+    key: &str,
+    text: &str,
+    modifiers: BrowserKeyModifiers,
+    code: &str,
+    location: u32,
+    event_type: BrowserKeyEventType,
+) -> String {
+    let input =
+        browser_terminal_key_input_from_event(key, text, modifiers, code, location, event_type);
+    let kitty_disambiguate_modes = TerminalInputModes {
+        kitty_keyboard_flags: KITTY_KEYBOARD_DISAMBIGUATE_ESC_CODES,
+        ..TerminalInputModes::default()
+    };
+    let kitty_all_feature_modes = TerminalInputModes {
+        kitty_keyboard_flags: KITTY_KEYBOARD_REPORT_ALL_KEYS_AS_ESC_CODES
+            | KITTY_KEYBOARD_REPORT_ALTERNATE_KEYS
+            | KITTY_KEYBOARD_REPORT_ASSOCIATED_TEXT
+            | KITTY_KEYBOARD_REPORT_EVENT_TYPES,
+        ..TerminalInputModes::default()
+    };
+
+    serde_json::json!({
+        "key": key,
+        "text": text,
+        "code": code,
+        "location": location,
+        "eventType": format!("{:?}", event_type),
+        "inputModifiers": browser_key_modifiers_json(modifiers),
+        "witty": {
+            "modifiers": browser_key_modifiers_json(input.modifiers),
+            "modifierKey": debug_option_json(input.modifier_key),
+            "keypadKey": debug_option_json(input.keypad_key),
+            "baseLayoutKey": input.base_layout_key.map(|ch| ch.to_string()),
+        },
+        "encoded": {
+            "legacy": diagnostic_bytes_json(encode_browser_terminal_key_input(
+                input,
+                TerminalInputModes::default(),
+            )),
+            "kittyDisambiguate": diagnostic_bytes_json(encode_browser_terminal_key_input(
+                input,
+                kitty_disambiguate_modes,
+            )),
+            "kittyAllFeatures": diagnostic_bytes_json(encode_browser_terminal_key_input(
+                input,
+                kitty_all_feature_modes,
+            )),
+        },
+    })
+    .to_string()
+}
+
+fn browser_key_modifiers_json(modifiers: BrowserKeyModifiers) -> serde_json::Value {
+    serde_json::json!({
+        "control": modifiers.control,
+        "shift": modifiers.shift,
+        "alt": modifiers.alt,
+        "meta": modifiers.meta,
+        "hyper": modifiers.hyper,
+    })
+}
+
+fn debug_option_json<T: std::fmt::Debug>(value: Option<T>) -> serde_json::Value {
+    value
+        .map(|value| serde_json::Value::String(format!("{value:?}")))
+        .unwrap_or(serde_json::Value::Null)
+}
+
+fn diagnostic_bytes_json(bytes: Option<Vec<u8>>) -> serde_json::Value {
+    bytes
+        .as_deref()
+        .map(|bytes| {
+            serde_json::json!({
+                "hex": diagnostic_bytes_hex(bytes),
+                "escaped": diagnostic_escaped_bytes(bytes),
+            })
+        })
+        .unwrap_or(serde_json::Value::Null)
+}
+
+fn diagnostic_bytes_hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn diagnostic_escaped_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| match byte {
+            b'\n' => "\\n".to_owned(),
+            b'\r' => "\\r".to_owned(),
+            b'\t' => "\\t".to_owned(),
+            0x1b => "\\x1b".to_owned(),
+            0x20..=0x7e => char::from(*byte).to_string(),
+            _ => format!("\\x{byte:02x}"),
+        })
+        .collect()
 }
 
 #[cfg_attr(not(any(test, target_arch = "wasm32")), allow(dead_code))]
@@ -2917,7 +3071,6 @@ enum BrowserKeyEventType {
 }
 
 impl BrowserKeyEventType {
-    #[cfg(target_arch = "wasm32")]
     fn from_browser_event_type(value: u8) -> Self {
         match value {
             2 => Self::Repeat,
@@ -2937,7 +3090,6 @@ struct BrowserKeyModifiers {
 }
 
 impl BrowserKeyModifiers {
-    #[cfg(any(test, target_arch = "wasm32"))]
     fn from_browser_mask(control: bool, mask: u8) -> Self {
         Self {
             control,
@@ -5915,6 +6067,24 @@ mod tests {
             b"\x1b[A".to_vec()
         );
         assert_eq!(browser_key_input_report("c", "", true).bytes, vec![0x03]);
+    }
+
+    #[test]
+    fn browser_keyboard_protocol_diagnostics_report_key_metadata_and_bytes() {
+        let report = browser_keyboard_protocol_diagnostic_report_json(
+            "1", "1", false, "Numpad1", 3, 0, 1,
+        );
+        let value: serde_json::Value = serde_json::from_str(&report).unwrap();
+
+        assert_eq!(value["key"], "1");
+        assert_eq!(value["code"], "Numpad1");
+        assert_eq!(value["location"], 3);
+        assert_eq!(value["witty"]["keypadKey"], "Digit(1)");
+        assert_eq!(value["encoded"]["legacy"]["hex"], "31");
+        assert_eq!(
+            value["encoded"]["kittyDisambiguate"]["escaped"],
+            "\\x1b[57400u"
+        );
     }
 
     #[test]
