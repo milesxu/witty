@@ -322,6 +322,9 @@ fn run_main(args: Vec<String>) -> anyhow::Result<()> {
     if options.mode == AppMode::KeyboardProtocolCapture {
         return run_keyboard_protocol_capture();
     }
+    if options.mode == AppMode::KeyboardProtocolLiveCompare {
+        return run_keyboard_protocol_live_compare();
+    }
     if options.mode == AppMode::KeyboardProtocolNativeDiagnostics {
         return window::run_keyboard_protocol_native_diagnostics();
     }
@@ -570,6 +573,10 @@ impl AppOptions {
                 }
                 "--keyboard-protocol-capture" => {
                     mode = AppMode::KeyboardProtocolCapture;
+                    non_profile_mode_seen = true;
+                }
+                "--keyboard-protocol-live-compare" => {
+                    mode = AppMode::KeyboardProtocolLiveCompare;
                     non_profile_mode_seen = true;
                 }
                 "--keyboard-protocol-native-diagnostics" => {
@@ -3150,6 +3157,7 @@ enum AppMode {
     RendererNoSurfaceDiagnostics,
     KeyboardProtocolDiagnostics,
     KeyboardProtocolCapture,
+    KeyboardProtocolLiveCompare,
     KeyboardProtocolNativeDiagnostics,
     FontList,
     WittyrcTemplate,
@@ -4060,22 +4068,7 @@ fn keyboard_protocol_pua_key_table_json() -> Vec<serde_json::Value> {
 fn keyboard_protocol_diagnostic_case_json(
     spec: KeyboardProtocolDiagnosticSpec,
 ) -> serde_json::Value {
-    let modes = TerminalInputModes {
-        kitty_keyboard_flags: spec.flags,
-        ..TerminalInputModes::default()
-    };
-    let bytes = encode_terminal_key_input(
-        TerminalKeyInput {
-            key: spec.key,
-            text: spec.text,
-            modifiers: spec.modifiers,
-            keypad_key: spec.keypad_key,
-            base_layout_key: spec.base_layout_key,
-            modifier_key: spec.modifier_key,
-            event_type: spec.event_type,
-        },
-        modes,
-    );
+    let bytes = keyboard_protocol_expected_bytes(spec);
 
     serde_json::json!({
         "id": spec.id,
@@ -4093,6 +4086,25 @@ fn keyboard_protocol_diagnostic_case_json(
         "bytesHex": bytes.as_deref().map(bytes_hex),
         "bytesEscaped": bytes.as_deref().map(escaped_bytes),
     })
+}
+
+fn keyboard_protocol_expected_bytes(spec: KeyboardProtocolDiagnosticSpec) -> Option<Vec<u8>> {
+    let modes = TerminalInputModes {
+        kitty_keyboard_flags: spec.flags,
+        ..TerminalInputModes::default()
+    };
+    encode_terminal_key_input(
+        TerminalKeyInput {
+            key: spec.key,
+            text: spec.text,
+            modifiers: spec.modifiers,
+            keypad_key: spec.keypad_key,
+            base_layout_key: spec.base_layout_key,
+            modifier_key: spec.modifier_key,
+            event_type: spec.event_type,
+        },
+        modes,
+    )
 }
 
 fn keyboard_protocol_flag_names(flags: u16) -> Vec<&'static str> {
@@ -4265,6 +4277,247 @@ fn run_keyboard_protocol_capture() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct KeyboardProtocolLiveCompareSpec {
+    diagnostic_id: &'static str,
+    prompt: &'static str,
+}
+
+const KEYBOARD_PROTOCOL_LIVE_COMPARE_SPECS: &[KeyboardProtocolLiveCompareSpec] = &[
+    KeyboardProtocolLiveCompareSpec {
+        diagnostic_id: "legacy-ctrl-i",
+        prompt: "Press Ctrl-I once.",
+    },
+    KeyboardProtocolLiveCompareSpec {
+        diagnostic_id: "kitty-disambiguate-ctrl-i",
+        prompt: "Press Ctrl-I once.",
+    },
+    KeyboardProtocolLiveCompareSpec {
+        diagnostic_id: "kitty-event-ctrl-i",
+        prompt: "Press and hold Ctrl-I until the next prompt appears, then release it.",
+    },
+    KeyboardProtocolLiveCompareSpec {
+        diagnostic_id: "kitty-all-ctrl-enter",
+        prompt: "Press Ctrl-Enter once.",
+    },
+];
+
+fn keyboard_protocol_live_compare_specs(
+) -> Vec<(KeyboardProtocolDiagnosticSpec, KeyboardProtocolLiveCompareSpec)> {
+    let diagnostic_specs = keyboard_protocol_diagnostic_specs();
+    KEYBOARD_PROTOCOL_LIVE_COMPARE_SPECS
+        .iter()
+        .copied()
+        .map(|live_spec| {
+            let spec = diagnostic_specs
+                .iter()
+                .copied()
+                .find(|spec| spec.id == live_spec.diagnostic_id)
+                .unwrap_or_else(|| {
+                    panic!("missing keyboard protocol diagnostic case {}", live_spec.diagnostic_id)
+                });
+            (spec, live_spec)
+        })
+        .collect()
+}
+
+fn run_keyboard_protocol_live_compare() -> anyhow::Result<()> {
+    if !io::stdin().is_terminal() {
+        bail!("--keyboard-protocol-live-compare requires stdin to be a terminal");
+    }
+    if !io::stderr().is_terminal() {
+        bail!("--keyboard-protocol-live-compare requires stderr to be a terminal");
+    }
+
+    let report = {
+        let _raw_mode = SttyRawMode::enter()?;
+        run_keyboard_protocol_live_compare_interactive()?
+    };
+    let mut text = serde_json::to_string_pretty(&report)?;
+    text.push('\n');
+    print!("{text}");
+    Ok(())
+}
+
+fn run_keyboard_protocol_live_compare_interactive() -> anyhow::Result<serde_json::Value> {
+    let live_specs = keyboard_protocol_live_compare_specs();
+    let mut stdin = io::stdin();
+    let mut stderr = io::stderr();
+    let mut cases = Vec::new();
+    let mut canceled = false;
+
+    write!(
+        stderr,
+        "\r\nWitty keyboard protocol live compare\r\n\
+         This temporarily sends Kitty keyboard-mode push/pop controls to the current terminal.\r\n\
+         JSON output is printed to stdout after raw mode is restored.\r\n\
+         Press Ctrl-C to stop early.\r\n"
+    )?;
+    stderr.flush()?;
+
+    let _ = drain_keyboard_protocol_pending_input(&mut stdin)?;
+    for (index, (spec, live_spec)) in live_specs.iter().copied().enumerate() {
+        let case_number = index + 1;
+        let expected = keyboard_protocol_expected_bytes(spec)
+            .expect("live compare cases must have expected bytes");
+        write!(
+            stderr,
+            "\r\nCase {case_number}/{}: {}\r\n\
+             Flags: {} ({})\r\n\
+             Expected: {}\r\n\
+             Action: {}\r\n",
+            live_specs.len(),
+            spec.description,
+            spec.flags,
+            keyboard_protocol_flag_names(spec.flags).join("|"),
+            escaped_bytes(&expected),
+            live_spec.prompt
+        )?;
+        stderr.flush()?;
+
+        let mut flags_guard = KittyKeyboardFlagsGuard::push(spec.flags)?;
+        let actual =
+            read_keyboard_protocol_capture_event(&mut stdin).context("read terminal key event")?;
+        flags_guard.pop()?;
+        let drained = drain_keyboard_protocol_pending_input(&mut stdin)
+            .context("drain terminal key input after live compare case")?;
+        let actual_escaped = escaped_bytes(&actual);
+        let matched = actual == expected;
+        if matched {
+            write!(stderr, "Captured: {actual_escaped} (matched)\r\n")?;
+        } else {
+            write!(stderr, "Captured: {actual_escaped} (mismatch)\r\n")?;
+        }
+        if !drained.is_empty() {
+            write!(
+                stderr,
+                "Drained after case: {}\r\n",
+                escaped_bytes(&drained)
+            )?;
+        }
+        stderr.flush()?;
+
+        let case_canceled = actual.contains(&0x03);
+        cases.push(keyboard_protocol_live_compare_case_json(
+            case_number,
+            spec,
+            live_spec.prompt,
+            &actual,
+            &drained,
+        ));
+        if case_canceled {
+            canceled = true;
+            break;
+        }
+    }
+
+    let all_matched = !canceled
+        && cases
+            .iter()
+            .all(|case| case["matched"].as_bool().unwrap_or(false));
+    write!(
+        stderr,
+        "\r\nLive compare complete. Restoring terminal mode and printing JSON.\r\n"
+    )?;
+    stderr.flush()?;
+
+    Ok(serde_json::json!({
+        "diagnostic": "keyboard-protocol-live-compare",
+        "version": env!("CARGO_PKG_VERSION"),
+        "opensWindow": false,
+        "startsPty": false,
+        "interactive": true,
+        "terminal": keyboard_protocol_live_compare_terminal_json(),
+        "canceled": canceled,
+        "allMatched": all_matched,
+        "cases": cases,
+    }))
+}
+
+fn keyboard_protocol_live_compare_terminal_json() -> serde_json::Value {
+    serde_json::json!({
+        "TERM": env::var("TERM").ok(),
+        "COLORTERM": env::var("COLORTERM").ok(),
+        "TERM_PROGRAM": env::var("TERM_PROGRAM").ok(),
+        "WT_SESSION": env::var("WT_SESSION").ok(),
+    })
+}
+
+fn keyboard_protocol_live_compare_case_json(
+    index: usize,
+    spec: KeyboardProtocolDiagnosticSpec,
+    prompt: &'static str,
+    actual: &[u8],
+    drained: &[u8],
+) -> serde_json::Value {
+    let expected = keyboard_protocol_expected_bytes(spec);
+    let matched = expected
+        .as_deref()
+        .is_some_and(|expected| expected == actual);
+    serde_json::json!({
+        "index": index,
+        "id": spec.id,
+        "description": spec.description,
+        "prompt": prompt,
+        "flags": spec.flags,
+        "flagNames": keyboard_protocol_flag_names(spec.flags),
+        "key": keyboard_protocol_key_label(spec.key),
+        "text": spec.text,
+        "modifiers": keyboard_protocol_modifier_names(spec.modifiers),
+        "keypadKey": spec.keypad_key.map(keyboard_protocol_keypad_label),
+        "baseLayoutKey": spec.base_layout_key.map(|ch| ch.to_string()),
+        "modifierKey": spec.modifier_key.map(keyboard_protocol_modifier_key_label),
+        "eventType": keyboard_protocol_event_type_label(spec.event_type),
+        "expectedSuppressed": expected.is_none(),
+        "expectedBytesHex": expected.as_deref().map(bytes_hex),
+        "expectedBytesEscaped": expected.as_deref().map(escaped_bytes),
+        "actualBytesHex": bytes_hex(actual),
+        "actualBytesEscaped": escaped_bytes(actual),
+        "drainedBytesHex": bytes_hex(drained),
+        "drainedBytesEscaped": escaped_bytes(drained),
+        "matched": matched,
+        "canceled": actual.contains(&0x03),
+    })
+}
+
+struct KittyKeyboardFlagsGuard {
+    active: bool,
+}
+
+impl KittyKeyboardFlagsGuard {
+    fn push(flags: u16) -> io::Result<Self> {
+        let mut stderr = io::stderr();
+        write!(stderr, "{}", kitty_keyboard_push_flags_sequence(flags))?;
+        stderr.flush()?;
+        Ok(Self { active: true })
+    }
+
+    fn pop(&mut self) -> io::Result<()> {
+        if !self.active {
+            return Ok(());
+        }
+        let mut stderr = io::stderr();
+        write!(stderr, "{}", kitty_keyboard_pop_flags_sequence())?;
+        stderr.flush()?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for KittyKeyboardFlagsGuard {
+    fn drop(&mut self) {
+        let _ = self.pop();
+    }
+}
+
+fn kitty_keyboard_push_flags_sequence(flags: u16) -> String {
+    format!("\x1b[>{flags}u")
+}
+
+fn kitty_keyboard_pop_flags_sequence() -> &'static str {
+    "\x1b[<u"
+}
+
 struct SttyRawMode {
     saved_state: String,
 }
@@ -4343,6 +4596,24 @@ fn read_keyboard_protocol_capture_event(reader: &mut impl io::Read) -> io::Resul
             Err(err) => return Err(err),
         }
     }
+}
+
+fn drain_keyboard_protocol_pending_input(reader: &mut impl io::Read) -> io::Result<Vec<u8>> {
+    let mut drained = Vec::new();
+    let mut buf = [0u8; 64];
+    let mut empty_reads = 0usize;
+    while empty_reads < 2 {
+        match reader.read(&mut buf) {
+            Ok(0) => empty_reads += 1,
+            Ok(n) => {
+                drained.extend_from_slice(&buf[..n]);
+                empty_reads = 0;
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(drained)
 }
 
 fn keyboard_protocol_capture_event_line(index: usize, bytes: &[u8]) -> String {
@@ -4549,6 +4820,7 @@ mod tests {
             AppMode::RendererNoSurfaceDiagnostics,
             AppMode::KeyboardProtocolDiagnostics,
             AppMode::KeyboardProtocolCapture,
+            AppMode::KeyboardProtocolLiveCompare,
             AppMode::KeyboardProtocolNativeDiagnostics,
             AppMode::FontList,
             AppMode::WittyrcTemplate,
@@ -4679,6 +4951,12 @@ mod tests {
                 .unwrap()
                 .mode,
             AppMode::KeyboardProtocolCapture
+        );
+        assert_eq!(
+            AppOptions::parse(["--keyboard-protocol-live-compare".to_owned()])
+                .unwrap()
+                .mode,
+            AppMode::KeyboardProtocolLiveCompare
         );
         assert_eq!(
             AppOptions::parse(["--keyboard-protocol-native-diagnostics".to_owned()])
@@ -8493,6 +8771,55 @@ Host prod
             keyboard_protocol_capture_event_line(7, &bytes),
             "event 7: bytesHex=1b 5b 41 bytesEscaped=\\x1b[A"
         );
+    }
+
+    #[test]
+    fn keyboard_protocol_live_compare_cases_are_practical_subset() {
+        let live_specs = keyboard_protocol_live_compare_specs();
+        let ids = live_specs
+            .iter()
+            .map(|(spec, _)| spec.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ids,
+            vec![
+                "legacy-ctrl-i",
+                "kitty-disambiguate-ctrl-i",
+                "kitty-event-ctrl-i",
+                "kitty-all-ctrl-enter",
+            ]
+        );
+        assert!(live_specs
+            .iter()
+            .all(|(spec, _)| keyboard_protocol_expected_bytes(*spec).is_some()));
+    }
+
+    #[test]
+    fn keyboard_protocol_live_compare_formats_match_rows() {
+        let (spec, live_spec) = keyboard_protocol_live_compare_specs()
+            .into_iter()
+            .find(|(spec, _)| spec.id == "kitty-disambiguate-ctrl-i")
+            .unwrap();
+        let expected = keyboard_protocol_expected_bytes(spec).unwrap();
+        let matched =
+            keyboard_protocol_live_compare_case_json(2, spec, live_spec.prompt, &expected, &[]);
+        let mismatched =
+            keyboard_protocol_live_compare_case_json(2, spec, live_spec.prompt, b"\t", b"");
+
+        assert_eq!(matched["expectedBytesEscaped"], "\\x1b[105;5u");
+        assert_eq!(matched["actualBytesEscaped"], "\\x1b[105;5u");
+        assert_eq!(matched["matched"], true);
+        assert_eq!(matched["drainedBytesHex"], "");
+        assert_eq!(mismatched["actualBytesEscaped"], "\\t");
+        assert_eq!(mismatched["matched"], false);
+    }
+
+    #[test]
+    fn kitty_keyboard_mode_control_sequences_are_stable() {
+        assert_eq!(kitty_keyboard_push_flags_sequence(0), "\x1b[>0u");
+        assert_eq!(kitty_keyboard_push_flags_sequence(3), "\x1b[>3u");
+        assert_eq!(kitty_keyboard_pop_flags_sequence(), "\x1b[<u");
     }
 
     #[test]

@@ -186,6 +186,14 @@ prints the hex and escaped bytes sent by the current terminal for each key
 event, and restores the previous `stty -g` state on exit. Press `Ctrl-C` to
 leave capture mode. This captures terminal-emitted bytes for comparison.
 
+`witty --keyboard-protocol-live-compare` is the guided live comparison tool. It
+requires terminal stdin and stderr, temporarily switches to raw input, sends
+Kitty keyboard `CSI > flags u` / `CSI < u` push-pop controls around each case,
+prompts for practical representative keys such as `Ctrl-I` and `Ctrl-Enter`,
+then prints a JSON report comparing terminal-emitted bytes with Witty's expected
+encoding. Prompts and control bytes go to stderr; the final JSON goes to stdout
+so it can be redirected to a file.
+
 `witty --keyboard-protocol-native-diagnostics` opens a minimal native `winit`
 diagnostic window without starting a PTY or Witty renderer. Each key event is
 printed as one JSON line with the native logical key, physical key, location,
@@ -235,6 +243,7 @@ Automated checks passed:
 - `cargo test -p witty-core keyboard --lib`
 - `cargo test -p witty-app key_encoder_ --bin witty`
 - `scripts/run-witty-native-opengl.sh --keyboard-protocol-diagnostics`
+- `cargo run -p witty-app -- --keyboard-protocol-live-compare`
 - `cargo run -p witty-app -- --real-tui-smoke nvim-kitty-keyboard`
 - `cargo test -p witty-web browser_key_input_ --lib`
 - `cargo test -p witty-web browser_keyboard_protocol_diagnostics --lib`

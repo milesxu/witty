@@ -289,6 +289,13 @@ run:
 witty --keyboard-protocol-capture
 ```
 
+To run the guided live comparison against Witty's expected representative
+encodings in the current terminal, run:
+
+```text
+witty --keyboard-protocol-live-compare
+```
+
 To inspect native `winit` key metadata and Witty's encoded output for live
 key presses, run:
 

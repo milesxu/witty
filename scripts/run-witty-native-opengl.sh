@@ -23,6 +23,7 @@ Usage: scripts/run-witty-native-opengl.sh [--print-command] [window args...]
        scripts/run-witty-native-opengl.sh [--print-command] --renderer-backend-info
        scripts/run-witty-native-opengl.sh [--print-command] --keyboard-protocol-diagnostics
        scripts/run-witty-native-opengl.sh [--print-command] --keyboard-protocol-capture
+       scripts/run-witty-native-opengl.sh [--print-command] --keyboard-protocol-live-compare
        scripts/run-witty-native-opengl.sh [--print-command] --keyboard-protocol-native-diagnostics
 
 Runs Witty native window mode with WGPU_BACKEND=gl.
@@ -70,7 +71,8 @@ witty_args() {
       --wittyrc-check | --wittyrc-effective | \
       --window-config-check | --window-config-effective | --renderer-backend-info | \
       --renderer-no-surface-diagnostics | --keyboard-protocol-diagnostics | \
-      --keyboard-protocol-capture | --keyboard-protocol-native-diagnostics)
+      --keyboard-protocol-capture | --keyboard-protocol-live-compare | \
+      --keyboard-protocol-native-diagnostics)
       print_null_args "$@"
       ;;
     *)

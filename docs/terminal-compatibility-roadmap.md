@@ -2866,6 +2866,15 @@ client surface while preserving the native/browser transport split.
      ISO Level 3 Shift PUA key even when platform metadata also identifies the
      physical key as right Alt, while plain right Alt remains a sided modifier
      key. Browser input now recognizes the DOM `MediaReverse` key value.
+386. `m718-keyboard-protocol-live-compare`
+   - done. Added `witty --keyboard-protocol-live-compare`, a guided non-GUI
+     helper for repeatable live compatibility checks in Kitty/WezTerm/Ghostty-
+     style terminals. The command keeps prompts and Kitty keyboard push-pop
+     controls on stderr, captures terminal-emitted bytes in raw mode for a
+     practical subset of representative cases such as `Ctrl-I` and
+     `Ctrl-Enter`, restores the previous `stty` and keyboard flag state, and
+     writes a JSON report to stdout with expected bytes, actual bytes,
+     drained trailing bytes, and per-case match status.
 
 ## Non-Goals For This Line
 
