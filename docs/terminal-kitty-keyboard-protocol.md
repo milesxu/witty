@@ -194,6 +194,12 @@ then prints a JSON report comparing terminal-emitted bytes with Witty's expected
 encoding. Prompts and control bytes go to stderr; the final JSON goes to stdout
 so it can be redirected to a file.
 
+Use `--keyboard-protocol-live-compare-list` to print the live case manifest and
+valid case ids without entering raw input mode. Add one or more
+`--keyboard-protocol-live-compare-case <id>` options to run only selected cases,
+and add `--keyboard-protocol-live-compare-output <path>` to save the final JSON
+report while still echoing it to stdout.
+
 `witty --keyboard-protocol-native-diagnostics` opens a minimal native `winit`
 diagnostic window without starting a PTY or Witty renderer. Each key event is
 printed as one JSON line with the native logical key, physical key, location,

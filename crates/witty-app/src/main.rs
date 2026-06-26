@@ -323,7 +323,13 @@ fn run_main(args: Vec<String>) -> anyhow::Result<()> {
         return run_keyboard_protocol_capture();
     }
     if options.mode == AppMode::KeyboardProtocolLiveCompare {
-        return run_keyboard_protocol_live_compare();
+        return run_keyboard_protocol_live_compare(
+            &options.keyboard_protocol_live_compare_case_ids,
+            options.keyboard_protocol_live_compare_output.as_deref(),
+        );
+    }
+    if options.mode == AppMode::KeyboardProtocolLiveCompareList {
+        return run_keyboard_protocol_live_compare_list();
     }
     if options.mode == AppMode::KeyboardProtocolNativeDiagnostics {
         return window::run_keyboard_protocol_native_diagnostics();
@@ -408,6 +414,8 @@ struct AppOptions {
     real_tui_smoke_case: Option<String>,
     profile_store: Option<ProfileStoreCliOptions>,
     font_list_filter: Option<String>,
+    keyboard_protocol_live_compare_case_ids: Vec<String>,
+    keyboard_protocol_live_compare_output: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -496,6 +504,10 @@ impl AppOptions {
         let mut real_tui_smoke_case = None;
         let mut profile_store_command = None;
         let mut font_list_filter = None;
+        let mut keyboard_protocol_live_compare_case_ids = Vec::new();
+        let mut keyboard_protocol_live_compare_output = None;
+        let mut keyboard_protocol_live_compare_args_seen = false;
+        let mut keyboard_protocol_live_compare_list_seen = false;
         let mut font_list_args_seen = false;
         let mut profile_store_path = None;
         let mut ssh_profile_json = None;
@@ -576,6 +588,43 @@ impl AppOptions {
                     non_profile_mode_seen = true;
                 }
                 "--keyboard-protocol-live-compare" => {
+                    mode = AppMode::KeyboardProtocolLiveCompare;
+                    non_profile_mode_seen = true;
+                }
+                "--keyboard-protocol-live-compare-list" => {
+                    if keyboard_protocol_live_compare_args_seen {
+                        bail!("--keyboard-protocol-live-compare-list cannot be combined with live compare case/output options");
+                    }
+                    mode = AppMode::KeyboardProtocolLiveCompareList;
+                    keyboard_protocol_live_compare_list_seen = true;
+                    non_profile_mode_seen = true;
+                }
+                "--keyboard-protocol-live-compare-case" => {
+                    if keyboard_protocol_live_compare_list_seen {
+                        bail!("--keyboard-protocol-live-compare-case cannot be combined with --keyboard-protocol-live-compare-list");
+                    }
+                    let Some(value) = args.next() else {
+                        bail!("--keyboard-protocol-live-compare-case requires a case id");
+                    };
+                    keyboard_protocol_live_compare_case_ids
+                        .push(parse_keyboard_protocol_live_compare_case_id(&value)?);
+                    keyboard_protocol_live_compare_args_seen = true;
+                    mode = AppMode::KeyboardProtocolLiveCompare;
+                    non_profile_mode_seen = true;
+                }
+                "--keyboard-protocol-live-compare-output" => {
+                    if keyboard_protocol_live_compare_list_seen {
+                        bail!("--keyboard-protocol-live-compare-output cannot be combined with --keyboard-protocol-live-compare-list");
+                    }
+                    let Some(value) = args.next() else {
+                        bail!("--keyboard-protocol-live-compare-output requires a path");
+                    };
+                    if keyboard_protocol_live_compare_output.is_some() {
+                        bail!("only one --keyboard-protocol-live-compare-output value is allowed");
+                    }
+                    keyboard_protocol_live_compare_output =
+                        Some(parse_keyboard_protocol_live_compare_output_path(&value)?);
+                    keyboard_protocol_live_compare_args_seen = true;
                     mode = AppMode::KeyboardProtocolLiveCompare;
                     non_profile_mode_seen = true;
                 }
@@ -1250,6 +1299,11 @@ impl AppOptions {
         if font_list_args_seen && mode != AppMode::FontList {
             bail!("font list options cannot be combined with other modes");
         }
+        if keyboard_protocol_live_compare_args_seen
+            && mode != AppMode::KeyboardProtocolLiveCompare
+        {
+            bail!("keyboard protocol live compare options require --keyboard-protocol-live-compare");
+        }
         if wittyrc_args_seen
             && !matches!(
                 mode,
@@ -1409,6 +1463,8 @@ impl AppOptions {
             real_tui_smoke_case,
             profile_store,
             font_list_filter,
+            keyboard_protocol_live_compare_case_ids,
+            keyboard_protocol_live_compare_output,
         })
     }
 
@@ -2815,6 +2871,22 @@ fn parse_font_list_filter(value: &str) -> Result<String> {
     Ok(value.to_owned())
 }
 
+fn parse_keyboard_protocol_live_compare_case_id(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("--keyboard-protocol-live-compare-case cannot be empty");
+    }
+    Ok(value.to_owned())
+}
+
+fn parse_keyboard_protocol_live_compare_output_path(value: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(value);
+    if path.as_os_str().is_empty() || path.to_string_lossy().trim().is_empty() {
+        bail!("--keyboard-protocol-live-compare-output cannot be empty");
+    }
+    Ok(path)
+}
+
 fn parse_font_size(value: &str, name: &str) -> Result<u16> {
     let size = value
         .parse::<u16>()
@@ -3158,6 +3230,7 @@ enum AppMode {
     KeyboardProtocolDiagnostics,
     KeyboardProtocolCapture,
     KeyboardProtocolLiveCompare,
+    KeyboardProtocolLiveCompareList,
     KeyboardProtocolNativeDiagnostics,
     FontList,
     WittyrcTemplate,
@@ -4321,7 +4394,100 @@ fn keyboard_protocol_live_compare_specs(
         .collect()
 }
 
-fn run_keyboard_protocol_live_compare() -> anyhow::Result<()> {
+fn selected_keyboard_protocol_live_compare_specs(
+    case_ids: &[String],
+) -> anyhow::Result<Vec<(KeyboardProtocolDiagnosticSpec, KeyboardProtocolLiveCompareSpec)>> {
+    let all_specs = keyboard_protocol_live_compare_specs();
+    if case_ids.is_empty() {
+        return Ok(all_specs);
+    }
+
+    let mut by_id = BTreeMap::new();
+    for spec in all_specs {
+        by_id.insert(spec.0.id, spec);
+    }
+    let valid_ids = by_id.keys().copied().collect::<Vec<_>>().join(", ");
+    let mut seen = BTreeSet::new();
+    let mut selected = Vec::new();
+    for case_id in case_ids {
+        if !seen.insert(case_id.as_str()) {
+            bail!("duplicate keyboard protocol live compare case id: {case_id}");
+        }
+        let Some(spec) = by_id.get(case_id.as_str()).copied() else {
+            bail!("unknown keyboard protocol live compare case id {case_id:?}; valid ids: {valid_ids}");
+        };
+        selected.push(spec);
+    }
+    Ok(selected)
+}
+
+fn run_keyboard_protocol_live_compare_list() -> anyhow::Result<()> {
+    let mut text = serde_json::to_string_pretty(&keyboard_protocol_live_compare_plan_json(&[])?)?;
+    text.push('\n');
+    print!("{text}");
+    Ok(())
+}
+
+fn keyboard_protocol_live_compare_plan_json(
+    case_ids: &[String],
+) -> anyhow::Result<serde_json::Value> {
+    let cases = selected_keyboard_protocol_live_compare_specs(case_ids)?
+        .into_iter()
+        .enumerate()
+        .map(|(index, (spec, live_spec))| {
+            keyboard_protocol_live_compare_plan_case_json(index + 1, spec, live_spec.prompt)
+        })
+        .collect::<Vec<_>>();
+    let valid_case_ids = keyboard_protocol_live_compare_specs()
+        .into_iter()
+        .map(|(spec, _)| spec.id)
+        .collect::<Vec<_>>();
+
+    Ok(serde_json::json!({
+        "diagnostic": "keyboard-protocol-live-compare-plan",
+        "version": env!("CARGO_PKG_VERSION"),
+        "opensWindow": false,
+        "startsPty": false,
+        "interactive": false,
+        "validCaseIds": valid_case_ids,
+        "terminalControls": {
+            "pushFlags": "CSI > flags u",
+            "popFlags": "CSI < u",
+        },
+        "cases": cases,
+    }))
+}
+
+fn keyboard_protocol_live_compare_plan_case_json(
+    index: usize,
+    spec: KeyboardProtocolDiagnosticSpec,
+    prompt: &'static str,
+) -> serde_json::Value {
+    let expected = keyboard_protocol_expected_bytes(spec);
+    serde_json::json!({
+        "index": index,
+        "id": spec.id,
+        "description": spec.description,
+        "prompt": prompt,
+        "flags": spec.flags,
+        "flagNames": keyboard_protocol_flag_names(spec.flags),
+        "key": keyboard_protocol_key_label(spec.key),
+        "text": spec.text,
+        "modifiers": keyboard_protocol_modifier_names(spec.modifiers),
+        "keypadKey": spec.keypad_key.map(keyboard_protocol_keypad_label),
+        "baseLayoutKey": spec.base_layout_key.map(|ch| ch.to_string()),
+        "modifierKey": spec.modifier_key.map(keyboard_protocol_modifier_key_label),
+        "eventType": keyboard_protocol_event_type_label(spec.event_type),
+        "expectedSuppressed": expected.is_none(),
+        "expectedBytesHex": expected.as_deref().map(bytes_hex),
+        "expectedBytesEscaped": expected.as_deref().map(escaped_bytes),
+    })
+}
+
+fn run_keyboard_protocol_live_compare(
+    case_ids: &[String],
+    output_path: Option<&Path>,
+) -> anyhow::Result<()> {
     if !io::stdin().is_terminal() {
         bail!("--keyboard-protocol-live-compare requires stdin to be a terminal");
     }
@@ -4329,18 +4495,32 @@ fn run_keyboard_protocol_live_compare() -> anyhow::Result<()> {
         bail!("--keyboard-protocol-live-compare requires stderr to be a terminal");
     }
 
+    let live_specs = selected_keyboard_protocol_live_compare_specs(case_ids)?;
     let report = {
         let _raw_mode = SttyRawMode::enter()?;
-        run_keyboard_protocol_live_compare_interactive()?
+        run_keyboard_protocol_live_compare_interactive(&live_specs)?
     };
     let mut text = serde_json::to_string_pretty(&report)?;
     text.push('\n');
+    if let Some(path) = output_path {
+        write_keyboard_protocol_live_compare_output(path, &text)?;
+    }
     print!("{text}");
     Ok(())
 }
 
-fn run_keyboard_protocol_live_compare_interactive() -> anyhow::Result<serde_json::Value> {
-    let live_specs = keyboard_protocol_live_compare_specs();
+fn write_keyboard_protocol_live_compare_output(path: &Path, text: &str) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create live compare output dir {}", parent.display()))?;
+    }
+    fs::write(path, text)
+        .with_context(|| format!("write keyboard protocol live compare output {}", path.display()))
+}
+
+fn run_keyboard_protocol_live_compare_interactive(
+    live_specs: &[(KeyboardProtocolDiagnosticSpec, KeyboardProtocolLiveCompareSpec)],
+) -> anyhow::Result<serde_json::Value> {
     let mut stdin = io::stdin();
     let mut stderr = io::stderr();
     let mut cases = Vec::new();
@@ -4794,6 +4974,8 @@ mod tests {
         assert_eq!(options.background_overlay_opacity, None);
         assert!(options.font_paths.is_empty());
         assert!(options.launcher_args.is_empty());
+        assert!(options.keyboard_protocol_live_compare_case_ids.is_empty());
+        assert_eq!(options.keyboard_protocol_live_compare_output, None);
         assert_eq!(
             options.wasm_plugins,
             vec![PathBuf::from("one.wasm"), PathBuf::from("two.wasm")]
@@ -4821,6 +5003,7 @@ mod tests {
             AppMode::KeyboardProtocolDiagnostics,
             AppMode::KeyboardProtocolCapture,
             AppMode::KeyboardProtocolLiveCompare,
+            AppMode::KeyboardProtocolLiveCompareList,
             AppMode::KeyboardProtocolNativeDiagnostics,
             AppMode::FontList,
             AppMode::WittyrcTemplate,
@@ -4957,6 +5140,12 @@ mod tests {
                 .unwrap()
                 .mode,
             AppMode::KeyboardProtocolLiveCompare
+        );
+        assert_eq!(
+            AppOptions::parse(["--keyboard-protocol-live-compare-list".to_owned()])
+                .unwrap()
+                .mode,
+            AppMode::KeyboardProtocolLiveCompareList
         );
         assert_eq!(
             AppOptions::parse(["--keyboard-protocol-native-diagnostics".to_owned()])
@@ -5099,6 +5288,39 @@ mod tests {
             "--font-list-filter".to_owned(),
             "nerd".to_owned(),
             "--window".to_owned(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn app_options_parse_keyboard_protocol_live_compare_options() {
+        let options = AppOptions::parse([
+            "--keyboard-protocol-live-compare-case".to_owned(),
+            "kitty-disambiguate-ctrl-i".to_owned(),
+            "--keyboard-protocol-live-compare-output".to_owned(),
+            "target/live.json".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.mode, AppMode::KeyboardProtocolLiveCompare);
+        assert_eq!(
+            options.keyboard_protocol_live_compare_case_ids,
+            vec!["kitty-disambiguate-ctrl-i".to_owned()]
+        );
+        assert_eq!(
+            options.keyboard_protocol_live_compare_output,
+            Some(PathBuf::from("target/live.json"))
+        );
+        assert!(AppOptions::parse([
+            "--keyboard-protocol-live-compare-list".to_owned(),
+            "--keyboard-protocol-live-compare-output".to_owned(),
+            "target/live.json".to_owned(),
+        ])
+        .is_err());
+        assert!(AppOptions::parse(["--keyboard-protocol-live-compare-case".to_owned()]).is_err());
+        assert!(AppOptions::parse([
+            "--keyboard-protocol-live-compare-output".to_owned(),
+            "".to_owned(),
         ])
         .is_err());
     }
@@ -8793,6 +9015,46 @@ Host prod
         assert!(live_specs
             .iter()
             .all(|(spec, _)| keyboard_protocol_expected_bytes(*spec).is_some()));
+    }
+
+    #[test]
+    fn keyboard_protocol_live_compare_filters_cases() {
+        let selected = selected_keyboard_protocol_live_compare_specs(&[
+            "kitty-all-ctrl-enter".to_owned()
+        ])
+        .unwrap();
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].0.id, "kitty-all-ctrl-enter");
+        assert!(selected_keyboard_protocol_live_compare_specs(&["missing".to_owned()]).is_err());
+        assert!(selected_keyboard_protocol_live_compare_specs(&[
+            "legacy-ctrl-i".to_owned(),
+            "legacy-ctrl-i".to_owned(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn keyboard_protocol_live_compare_plan_reports_prompts_and_expected_bytes() {
+        let report = keyboard_protocol_live_compare_plan_json(&[
+            "kitty-disambiguate-ctrl-i".to_owned()
+        ])
+        .unwrap();
+        let cases = report["cases"].as_array().expect("cases array");
+
+        assert_eq!(report["diagnostic"], "keyboard-protocol-live-compare-plan");
+        assert_eq!(report["opensWindow"], false);
+        assert_eq!(report["startsPty"], false);
+        assert_eq!(report["interactive"], false);
+        assert_eq!(cases.len(), 1);
+        assert_eq!(cases[0]["id"], "kitty-disambiguate-ctrl-i");
+        assert_eq!(cases[0]["expectedBytesEscaped"], "\\x1b[105;5u");
+        assert_eq!(cases[0]["prompt"], "Press Ctrl-I once.");
+        assert!(report["validCaseIds"]
+            .as_array()
+            .expect("valid case id array")
+            .iter()
+            .any(|id| id == "kitty-all-ctrl-enter"));
     }
 
     #[test]

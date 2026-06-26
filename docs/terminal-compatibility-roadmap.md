@@ -2875,6 +2875,14 @@ client surface while preserving the native/browser transport split.
      `Ctrl-Enter`, restores the previous `stty` and keyboard flag state, and
      writes a JSON report to stdout with expected bytes, actual bytes,
      drained trailing bytes, and per-case match status.
+387. `m720-keyboard-protocol-live-compare-usability`
+   - done. Extended the live comparison helper with a non-interactive
+     `--keyboard-protocol-live-compare-list` manifest, repeatable
+     `--keyboard-protocol-live-compare-case <id>` filtering, and
+     `--keyboard-protocol-live-compare-output <path>` result saving. The OpenGL
+     helper now treats those flags as non-window helper modes too, so terminal
+     compatibility runs can be scripted without accidentally launching Witty's
+     native window.
 
 ## Non-Goals For This Line
 

@@ -294,6 +294,9 @@ encodings in the current terminal, run:
 
 ```text
 witty --keyboard-protocol-live-compare
+witty --keyboard-protocol-live-compare-list
+witty --keyboard-protocol-live-compare-case kitty-disambiguate-ctrl-i
+witty --keyboard-protocol-live-compare-output target/kitty-live.json
 ```
 
 To inspect native `winit` key metadata and Witty's encoded output for live
